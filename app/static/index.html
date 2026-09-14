@@ -40,6 +40,20 @@
       </dl>
     </section>
     <div class="notice" id="notice" role="alert" hidden></div>
+    <section class="question-panel" id="questionPanel" hidden>
+      <div class="question-heading">
+        <div>
+          <span class="eyebrow">WAITING FOR YOU</span>
+          <h2>The swarm needs an answer.</h2>
+        </div>
+      </div>
+      <p id="questionText"></p>
+      <form id="answerForm" class="answer-form">
+        <label class="sr-only" for="answerText">Your answer</label>
+        <textarea id="answerText" name="answer" required minlength="1" maxlength="4000" rows="3" placeholder="Type an answer…"></textarea>
+        <button id="answerSend" type="submit">Send answer <span aria-hidden="true">↗</span></button>
+      </form>
+    </section>
     <section class="workspace">
       <div class="map-panel">
         <div class="map-heading"><div class="map-title"><h2>The agent tree</h2><span id="modeLabel" class="mode-tag">STANDBY</span></div><div class="map-stats"><span><b id="agentCount">0</b> agents</span><span><b id="taskCount">0</b> done</span><span><b id="tokenCount">0</b> tokens</span></div></div>

@@ -156,6 +156,7 @@ function render(){
   if(!selected&&state.agents.size)selected=state.agents.keys().next().value;
   renderInspector();
   renderActivity();
+  renderQuestion();
   $("resultPanel").hidden=!mission?.result||state.preview;
   if(mission?.result){
     $("resultTitle").textContent=status==="completed"?"Here’s what the crew delivered.":status==="blocked"?"The mission needs a missing capability.":status==="stopped"?"All execution stopped.":"The mission couldn’t finish.";
@@ -220,6 +221,38 @@ function renderActivity(){
     new Date(e.created_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"})+'</time></li>').join("");
   $("activity").innerHTML=html||'<li class="empty-activity">The mission’s story will appear here.</li>';
 }
+function pendingQuestion(){
+  if(state.preview)return null;
+  const open=state.mission?.pending_question;
+  return open&&open.question_id?open:null;
+}
+function applyQuestionEvent(e){
+  if(!state.mission||state.preview)return;
+  const p=e.payload||{};
+  if(e.event_type==="mission.question"){
+    state.mission.pending_question=p;
+    state.mission.status="waiting";
+  }
+  if(e.event_type==="mission.waiting"&&(p.question_id||p.question||state.mission.pending_question)){
+    state.mission.status="waiting";
+    if(p.question_id&&p.question)state.mission.pending_question={...state.mission.pending_question,...p};
+  }
+  if(e.event_type==="user.answered"){
+    const open=state.mission.pending_question;
+    if(!open||!p.question_id||open.question_id===p.question_id)state.mission.pending_question=null;
+  }
+  if(e.event_type==="mission.running")state.mission.status="running";
+  if(e.event_type.startsWith("mission.")&&terminal.has(e.event_type.split(".")[1]))state.mission.pending_question=null;
+}
+function renderQuestion(){
+  const panel=$("questionPanel");
+  if(!panel)return;
+  const open=pendingQuestion();
+  const live=!!open&&!terminal.has(state.mission?.status||"");
+  panel.hidden=!live;
+  if($("questionText"))$("questionText").textContent=open?.question||"";
+  if($("answerSend"))$("answerSend").disabled=!live;
+}
 async function request(path,options){
   const r=await fetch(path,options);let data;
   try{data=await r.json();}catch{throw Error("The server returned an unreadable response");}
@@ -232,6 +265,8 @@ function disconnect(){
 function reset(mission){
   state=newState(mission);selected=null;elements.clear();$("nodes").replaceChildren();$("activity").replaceChildren();
   $("resultPanel").hidden=true;if($("resultMeta")){$("resultMeta").hidden=true;$("resultMeta").textContent="";}
+  if($("questionPanel"))$("questionPanel").hidden=!mission?.pending_question;
+  if($("answerText"))$("answerText").value="";
   showNotice("");zoom=1;$("zoomValue").textContent="100%";clearAlerts();
   if(hudTick){clearInterval(hudTick);hudTick=null;}
 }
@@ -245,8 +280,15 @@ function connect(id,gen){
     try{
       const e=JSON.parse(message.data);
       if(applyEvent(state,e)){
+        applyQuestionEvent(e);
         schedule();
         considerAlert(e,liveFrom);
+        if(e.event_type==="mission.question"){
+          const created=e.created_at?new Date(e.created_at).getTime():NaN;
+          if(!(Number.isFinite(created)&&created<liveFrom-2000)){
+            pushAlert({level:"warning",title:"Human answer required",detail:(e.payload&&e.payload.question)||"A question is unanswered",event_type:"mission.question"});
+          }
+        }
         if(e.event_type==='agent.message')setTimeout(schedule,9100);
         if(e.event_type.startsWith("mission.")&&terminal.has(e.event_type.split(".")[1]))refreshHistory();
       }
@@ -269,7 +311,7 @@ async function loadMission(id){
     try{
       const events=await request("/api/missions/"+id+"/events");
       if(gen!==generation)return;
-      for(const e of events)applyEvent(state,e);
+      for(const e of events){applyEvent(state,e);applyQuestionEvent(e);}
     }catch{}
     connect(id,gen);schedule();
   }catch(error){showNotice(error.message);}
@@ -314,6 +356,22 @@ $("stopAll").addEventListener("click",async()=>{
   finally{$("stopAll").disabled=false;$("stopAll").innerHTML="<span>■</span> STOP ALL";refreshHistory();}
 });
 $("history").addEventListener("change",()=>{if($("history").value)loadMission($("history").value);});
+$("answerForm").addEventListener("submit",async e=>{
+  e.preventDefault();
+  const open=pendingQuestion(),id=state.mission?.id;
+  if(!open||!id||state.preview)return;
+  const text=($("answerText").value||"").trim();
+  if(!text){showNotice("Answer must not be empty");return;}
+  $("answerSend").disabled=true;
+  try{
+    await request("/api/missions/"+id+"/answers/"+encodeURIComponent(open.question_id),{
+      method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({answer:text})
+    });
+    $("answerText").value="";
+    showNotice("");
+  }catch(error){showNotice(error.message);}
+  finally{$("answerSend").disabled=false;renderQuestion();}
+});
 $("copyResult").addEventListener("click",async()=>{
   try{await navigator.clipboard.writeText($("resultText").textContent);$("copyResult").textContent="Copied";setTimeout(()=>$("copyResult").textContent="Copy result",1500);}
   catch{showNotice("Copy unavailable. Select the result text to copy it.");}
