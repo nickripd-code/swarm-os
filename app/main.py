@@ -14,7 +14,7 @@ from .runtime import PolicyError, SwarmRuntime
 from .store import Store
 from .health import (
     llamacpp_health_status, ollama_health_status, openai_status, openrouter_status,
-    vllm_health_status,
+    vllm_health_status, xai_status,
 )
 from .tools import tools_status
 
@@ -50,6 +50,7 @@ async def index(): return FileResponse(BASE / "static" / "index.html")
 @app.get("/api/health")
 async def health():
     return {"ok": True, "openai": openai_status(), "openrouter": openrouter_status(),
+            "xai": xai_status(),
             "ollama": await ollama_health_status(), "vllm": await vllm_health_status(),
             "llamacpp": await llamacpp_health_status(),
             "tools": tools_status(runtime.tools),
@@ -70,7 +71,7 @@ async def stop_all():
 @app.post("/api/missions", response_model=Mission, status_code=201)
 async def create_mission(request: MissionCreate):
     if not runtime.controller.configured():
-        raise HTTPException(503, "No model provider is configured. Set OPENAI_API_KEY, OPENROUTER_API_KEY, or OLLAMA_MODEL / OLLAMA_BASE_URL on the server before launching.")
+        raise HTTPException(503, "No model provider is configured. Set OPENAI_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY, or OLLAMA_MODEL / OLLAMA_BASE_URL on the server before launching.")
     mission = Mission(goal=request.goal, budget=request.budget, live_payments=request.live_payments, limits=request.limits)
     store.save_mission(mission)
     await runtime.start(mission)

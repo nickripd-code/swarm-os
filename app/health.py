@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import os
-from .credentials import get_api_key, get_openrouter_api_key
+from .credentials import get_api_key, get_openrouter_api_key, get_xai_api_key
 from .llm import (
     DEFAULT_LLAMACPP_BASE_URL, DEFAULT_MODEL, DEFAULT_OLLAMA_BASE_URL, DEFAULT_OPENROUTER_MODEL,
-    DEFAULT_REASONING, DEFAULT_VLLM_BASE_URL, LlamaCppModelProvider, OllamaModelProvider,
-    VllmModelProvider, llamacpp_opted_in, ollama_opted_in, vllm_opted_in,
+    DEFAULT_REASONING, DEFAULT_VLLM_BASE_URL, DEFAULT_XAI_MODEL, DEFAULT_XAI_BASE_URL,
+    LlamaCppModelProvider, OllamaModelProvider, VllmModelProvider,
+    llamacpp_opted_in, ollama_opted_in, vllm_opted_in,
 )
 
 
@@ -19,6 +20,13 @@ def openrouter_status() -> dict:
     return {"configured": bool(get_openrouter_api_key()),
             "model": os.getenv("OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL),
             "provider": "openrouter", "fallback": False}
+
+
+def xai_status() -> dict:
+    return {"configured": bool(get_xai_api_key()),
+            "model": os.getenv("XAI_MODEL", DEFAULT_XAI_MODEL),
+            "base_url": os.getenv("XAI_BASE_URL", DEFAULT_XAI_BASE_URL),
+            "provider": "xai", "fallback": False}
 
 
 def ollama_status() -> dict:
