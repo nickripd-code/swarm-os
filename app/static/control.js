@@ -27,7 +27,7 @@ function renderHud(){
   }
   if($("missionStatus")){
     $("missionStatus").textContent=status.toUpperCase();
-    $("missionStatus").className="hud-chip status "+status+(state.preview?" preview":"");
+    $("missionStatus").className="hud-chip status "+status;
   }
   if($("hudAgents"))$("hudAgents").textContent=state.agents.size;
   if($("hudTasks"))$("hudTasks").textContent=[...state.tasks.values()].filter(t=>t.status==="completed").length;
