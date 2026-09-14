@@ -16,24 +16,41 @@ START_STATE = {"goal": COMPLEX_GOAL, "agents": [], "tasks": []}
 
 
 class ScriptedProvider(FakeModelProvider):
-    def __init__(self, *args, planner_output=None, judge_output=None, error_on=None, **kwargs):
+    def __init__(self, *args, planner_output=None, judge_output=None, error_on=None,
+                 verify_output=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.planner_output = planner_output or self.output
         self.judge_output = judge_output or self.output
         self.error_on = error_on
+        if verify_output is not None:
+            self.verify_output = verify_output
         self.kinds: list[str] = []
         self.inputs: list[object] = []
 
     async def complete(self, request):
         payload = request.input if isinstance(request.input, dict) else {}
-        kind = "judge" if isinstance(payload, dict) and "proposals" in payload else "planner"
+        if isinstance(payload, dict) and "claim" in payload:
+            kind = "verification"
+        elif isinstance(payload, dict) and "proposals" in payload:
+            kind = "judge"
+        else:
+            kind = "planner"
         self.kinds.append(kind)
         self.inputs.append(request.input)
         self.calls += 1
         self.requested_models.append(request.model)
         if self.error is not None and (self.error_on is None or self.error_on == kind):
             raise self.error
-        output = self.judge_output if kind == "judge" else self.planner_output
+        if kind == "verification":
+            output = self.verify_output or {
+                "verdict": "pass",
+                "rationale": "Claim matches the supplied mission artifacts.",
+                "evidence": [str((payload.get("claim") or {}).get("summary") or "")],
+            }
+        elif kind == "judge":
+            output = self.judge_output
+        else:
+            output = self.planner_output
         from app.providers import ModelResponse, ModelUsage
         usage = ModelUsage(input_tokens=1, output_tokens=2)
         self._usage = self._usage.plus(usage)

@@ -17,6 +17,9 @@ from .planning import (
     run_independent_planners, should_use_multi_planner, unique_provider_ids,
 )
 from .router import CapabilityRequest, ModelRouter, capability_request_for, registered_providers
+from .verifier import (
+    VERIFIER_INSTRUCTIONS, local_evidence_check, validate_verification, verification_accepted,
+)
 
 DEFAULT_MODEL = "gpt-6-astra"
 DEFAULT_REASONING = "high"
@@ -165,6 +168,11 @@ WORK_FORMAT = response_format("worker_result", {
     "finding": {"type": "string"},
     "limitations": {"type": "array", "items": {"type": "string"}},
 })
+VERIFICATION_FORMAT = response_format("verification_result", {
+    "verdict": {"type": "string", "enum": ["pass", "fail", "inconclusive"]},
+    "rationale": {"type": "string"},
+    "evidence": {"type": "array", "items": {"type": "string"}},
+})
 
 
 class LLMProvider:
@@ -175,6 +183,14 @@ class LLMProvider:
 
     async def work(self, state: dict[str, Any], agent: dict[str, Any]) -> dict[str, Any]:
         raise NotImplementedError
+
+    async def verify(self, state: dict[str, Any], claim: dict[str, Any]) -> dict[str, Any]:
+        """Finish is not success. Subclasses must run a real check. Never auto-pass."""
+        del state, claim
+        raise ProviderError(
+            "Verification is required and no verifier is configured",
+            FailureClass.VERIFICATION_FAILURE,
+        )
 
 
 class OpenAIResponsesModelProvider(ModelProvider):
@@ -705,6 +721,23 @@ but sufficient to satisfy the delegated purpose. Never replace the work with a g
                                    {"mission": state, "assignment": agent}, WORK_FORMAT,
                                    capability_request_for(kind="work", agent=agent))
 
+    async def verify(self, state: dict[str, Any], claim: dict[str, Any]) -> dict[str, Any]:
+        """Independent ModelRouter check. OpenAI-only still calls a model — never auto-passes."""
+        pretest = local_evidence_check(state, claim)
+        if not verification_accepted(pretest):
+            return pretest
+        capability = capability_request_for(kind="verification")
+        target = None
+        if self.router is not None:
+            route = await self.router.select(capability)
+            if len(unique_provider_ids(route)) > 1 and len(route.chain) > 1:
+                target = route.chain[1]
+        output = await self._request(
+            VERIFIER_INSTRUCTIONS, {"mission": state, "claim": claim},
+            VERIFICATION_FORMAT, capability, target=target,
+        )
+        return validate_verification(output)
+
 
 def build_model_provider(primary: ModelProvider | None = None,
                          secondary: ModelProvider | None = None,
@@ -774,3 +807,7 @@ class FallbackController(LLMProvider):
         if any(a.get("role") != "mission_controller" and a.get("status") in {"created", "running"} for a in state.get("agents", [])):
             return {"action": "wait", "reason": "Allow active agents to complete."}
         return {"action": "finish", "summary": "All planned roles completed."}
+
+    async def verify(self, state: dict[str, Any], claim: dict[str, Any]) -> dict[str, Any]:
+        """Demo-only evidence check. Never a silent production pass."""
+        return local_evidence_check(state, claim)

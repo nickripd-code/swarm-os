@@ -57,7 +57,16 @@ class FakeModelProvider(ModelProvider):
             raise self.error
         usage = ModelUsage(input_tokens=1, output_tokens=2)
         self._usage = self._usage.plus(usage)
-        return ModelResponse(provider=self.provider_id, model=request.model, output=self.output,
+        payload = request.input if isinstance(request.input, dict) else {}
+        if isinstance(payload, dict) and "claim" in payload:
+            output = {
+                "verdict": "pass",
+                "rationale": "Claim matches the supplied mission artifacts.",
+                "evidence": [str((payload.get("claim") or {}).get("summary") or "")],
+            }
+        else:
+            output = self.output
+        return ModelResponse(provider=self.provider_id, model=request.model, output=output,
                              response_id=f"{self.provider_id}-1", usage=usage)
 
 

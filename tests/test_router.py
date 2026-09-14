@@ -19,7 +19,8 @@ REQUEST = ModelRequest(model="unused-default", instructions="Return JSON", input
 class FakeModelProvider(ModelProvider):
     def __init__(self, provider_id: str, model: str, *, configured: bool = True,
                  health: str = "healthy", error: ProviderError | None = None,
-                 output: dict | None = None, capabilities: ModelCapabilities | None = None,
+                 output: dict | None = None, verify_output: dict | None = None,
+                 capabilities: ModelCapabilities | None = None,
                  context_tokens: int | None = None, local: bool = False,
                  price_output_per_million: float | None = None,
                  estimated_cost: float | None = None, cost_known: bool = False):
@@ -29,6 +30,7 @@ class FakeModelProvider(ModelProvider):
         self._health = health
         self.error = error
         self.output = output or {"action": "finish", "summary": f"from {provider_id}"}
+        self.verify_output = verify_output
         self._capabilities = capabilities or ModelCapabilities(structured_outputs=True, tool_use=True)
         self._context_tokens = context_tokens
         self.local = local
@@ -79,7 +81,16 @@ class FakeModelProvider(ModelProvider):
             raise self.error
         usage = ModelUsage(input_tokens=1, output_tokens=2)
         self._usage = self._usage.plus(usage)
-        return ModelResponse(provider=self.provider_id, model=request.model, output=self.output,
+        payload = request.input if isinstance(request.input, dict) else {}
+        if isinstance(payload, dict) and "claim" in payload:
+            output = self.verify_output or {
+                "verdict": "pass",
+                "rationale": "Claim matches the supplied mission artifacts.",
+                "evidence": [str((payload.get("claim") or {}).get("summary") or "")],
+            }
+        else:
+            output = self.output
+        return ModelResponse(provider=self.provider_id, model=request.model, output=output,
                              response_id=f"{self.provider_id}-1", usage=usage)
 
 
@@ -102,6 +113,10 @@ def test_controller_requests_high_reasoning_not_a_model_name():
     assert request.reasoning == "high"
     assert request.coding == "low"
     assert request.tool_use == "none"
+    verification = capability_request_for(kind="verification")
+    assert verification.reasoning == "high"
+    assert verification.coding == "medium"
+    assert verification.tool_use == "none"
 
 
 def test_worker_capabilities_map_to_coding_and_reasoning():

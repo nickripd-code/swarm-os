@@ -15,6 +15,7 @@ from .llm import (
     DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BASE_SECONDS, LLMProvider, build_controller,
     ProviderError, RETRYABLE_FAILURE_CLASSES, retry_delay_seconds,
 )
+from .verifier import public_verification, verification_accepted
 
 TERMINAL = {MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.STOPPED, MissionStatus.BLOCKED}
 RESUMABLE = {MissionStatus.PENDING, MissionStatus.RUNNING, MissionStatus.WAITING}
@@ -337,8 +338,10 @@ class SwarmRuntime:
                             raise PolicyError("Cannot finish while tasks are active", FailureClass.INVALID_OUTPUT)
                         if not decision.get("summary"):
                             raise PolicyError("Model omitted the final deliverable", FailureClass.INVALID_OUTPUT)
-                        mission.result = {"summary": decision["summary"], "mode": self.controller.mode,
-                                          "outputs": [t.output for t in self.tasks[mission.id] if t.output]}
+                        claim = {"summary": decision["summary"], "mode": self.controller.mode,
+                                 "outputs": [t.output for t in self.tasks[mission.id] if t.output]}
+                        await self._verify_finish(mission, root, claim)
+                        mission.result = claim
                         mission.status = MissionStatus.COMPLETED
                         break
                     elif action == "blocked":
@@ -408,6 +411,43 @@ class SwarmRuntime:
                 mission.updated_at = utcnow()
                 self.store.save_mission(mission)
                 await self.emit(mission.id, "mission." + mission.status, mission.result or {})
+
+    async def _verify_finish(self, mission: Mission, root: AgentSpec, claim: dict[str, Any]):
+        """Controller finish is a claim. Complete only after a real verifier accepts it."""
+        await self.emit(mission.id, "verification.started", {
+            "summary": str(claim.get("summary") or "")[:500],
+            "outputs": len(claim.get("outputs") or []),
+        }, root.id)
+        try:
+            result = await self.model_call(
+                mission, root, "verification",
+                lambda: self.controller.verify(self._state(mission), claim),
+            )
+        except (ProviderError, PolicyError) as exc:
+            await self.emit(mission.id, "verification.failed", {
+                "verdict": "inconclusive",
+                "rationale": str(exc),
+                "failure_class": str(exc.failure_class),
+            }, root.id)
+            if isinstance(exc, ProviderError) and exc.failure_class in {
+                FailureClass.INVALID_OUTPUT, FailureClass.VERIFICATION_FAILURE,
+            }:
+                raise PolicyError(
+                    "Verification was inconclusive; the claimed result was not accepted",
+                    FailureClass.VERIFICATION_FAILURE,
+                ) from exc
+            raise
+        public = public_verification(result)
+        if not verification_accepted(public):
+            await self.emit(mission.id, "verification.failed", {
+                **public,
+                "failure_class": str(FailureClass.VERIFICATION_FAILURE),
+            }, root.id)
+            raise PolicyError(
+                public.get("rationale") or "Verification did not accept the claimed result",
+                FailureClass.VERIFICATION_FAILURE,
+            )
+        await self.emit(mission.id, "verification.passed", public, root.id)
 
     def _state(self, mission: Mission) -> dict[str, Any]:
         used = self.tool_calls_used(mission.id)

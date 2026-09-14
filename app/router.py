@@ -65,6 +65,8 @@ def capability_request_for(*, kind: str, agent: dict[str, Any] | None = None) ->
     """Map controller/worker work to a capability request. No model names."""
     if kind == "decision":
         return CapabilityRequest(reasoning="high", coding="low", tool_use="none")
+    if kind == "verification":
+        return CapabilityRequest(reasoning="high", coding="medium", tool_use="none")
     caps = set((agent or {}).get("capabilities") or [])
     reasoning: Literal["none", "low", "medium", "high"]
     coding: Literal["none", "low", "medium", "high"]

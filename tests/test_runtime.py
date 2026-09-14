@@ -6,6 +6,7 @@ from app.runtime import SwarmRuntime, PolicyError
 from app.llm import FallbackController
 from app.llm import LLMProvider, ProviderError, DEFAULT_MAX_RETRIES, retry_delay_seconds
 from app.store import Store
+from app.verifier import local_evidence_check
 
 
 @pytest.fixture(autouse=True)
@@ -94,6 +95,9 @@ class CountingFailProvider(LLMProvider):
         if self.calls <= self.fail_count:
             raise ProviderError(self.message, self.failure_class)
         return {"action": "finish", "summary": "Recovered after retry"}
+
+    async def verify(self, state, claim):
+        return local_evidence_check(state, claim)
 
 
 @pytest.mark.asyncio
@@ -257,6 +261,9 @@ class SpawnWaitFinishProvider(LLMProvider):
     async def work(self, state, agent):
         self.seen_status = state.get("status")
         return {"status": "completed", "finding": "analysis done"}
+
+    async def verify(self, state, claim):
+        return local_evidence_check(state, claim)
 
 
 class WaitOnlyProvider(LLMProvider):
