@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 from .credentials import (
-    get_api_key, get_anthropic_api_key, get_cohere_api_key, get_gemini_api_key,
-    get_mistral_api_key, get_openrouter_api_key, get_xai_api_key,
+    get_api_key, get_anthropic_api_key, get_cohere_api_key, get_deepseek_api_key,
+    get_gemini_api_key, get_mistral_api_key, get_openrouter_api_key, get_xai_api_key,
 )
 from .llm import (
     DEFAULT_ANTHROPIC_BASE_URL, DEFAULT_ANTHROPIC_MODEL, DEFAULT_COHERE_BASE_URL,
-    DEFAULT_COHERE_MODEL, DEFAULT_GEMINI_BASE_URL, DEFAULT_GEMINI_MODEL,
+    DEFAULT_COHERE_MODEL, DEFAULT_DEEPSEEK_BASE_URL, DEFAULT_DEEPSEEK_MODEL,
+    DEFAULT_GEMINI_BASE_URL, DEFAULT_GEMINI_MODEL,
     DEFAULT_LLAMACPP_BASE_URL, DEFAULT_MODEL,
     DEFAULT_MISTRAL_BASE_URL, DEFAULT_MISTRAL_MODEL, DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_OPENROUTER_MODEL, DEFAULT_REASONING, DEFAULT_VLLM_BASE_URL,
@@ -62,6 +63,13 @@ def cohere_status() -> dict:
             "model": os.getenv("COHERE_MODEL", DEFAULT_COHERE_MODEL),
             "base_url": os.getenv("COHERE_BASE_URL", DEFAULT_COHERE_BASE_URL),
             "provider": "cohere", "fallback": False}
+
+
+def deepseek_status() -> dict:
+    return {"configured": bool(get_deepseek_api_key()),
+            "model": os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL),
+            "base_url": os.getenv("DEEPSEEK_BASE_URL", DEFAULT_DEEPSEEK_BASE_URL),
+            "provider": "deepseek", "fallback": False}
 
 
 def ollama_status() -> dict:

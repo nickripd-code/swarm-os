@@ -68,6 +68,9 @@ def no_local_env(monkeypatch):
     monkeypatch.delenv("COHERE_API_KEY", raising=False)
     monkeypatch.delenv("COHERE_MODEL", raising=False)
     monkeypatch.delenv("COHERE_BASE_URL", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
+    monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
 
 
 @pytest.mark.asyncio
