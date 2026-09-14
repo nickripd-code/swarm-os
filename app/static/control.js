@@ -186,7 +186,9 @@ function describe(e){
   switch(e.event_type){
     case "agent.message":return '<b>'+esc(label(state.agents.get(p.from_id)?.role))+'</b> → '+esc(label(state.agents.get(p.to_id)?.role))+' · '+esc(p.kind);
     case "agent.spawned":return "<b>"+esc(label(p.role))+"</b> joined the crew";
-    case "controller.decision":return "<b>Controller</b> · "+esc(p.action==="spawn"?"delegated to "+label(p.role):p.action==="finish"?"assembled the final answer":p.reason||p.action);
+    case "controller.decision":return "<b>Controller</b> · "+esc(p.action==="spawn"?"delegated to "+label(p.role):p.action==="finish"?"assembled the final answer":p.action==="ask"?"asked the user a question":p.reason||p.action);
+    case "mission.question":return "<b>Waiting for you</b> · "+esc(p.question||"A question is unanswered");
+    case "user.answered":return "<b>Answer received</b> · "+esc(p.question||p.question_id||"question");
     case "llm.started":return "<b>"+esc(name)+"</b> is "+(p.kind==="decision"?"deciding the next move":p.kind==="verification"?"verifying the claimed result":"working");
     case "llm.completed":return "<b>"+esc(name)+"</b> · "+((p.input_tokens||0)+(p.output_tokens||0)).toLocaleString()+" tokens";
     case "verification.started":return "<b>Verifier</b> is checking the claimed result";

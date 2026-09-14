@@ -76,6 +76,19 @@ class MissionCreate(BaseModel):
     limits: MissionLimits = Field(default_factory=MissionLimits)
 
 
+class PendingQuestion(BaseModel):
+    question_id: str
+    question: str
+    reason: str | None = None
+
+
+class MissionAnswer(BaseModel):
+    question_id: str
+    question: str
+    answer: str
+    answered_at: datetime = Field(default_factory=utcnow)
+
+
 class Mission(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     goal: str
@@ -87,6 +100,8 @@ class Mission(BaseModel):
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     result: dict[str, Any] | None = None
+    pending_question: PendingQuestion | None = None
+    answers: list[MissionAnswer] = Field(default_factory=list)
 
 
 class AgentSpec(BaseModel):
