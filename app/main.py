@@ -13,8 +13,9 @@ from .models import AnswerRequest, Mission, MissionCreate, PaymentIntent
 from .runtime import PolicyError, SwarmRuntime
 from .store import Store
 from .health import (
-    anthropic_status, cohere_status, deepseek_status, gemini_status, llamacpp_health_status, mistral_status,
-    ollama_health_status, openai_status, openrouter_status, together_status,
+    anthropic_status, cohere_status, deepseek_status, gemini_status, groq_status,
+    llamacpp_health_status, mistral_status, ollama_health_status, openai_status,
+    openrouter_status, together_status,
     vllm_health_status, xai_status,
 )
 from .tools import tools_status
@@ -54,6 +55,7 @@ async def health():
             "xai": xai_status(), "anthropic": anthropic_status(),
             "mistral": mistral_status(), "gemini": gemini_status(), "cohere": cohere_status(),
             "deepseek": deepseek_status(), "together": together_status(),
+            "groq": groq_status(),
             "ollama": await ollama_health_status(), "vllm": await vllm_health_status(),
             "llamacpp": await llamacpp_health_status(),
             "tools": tools_status(runtime.tools),
@@ -74,7 +76,7 @@ async def stop_all():
 @app.post("/api/missions", response_model=Mission, status_code=201)
 async def create_mission(request: MissionCreate):
     if not runtime.controller.configured():
-        raise HTTPException(503, "No model provider is configured. Set OPENAI_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY, ANTHROPIC_API_KEY, MISTRAL_API_KEY, GEMINI_API_KEY, COHERE_API_KEY, DEEPSEEK_API_KEY, TOGETHER_API_KEY, or OLLAMA_MODEL / OLLAMA_BASE_URL on the server before launching.")
+        raise HTTPException(503, "No model provider is configured. Set OPENAI_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY, ANTHROPIC_API_KEY, MISTRAL_API_KEY, GEMINI_API_KEY, COHERE_API_KEY, DEEPSEEK_API_KEY, TOGETHER_API_KEY, GROQ_API_KEY, or OLLAMA_MODEL / OLLAMA_BASE_URL on the server before launching.")
     mission = Mission(goal=request.goal, budget=request.budget, live_payments=request.live_payments,
                       privacy=request.privacy, limits=request.limits)
     store.save_mission(mission)
