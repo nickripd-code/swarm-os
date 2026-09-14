@@ -82,6 +82,7 @@ def scripted_ollama(**kwargs) -> ScriptedProvider:
 
 def test_ask_is_a_valid_controller_action():
     assert "ask" in VALID_ACTIONS
+    assert {"replace", "reparent", "retire"} <= VALID_ACTIONS
     assert validate_decision({"action": "ask", "question": "What is the target name?"})["action"] == "ask"
     with pytest.raises(ProviderError) as exc:
         validate_decision({"action": "invent"})

@@ -15,6 +15,8 @@ class EventType(StrEnum):
     AGENT_SPAWNED = "agent.spawned"
     AGENT_UPDATED = "agent.updated"
     AGENT_MESSAGE = "agent.message"
+    AGENT_REPARENTED = "agent.reparented"
+    AGENT_RETIRED = "agent.retired"
 
     TASK_PENDING = "task.pending"
     TASK_STARTED = "task.started"
@@ -43,6 +45,7 @@ class EventType(StrEnum):
     CONTROLLER_DECISION = "controller.decision"
     PLANNER_PROPOSAL = "planner.proposal"
     JUDGE_DECISION = "judge.decision"
+    ORG_CHANGED = "org.changed"
 
     TOOL_STARTED = "tool.started"
     TOOL_COMPLETED = "tool.completed"

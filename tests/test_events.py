@@ -27,6 +27,8 @@ UI_EVENT_TYPES = {
     "agent.spawned",
     "agent.updated",
     "agent.message",
+    "agent.reparented",
+    "agent.retired",
     "task.pending",
     "task.started",
     "task.completed",
@@ -51,6 +53,7 @@ UI_EVENT_TYPES = {
     "controller.decision",
     "planner.proposal",
     "judge.decision",
+    "org.changed",
     "tool.started",
     "tool.completed",
     "tool.failed",
@@ -84,6 +87,9 @@ def test_event_type_values_match_historical_ui_strings():
     assert EventType.LEASE_RELEASED == "lease.released"
     assert EventType.BUDGET_UPDATED == "budget.updated"
     assert EventType.BUDGET_WARNING == "budget.warning"
+    assert EventType.ORG_CHANGED == "org.changed"
+    assert EventType.AGENT_REPARENTED == "agent.reparented"
+    assert EventType.AGENT_RETIRED == "agent.retired"
     assert "controller.fallback" not in KNOWN_EVENT_TYPES
     assert FORBIDDEN_EVENT_TYPES == {"controller.fallback"}
 
@@ -142,19 +148,26 @@ def test_store_append_rejects_unknown_and_writes_canonical_string(tmp_path):
     with pytest.raises(UnknownEventType):
         store.append(MissionEvent(mission_id=mission_id, event_type="controller.fallback", payload={}))
     with pytest.raises(UnknownEventType):
-        store.append(MissionEvent(mission_id=mission_id, event_type="org.changed", payload={}))
+        store.append(MissionEvent(mission_id=mission_id, event_type="org.invented", payload={}))
     assert store.events(mission_id) == []
 
     written = store.append(MissionEvent(
+        mission_id=mission_id, event_type=EventType.ORG_CHANGED,
+        payload={"op": "spawn", "topology": []},
+    ))
+    assert written.event_type == "org.changed"
+    assert isinstance(written.event_type, str)
+    dumped = written.model_dump(mode="json")
+    assert dumped["event_type"] == "org.changed"
+    assert dumped["payload"] == {"op": "spawn", "topology": []}
+    assert "schema_version" not in dumped
+
+    failed = store.append(MissionEvent(
         mission_id=mission_id, event_type=EventType.MISSION_FAILED,
         payload={"error": "no", "failure_class": "PROVIDER_OUTAGE"},
     ))
-    assert written.event_type == "mission.failed"
-    assert isinstance(written.event_type, str)
-    dumped = written.model_dump(mode="json")
-    assert dumped["event_type"] == "mission.failed"
-    assert dumped["payload"] == {"error": "no", "failure_class": "PROVIDER_OUTAGE"}
-    assert "schema_version" not in dumped
+    assert failed.event_type == "mission.failed"
+    assert failed.payload == {"error": "no", "failure_class": "PROVIDER_OUTAGE"}
 
 
 @pytest.mark.asyncio

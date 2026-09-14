@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
 from .events import EventType, event_type_for_mission, event_type_for_task
+from .org import OrganizationDesigner, is_org_action
 from .leases import IdempotencyError, IdempotencyGuard, LeaseConflict, LeaseError, WorkerLeases
 from .models import (
     AgentSpec, AgentStatus, FailureClass, Mission, MissionAnswer, MissionEvent,
@@ -77,6 +78,7 @@ class SwarmRuntime:
         self._held_leases: dict[tuple[str, str], str] = {}
         self.policy = PolicyGate()
         self.resources = resources or ResourceScheduler(policy=self.policy)
+        self.org = OrganizationDesigner()
 
     def _owner(self) -> str:
         return str(self.worker_id)
@@ -152,10 +154,11 @@ class SwarmRuntime:
         self.check_stopped(mission.id)
         current = self.agents[mission.id]
         depth = parent.depth + 1 if parent else 0
+        live = [agent for agent in current if agent.status != AgentStatus.STOPPED]
         self.policy.authorize(PolicyRequest(
             action="spawn",
             mission=mission,
-            agent_count=len(current),
+            agent_count=len(live),
             depth=depth,
             capabilities=tuple(capabilities or []),
             mode=getattr(self.controller, "mode", "openai"),
@@ -454,6 +457,8 @@ class SwarmRuntime:
         for agent in list(self.agents[mission.id]):
             if agent.parent_id is None or agent.id in assigned:
                 continue
+            if agent.status not in {AgentStatus.CREATED, AgentStatus.RUNNING}:
+                continue
             self.check_stopped(mission.id)
             if len(self.tasks[mission.id]) >= mission.limits.max_tasks:
                 raise PolicyError("Task limit reached", FailureClass.RESOURCE_EXHAUSTED)
@@ -619,22 +624,17 @@ class SwarmRuntime:
                     decision = await self.model_call(mission, root, "decision", lambda: self.controller.decide(self._state(mission)))
                     await self.emit(mission.id, EventType.CONTROLLER_DECISION, decision, root.id)
                     action = decision.get("action")
-                    if action == "spawn":
-                        if not decision.get("role") or not decision.get("purpose"):
-                            raise PolicyError("Model omitted the new agent's role or purpose",
+                    if is_org_action(action):
+                        change = self.org.propose(decision, self.agents[mission.id])
+                        if change is None:
+                            raise PolicyError("Model returned an unsupported organization action",
                                               FailureClass.INVALID_OUTPUT)
-                        parent = root
-                        if decision.get("parent_id"):
-                            parent = next((a for a in self.agents[mission.id] if str(a.id) == decision["parent_id"]), None)
-                            if parent is None:
-                                raise PolicyError("Model selected an unknown parent agent",
-                                                  FailureClass.INVALID_OUTPUT)
-                        caps = decision.get("capabilities") or ["reason"]
-                        child = await self.spawn(mission, decision["role"], decision["purpose"], parent, caps)
-                        await self.emit(mission.id, EventType.AGENT_MESSAGE, {
-                            "from_id": str(root.id), "to_id": str(child.id), "kind": "assignment",
-                            "text": decision["purpose"]}, root.id)
-                        await self._assign_unassigned_tasks(mission)
+                        child = await self.org.apply(self, mission, root, change)
+                        if change.op in {"spawn", "replace"} and child is not None:
+                            await self.emit(mission.id, EventType.AGENT_MESSAGE, {
+                                "from_id": str(root.id), "to_id": str(child.id), "kind": "assignment",
+                                "text": change.purpose}, root.id)
+                            await self._assign_unassigned_tasks(mission)
                     elif action == "finish":
                         if mission.pending_question is not None:
                             raise PolicyError("Cannot finish while a question is unanswered",
