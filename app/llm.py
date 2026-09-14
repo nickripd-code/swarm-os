@@ -11,8 +11,8 @@ from .credentials import (
     get_api_key, get_anthropic_api_key, get_azure_openai_api_key, get_bedrock_api_key,
     get_cohere_api_key,
     get_deepseek_api_key, get_fireworks_api_key, get_gemini_api_key, get_groq_api_key,
-    get_mistral_api_key, get_openrouter_api_key, get_perplexity_api_key,
-    get_together_api_key, get_xai_api_key,
+    get_huggingface_api_key, get_mistral_api_key, get_openrouter_api_key,
+    get_perplexity_api_key, get_together_api_key, get_xai_api_key,
 )
 from .models import FailureClass
 from .providers import (
@@ -61,6 +61,8 @@ DEFAULT_PERPLEXITY_MODEL = "sonar"
 DEFAULT_PERPLEXITY_BASE_URL = "https://api.perplexity.ai"
 DEFAULT_BEDROCK_MODEL = "amazon.nova-lite-v1:0"
 DEFAULT_BEDROCK_REGION = "us-east-1"
+DEFAULT_HUGGINGFACE_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
+DEFAULT_HUGGINGFACE_BASE_URL = "https://router.huggingface.co/v1"
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
 DEFAULT_VLLM_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_LLAMACPP_BASE_URL = "http://127.0.0.1:8080/v1"
@@ -368,6 +370,26 @@ def bedrock_opted_in() -> bool:
 
 def default_bedrock_base_url(region: str) -> str:
     return f"https://bedrock-runtime.{region}.amazonaws.com"
+
+
+_HUGGINGFACE_HTTP_ERRORS = {
+    401: ("Hugging Face rejected the API key", FailureClass.AUTHORIZATION_REQUIRED),
+    402: ("Hugging Face credits are exhausted", FailureClass.RESOURCE_EXHAUSTED),
+    403: ("Hugging Face denied model/project access", FailureClass.AUTHORIZATION_REQUIRED),
+    408: ("Hugging Face request timed out; no demo result was substituted", FailureClass.TIMEOUT),
+    422: ("Hugging Face rejected the model request", FailureClass.MODEL_FAILURE),
+    429: ("Hugging Face quota or rate limit reached", FailureClass.RATE_LIMIT),
+    400: ("Hugging Face rejected the model request", FailureClass.MODEL_FAILURE),
+    404: ("The configured Hugging Face model is unavailable", FailureClass.CAPABILITY_MISMATCH),
+}
+
+
+def huggingface_http_error(status_code: int) -> ProviderError:
+    if status_code in _HUGGINGFACE_HTTP_ERRORS:
+        message, failure_class = _HUGGINGFACE_HTTP_ERRORS[status_code]
+        return ProviderError(message, failure_class)
+    failure_class = FailureClass.PROVIDER_OUTAGE if status_code >= 500 else FailureClass.MODEL_FAILURE
+    return ProviderError(f"Hugging Face service error (HTTP {status_code})", failure_class)
 
 
 _OLLAMA_HTTP_ERRORS = {
@@ -2103,7 +2125,6 @@ class PerplexityModelProvider(ModelProvider):
         )
 
 
-
 class BedrockModelProvider(ModelProvider):
     """AWS Bedrock Converse adapter. Opt-in via BEDROCK_API_KEY or AWS_BEARER_TOKEN_BEDROCK."""
 
@@ -2223,6 +2244,114 @@ class BedrockModelProvider(ModelProvider):
             response_id=None,
             usage=usage,
         )
+
+class HuggingFaceModelProvider(ModelProvider):
+    """OpenAI-compatible Chat Completions adapter for Hugging Face Inference. Opt-in via HUGGINGFACE_API_KEY only."""
+
+    provider_id = "huggingface"
+
+    def __init__(self, model: str | None = None, api_key: str | None = None,
+                 transport=None, base_url: str | None = None):
+        self.model = model or os.getenv("HUGGINGFACE_MODEL", DEFAULT_HUGGINGFACE_MODEL)
+        self._api_key = api_key
+        self.transport = transport
+        self.base_url = (base_url or os.getenv("HUGGINGFACE_BASE_URL", DEFAULT_HUGGINGFACE_BASE_URL)).rstrip("/")
+        self.max_output_tokens = int(os.getenv("SWARM_MAX_OUTPUT_TOKENS", "8192"))
+        self._usage = ModelUsage()
+
+    def configured(self) -> bool:
+        return bool(self._api_key or get_huggingface_api_key())
+
+    async def list_models(self) -> list[ModelDescriptor]:
+        return [ModelDescriptor(
+            provider=self.provider_id,
+            model=self.model,
+            capabilities=self.capabilities(self.model),
+            context_limits=self.context_limits(self.model),
+        )]
+
+    def capabilities(self, model: str) -> ModelCapabilities:
+        del model
+        return ModelCapabilities(
+            reasoning="unknown",
+            coding="unknown",
+            vision=None,
+            tool_use=True,
+            structured_outputs=True,
+            streaming=False,
+        )
+
+    def context_limits(self, model: str) -> ContextLimits:
+        del model
+        return ContextLimits(max_output_tokens=self.max_output_tokens)
+
+    async def health(self) -> ProviderHealth:
+        return ProviderHealth(
+            provider=self.provider_id,
+            status="healthy" if self.configured() else "unconfigured",
+            detail="credential available" if self.configured() else "API key is not configured",
+        )
+
+    def estimate_cost(self, request: ModelRequest) -> CostEstimate:
+        return CostEstimate(
+            provider=self.provider_id,
+            model=request.model,
+            estimated_cost=None,
+            known=False,
+            reason="Pricing metadata is not configured for this model",
+        )
+
+    def usage(self) -> ModelUsage:
+        return self._usage.model_copy()
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        key = self._api_key or get_huggingface_api_key()
+        if not key:
+            raise ProviderError("Hugging Face API key is not configured", FailureClass.AUTHORIZATION_REQUIRED)
+        payload = request.input if isinstance(request.input, str) else json.dumps(request.input, default=str)
+        body: dict[str, Any] = {
+            "model": request.model,
+            "messages": [
+                {"role": "system", "content": request.instructions},
+                {"role": "user", "content": payload},
+            ],
+            "max_tokens": request.max_output_tokens or self.max_output_tokens,
+        }
+        formatted = chat_response_format(request.response_format)
+        if formatted is not None:
+            body["response_format"] = formatted
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=10),
+                                         trust_env=False, transport=self.transport) as client:
+                response = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json=body,
+                )
+        except httpx.TimeoutException:
+            raise ProviderError("Hugging Face request timed out; no demo result was substituted",
+                                FailureClass.TIMEOUT) from None
+        except httpx.RequestError:
+            raise ProviderError("Could not reach Hugging Face", FailureClass.PROVIDER_OUTAGE) from None
+        if response.is_error:
+            raise huggingface_http_error(response.status_code)
+        try:
+            result = response.json()
+            output, usage = chat_completion_output(result, label="Hugging Face")
+        except ProviderError:
+            raise
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+            raise ProviderError("Hugging Face returned an invalid structured response",
+                                FailureClass.INVALID_OUTPUT) from None
+        self._usage = self._usage.plus(usage)
+        return ModelResponse(
+            provider=self.provider_id,
+            model=result.get("model", request.model),
+            output=output,
+            response_id=result.get("id"),
+            usage=usage,
+        )
+
 
 class OllamaModelProvider(ModelProvider):
     """OpenAI-compatible Chat Completions adapter for a local Ollama daemon."""
@@ -2885,6 +3014,7 @@ def build_model_provider(primary: ModelProvider | None = None,
                          azure: ModelProvider | None = None,
                          perplexity: ModelProvider | None = None,
                          bedrock: ModelProvider | None = None,
+                         huggingface: ModelProvider | None = None,
                          local: ModelProvider | None = None,
                          vllm: ModelProvider | None = None,
                          llamacpp: ModelProvider | None = None,
@@ -2902,8 +3032,9 @@ def build_model_provider(primary: ModelProvider | None = None,
                          azure_api_key: str | None = None,
                          perplexity_api_key: str | None = None,
                          bedrock_api_key: str | None = None,
+                         huggingface_api_key: str | None = None,
                          transport=None) -> ModelProvider:
-    """Cloud OpenAI + optional OpenRouter/xAI/Anthropic/Mistral/Gemini/Cohere/DeepSeek/Together/Groq/Fireworks/Azure/Perplexity/Bedrock, locals last.
+    """Cloud OpenAI + optional OpenRouter/xAI/Anthropic/Mistral/Gemini/Cohere/DeepSeek/Together/Groq/Fireworks/Azure/Perplexity/Bedrock/Hugging Face, locals last.
 
     OpenAI-only (or a single opted-in cloud) is unchanged when no extra adapter is set.
     Two cloud keys wrap as Failover(first, second); the router registers remaining
@@ -2923,12 +3054,13 @@ def build_model_provider(primary: ModelProvider | None = None,
     azure = azure or AzureOpenAIModelProvider(api_key=azure_api_key, transport=transport)
     perplexity = perplexity or PerplexityModelProvider(api_key=perplexity_api_key, transport=transport)
     bedrock = bedrock or BedrockModelProvider(api_key=bedrock_api_key, transport=transport)
+    huggingface = huggingface or HuggingFaceModelProvider(api_key=huggingface_api_key, transport=transport)
     local = local or OllamaModelProvider(transport=transport)
     vllm = vllm or VllmModelProvider(transport=transport)
     llamacpp = llamacpp or LlamaCppModelProvider(transport=transport)
     clouds = [item for item in (
         primary, secondary, xai, anthropic, mistral, gemini, cohere, deepseek, together, groq, fireworks,
-        azure, perplexity, bedrock,
+        azure, perplexity, bedrock, huggingface,
     ) if provider_configured(item)]
     first_local = _first_configured_local(local, vllm, llamacpp)
     if len(clouds) >= 2:
@@ -2955,6 +3087,7 @@ def build_router(model_provider: ModelProvider | None = None,
                  azure: ModelProvider | None = None,
                  perplexity: ModelProvider | None = None,
                  bedrock: ModelProvider | None = None,
+                 huggingface: ModelProvider | None = None,
                  local: ModelProvider | None = None,
                  vllm: ModelProvider | None = None,
                  llamacpp: ModelProvider | None = None, **kwargs) -> ModelRouter:
@@ -2962,7 +3095,8 @@ def build_router(model_provider: ModelProvider | None = None,
     provider = model_provider or build_model_provider(
         xai=xai, anthropic=anthropic, mistral=mistral, gemini=gemini, cohere=cohere,
         deepseek=deepseek, together=together, groq=groq, fireworks=fireworks, azure=azure,
-        perplexity=perplexity, bedrock=bedrock, local=local, vllm=vllm, llamacpp=llamacpp, **kwargs)
+        perplexity=perplexity, bedrock=bedrock, huggingface=huggingface, local=local, vllm=vllm,
+        llamacpp=llamacpp, **kwargs)
     providers = registered_providers(provider)
     extra_xai = xai or next((item for item in providers if item.provider_id == "xai"), None)
     if extra_xai is None:
@@ -3012,6 +3146,10 @@ def build_router(model_provider: ModelProvider | None = None,
     if extra_bedrock is None:
         extra_bedrock = BedrockModelProvider(
             api_key=kwargs.get("bedrock_api_key"), transport=kwargs.get("transport"))
+    extra_huggingface = huggingface or next((item for item in providers if item.provider_id == "huggingface"), None)
+    if extra_huggingface is None:
+        extra_huggingface = HuggingFaceModelProvider(
+            api_key=kwargs.get("huggingface_api_key"), transport=kwargs.get("transport"))
     ollama = local or next((item for item in providers if item.provider_id == "ollama"), None)
     if ollama is None:
         ollama = OllamaModelProvider(transport=kwargs.get("transport"))
@@ -3033,6 +3171,7 @@ def build_router(model_provider: ModelProvider | None = None,
     _register_if_configured(providers, extra_azure)
     _register_if_configured(providers, extra_perplexity)
     _register_if_configured(providers, extra_bedrock)
+    _register_if_configured(providers, extra_huggingface)
     _register_if_configured(providers, ollama)
     _register_if_configured(providers, extra_vllm)
     _register_if_configured(providers, extra_llamacpp)

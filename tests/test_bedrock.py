@@ -114,6 +114,9 @@ def no_extra_providers(monkeypatch):
     monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
     monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
     monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_API_KEY", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_MODEL", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_BASE_URL", raising=False)
 
 
 @pytest.mark.asyncio
