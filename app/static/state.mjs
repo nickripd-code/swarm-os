@@ -1,7 +1,57 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
+export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
 export function newState(mission = null) {
   return {mission, agents: new Map(), tasks: new Map(), seen: new Set(), events: [],
     usage: {input: 0, output: 0, reasoning: 0, cost: null, budget: null, known: false}, decisions: 0, preview: false};
+}
+function finiteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function nonNegativeInt(value) {
+  const n = finiteNumber(value);
+  if (n === null || n < 0) return 0;
+  return Math.trunc(n);
+}
+export function formatUsd(value) {
+  const n = finiteNumber(value);
+  if (n === null) return null;
+  if (n === 0) return "$0";
+  if (n < 0.01) return "$" + n.toFixed(4);
+  return "$" + n.toFixed(2);
+}
+export function tokenTotal(usage) {
+  return (usage?.input || 0) + (usage?.output || 0) + (usage?.reasoning || 0);
+}
+export function costHudView(usage = {}) {
+  const input = usage.input || 0;
+  const output = usage.output || 0;
+  const reasoning = usage.reasoning || 0;
+  const tokens = input + output + reasoning;
+  const known = usage.known === true && finiteNumber(usage.cost) !== null && usage.cost >= 0;
+  const budget = finiteNumber(usage.budget);
+  const budgetKnown = budget !== null && budget >= 0;
+  const spendLabel = known ? formatUsd(usage.cost) : ESTIMATE_UNAVAILABLE;
+  const budgetLabel = budgetKnown ? formatUsd(budget) : ESTIMATE_UNAVAILABLE;
+  const remainingLabel = known && budgetKnown ? formatUsd(budget - usage.cost) : null;
+  let tokensLabel = tokens.toLocaleString();
+  if (reasoning > 0) {
+    tokensLabel += " · in " + input.toLocaleString() + " / out " + output.toLocaleString()
+      + " / reason " + reasoning.toLocaleString();
+  } else if (tokens > 0) {
+    tokensLabel += " · in " + input.toLocaleString() + " / out " + output.toLocaleString();
+  }
+  return {
+    known,
+    tokens,
+    input,
+    output,
+    reasoning,
+    tokensLabel,
+    spendLabel,
+    budgetLabel,
+    remainingLabel,
+    note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
+  };
 }
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
@@ -25,16 +75,23 @@ export function applyEvent(state, e) {
     if (a) a.activity = p.kind === "decision" ? "Deciding the next move" : p.kind === "verification" ? "Verifying the claimed result" : "Working on the task";
   }
   if (e.event_type === "llm.completed") {
-    state.usage.input += p.input_tokens || 0;
-    state.usage.output += p.output_tokens || 0;
-    state.usage.reasoning += p.reasoning_tokens || 0;
+    const input = nonNegativeInt(p.input_tokens);
+    const output = nonNegativeInt(p.output_tokens);
+    const reasoning = nonNegativeInt(p.reasoning_tokens);
+    state.usage.input += input;
+    state.usage.output += output;
+    state.usage.reasoning += reasoning;
     const a = state.agents.get(e.actor_id);
-    if (a) {a.tokens = (a.tokens || 0) + (p.input_tokens || 0) + (p.output_tokens || 0); a.model = p.model;}
+    if (a) {a.tokens = (a.tokens || 0) + input + output + reasoning; a.model = p.model;}
   }
   if (e.event_type === "budget.updated") {
-    if (typeof p.token_budget === "number") state.usage.budget = p.token_budget;
-    if (p.known === true && typeof p.token_spent === "number") {
-      state.usage.cost = p.token_spent;
+    const budget = finiteNumber(p.token_budget);
+    if (budget !== null && budget >= 0) state.usage.budget = budget;
+    const spent = finiteNumber(p.token_spent);
+    // Dollars only when ResourceScheduler marks the estimate known. Never treat
+    // missing/false known or a default 0 as spend.
+    if (p.known === true && spent !== null && spent >= 0) {
+      state.usage.cost = spent;
       state.usage.known = true;
     }
   }
@@ -125,8 +182,8 @@ export function alertFromEvent(e) {
       return {
         level: "warning",
         title: "Budget warning",
-        detail: p.token_budget != null
-          ? "Estimated token spend " + (p.token_spent ?? "?") + " / " + p.token_budget + " USD"
+        detail: typeof p.token_spent === "number" && typeof p.token_budget === "number"
+          ? "Estimated token spend " + p.token_spent + " / " + p.token_budget + " USD"
           : "Estimated token spend is approaching the mission budget",
         event_type: e.event_type,
       };
