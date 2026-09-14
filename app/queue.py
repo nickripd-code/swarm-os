@@ -7,6 +7,7 @@ requires an explicit complete() from the live lease owner — never invented.
 from __future__ import annotations
 
 import json
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -17,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .leases import ClaimOutcome, LeaseConflict, WorkerLeases
 from .models import utcnow
-from .store import Store, WorkItemRow
+from .store import Store, WorkItemRow, WorkerLeaseRow
 
 JOB_STATUSES = frozenset({"pending", "claimed", "completed", "failed"})
 DEFAULT_JOB_KIND = "work"
@@ -179,14 +180,30 @@ class WorkQueue:
         owner_id: str,
         mission_id: str | None = None,
         item_id: str | None = None,
+        kinds: Collection[str] | None = None,
         ttl_seconds: float | None = None,
     ) -> ClaimedWork | None:
         if not owner_id:
             raise QueueError("Lease owner is required")
+        kind_filter = None
+        if kinds is not None:
+            candidates = (kinds,) if isinstance(kinds, str) else kinds
+            kind_filter = frozenset(
+                str(kind).strip() for kind in candidates if str(kind).strip()
+            )
+            if not kind_filter:
+                raise QueueError("At least one accepted work kind is required")
         try:
             with self.store.sessions.begin() as db:
                 now = utcnow()
-                row = self._select_row(db, item_id=item_id, mission_id=mission_id, owner_id=owner_id, now=now)
+                row = self._select_row(
+                    db,
+                    item_id=item_id,
+                    mission_id=mission_id,
+                    owner_id=owner_id,
+                    kinds=kind_filter,
+                    now=now,
+                )
                 if row is None:
                     return None
                 was_pending = row.status == "pending"
@@ -209,6 +226,56 @@ class WorkQueue:
                 return ClaimedWork(item=_row_to_item(row), lease=outcome)
         except IntegrityError as exc:
             raise LeaseConflict("Work item could not be claimed") from exc
+
+    def heartbeat(
+        self,
+        item_id: str,
+        owner_id: str,
+        *,
+        ttl_seconds: float | None = None,
+    ) -> WorkItem:
+        """Atomically extend a live job claim without reclaiming expired work."""
+        if not owner_id:
+            raise QueueError("Lease owner is required")
+        with self.store.sessions.begin() as db:
+            row = db.get(WorkItemRow, item_id)
+            if row is None:
+                raise QueueError("Work item not found")
+            if row.status != "claimed":
+                raise QueueError("Only a claimed work item can be heartbeated")
+            if row.owner_id != owner_id:
+                raise LeaseConflict("Only the claiming worker can heartbeat a work item")
+            now = utcnow()
+            if row.expires_at is None or _aware(row.expires_at) <= now:
+                raise LeaseConflict("Expired jobs must be reclaimed, not heartbeated")
+            if not row.lease_id:
+                raise QueueError("Claimed work item is missing a lease")
+            lease_row = db.get(WorkerLeaseRow, row.lease_id)
+            if (
+                lease_row is None
+                or lease_row.scope != "job"
+                or lease_row.scope_id != row.id
+                or lease_row.mission_id != row.mission_id
+            ):
+                raise QueueError("Claimed work item has an invalid lease")
+            if lease_row.owner_id != owner_id or lease_row.status != "claimed":
+                raise LeaseConflict("Only the live lease owner can heartbeat a work item")
+            if _aware(lease_row.expires_at) <= now:
+                raise LeaseConflict("Expired jobs must be reclaimed, not heartbeated")
+            outcome = self.leases.claim_in_session(
+                db,
+                scope="job",
+                scope_id=row.id,
+                mission_id=row.mission_id,
+                owner_id=owner_id,
+                ttl_seconds=ttl_seconds,
+            )
+            if outcome.reclaimed or outcome.lease.id != row.lease_id:
+                raise LeaseConflict("Expired jobs must be reclaimed, not heartbeated")
+            row.expires_at = outcome.lease.expires_at
+            row.updated_at = now
+            db.flush()
+            return _row_to_item(row)
 
     def complete(
         self,
@@ -300,13 +367,16 @@ class WorkQueue:
             )
 
     def _select_row(self, db, *, item_id: str | None, mission_id: str | None,
-                    owner_id: str, now: datetime) -> WorkItemRow | None:
+                    owner_id: str, kinds: frozenset[str] | None,
+                    now: datetime) -> WorkItemRow | None:
         if item_id:
             row = db.get(WorkItemRow, item_id)
             if row is None:
                 raise QueueError("Work item not found")
             if mission_id and row.mission_id != mission_id:
                 raise QueueError("Work item does not belong to this mission")
+            if kinds is not None and row.kind not in kinds:
+                raise QueueError("Work item kind is not accepted by this worker")
             if row.status in {"completed", "failed"}:
                 raise QueueError(f"Work item already {row.status}")
             if row.status not in JOB_STATUSES:
@@ -319,6 +389,8 @@ class WorkQueue:
         query = select(WorkItemRow).where(WorkItemRow.status.in_(("pending", "claimed")))
         if mission_id:
             query = query.where(WorkItemRow.mission_id == mission_id)
+        if kinds is not None:
+            query = query.where(WorkItemRow.kind.in_(sorted(kinds)))
         rows = db.scalars(query.order_by(WorkItemRow.created_at, WorkItemRow.id)).all()
         for row in rows:
             if _available(row, now):

@@ -68,6 +68,43 @@ def test_double_claim_fail_closed(tmp_path):
     assert queue.get(item.id).status == "claimed"
 
 
+def test_claim_kind_filter_skips_unhandled_work(tmp_path):
+    store = _store(tmp_path)
+    queue = WorkQueue(store)
+    skipped = queue.enqueue(mission_id="m1", kind="unsupported")
+    accepted = queue.enqueue(mission_id="m1", kind="echo")
+
+    claimed = queue.claim(owner_id="w1", kinds={"echo"}, ttl_seconds=30)
+    assert claimed.item.id == accepted.id
+    assert queue.get(skipped.id).status == "pending"
+    with pytest.raises(QueueError, match="kind is not accepted"):
+        queue.claim(owner_id="w1", item_id=skipped.id, kinds={"echo"})
+
+
+def test_heartbeat_renews_only_live_owner_without_incrementing_attempt(tmp_path):
+    store = _store(tmp_path)
+    queue = WorkQueue(store)
+    item = queue.enqueue(mission_id="m1", kind="work")
+    claimed = queue.claim(owner_id="w1", item_id=item.id, ttl_seconds=5)
+    original_expiry = claimed.item.expires_at
+
+    renewed = queue.heartbeat(item.id, "w1", ttl_seconds=30)
+    assert renewed.expires_at > original_expiry
+    assert renewed.attempt == 1
+    with store.sessions() as db:
+        lease = db.get(WorkerLeaseRow, renewed.lease_id)
+        assert lease.expires_at == renewed.expires_at.replace(tzinfo=None)
+
+    with pytest.raises(LeaseConflict, match="claiming worker"):
+        queue.heartbeat(item.id, "w2", ttl_seconds=30)
+    assert queue.get(item.id).expires_at == renewed.expires_at
+
+    _expire(store, item.id)
+    with pytest.raises(LeaseConflict, match="reclaimed"):
+        queue.heartbeat(item.id, "w1", ttl_seconds=30)
+    assert queue.get(item.id).attempt == 1
+
+
 def test_lease_expiry_is_reclaimable_and_complete_fail_closed(tmp_path):
     store = _store(tmp_path)
     queue = WorkQueue(store)
