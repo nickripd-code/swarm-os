@@ -154,7 +154,7 @@ Nothing in the current test suite is known red. UI preview is synthetic by desig
 
 ## NEXT PRIORITY
 
-**This slice:** verifier seed so `finish` is a claim, not success. `SwarmRuntime` runs `verification.started` → ModelRouter verifier → `verification.passed` or fail-closed `verification.failed` (`VERIFICATION_FAILURE`). OpenAI-only still verifies; missing/invalid/inconclusive verdicts never complete the mission. Planning modules are only called through existing APIs. No OrganizationDesigner. No React/Pixi rewrite.
+**This slice:** verifier seed so `finish` is a claim, not success. `SwarmRuntime` runs `verification.started` → ModelRouter verifier → `verification.passed` or fail-closed `verification.failed` (`VERIFICATION_FAILURE`). OpenAI-only still verifies; missing/invalid/inconclusive verdicts never complete the mission. Planning modules are only called through existing APIs. No OrganizationDesigner. No React/Pixi rewrite. Tests: `python3 -m pytest tests/ -q` → **140 passed**.
 
 **Recommended next backend slice:** OrganizationDesigner (mutable org topology from the judged plan) **or** external evidence runners so verification can check tests/endpoints/files. Still fail closed. Still no game-world UI rewrite.
 
