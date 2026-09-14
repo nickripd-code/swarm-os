@@ -4,7 +4,7 @@ import os
 from .credentials import (
     get_api_key, get_anthropic_api_key, get_cohere_api_key, get_deepseek_api_key,
     get_fireworks_api_key, get_gemini_api_key, get_groq_api_key, get_mistral_api_key,
-    get_openrouter_api_key,
+    get_openrouter_api_key, get_perplexity_api_key,
     get_together_api_key, get_xai_api_key,
 )
 from .llm import (
@@ -14,7 +14,8 @@ from .llm import (
     DEFAULT_GEMINI_BASE_URL, DEFAULT_GEMINI_MODEL, DEFAULT_GROQ_BASE_URL,
     DEFAULT_GROQ_MODEL, DEFAULT_LLAMACPP_BASE_URL, DEFAULT_MODEL,
     DEFAULT_MISTRAL_BASE_URL, DEFAULT_MISTRAL_MODEL, DEFAULT_OLLAMA_BASE_URL,
-    DEFAULT_OPENROUTER_MODEL, DEFAULT_REASONING, DEFAULT_TOGETHER_BASE_URL,
+    DEFAULT_OPENROUTER_MODEL, DEFAULT_PERPLEXITY_BASE_URL, DEFAULT_PERPLEXITY_MODEL,
+    DEFAULT_REASONING, DEFAULT_TOGETHER_BASE_URL,
     DEFAULT_TOGETHER_MODEL, DEFAULT_VLLM_BASE_URL,
     DEFAULT_XAI_MODEL, DEFAULT_XAI_BASE_URL,
     LlamaCppModelProvider, OllamaModelProvider, VllmModelProvider,
@@ -106,6 +107,13 @@ def azure_status() -> dict:
             "deployment": deployment,
             "api_version": os.getenv("AZURE_OPENAI_API_VERSION", DEFAULT_AZURE_OPENAI_API_VERSION),
             "provider": "azure", "fallback": False}
+
+
+def perplexity_status() -> dict:
+    return {"configured": bool(get_perplexity_api_key()),
+            "model": os.getenv("PERPLEXITY_MODEL", DEFAULT_PERPLEXITY_MODEL),
+            "base_url": os.getenv("PERPLEXITY_BASE_URL", DEFAULT_PERPLEXITY_BASE_URL),
+            "provider": "perplexity", "fallback": False}
 
 
 def ollama_status() -> dict:

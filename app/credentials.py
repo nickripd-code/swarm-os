@@ -65,6 +65,11 @@ def get_azure_openai_api_key() -> str | None:
     return key.strip() if key else None
 
 
+def get_perplexity_api_key() -> str | None:
+    key = os.getenv("PERPLEXITY_API_KEY")
+    return key.strip() if key else None
+
+
 def get_api_key() -> str | None:
     if os.getenv("OPENAI_API_KEY"):
         return os.environ["OPENAI_API_KEY"].strip()
