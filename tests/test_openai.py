@@ -2,7 +2,7 @@ import json
 import httpx
 import pytest
 
-from app.llm import OpenAIProvider, ProviderError
+from app.llm import OpenAIProvider, ProviderError, retry_delay_seconds
 from app.models import FailureClass
 
 
@@ -63,3 +63,10 @@ async def test_provider_timeout_and_outage_are_classified():
     with pytest.raises(ProviderError, match="Could not reach OpenAI") as outage_error:
         await outage_provider.decide({"goal": "test"})
     assert outage_error.value.failure_class == FailureClass.PROVIDER_OUTAGE
+
+
+def test_retry_delay_is_bounded_exponential_backoff():
+    assert retry_delay_seconds(1) == 0.5
+    assert retry_delay_seconds(2) == 1.0
+    assert retry_delay_seconds(3) == 2.0
+    assert retry_delay_seconds(10) == 8.0

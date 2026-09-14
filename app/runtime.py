@@ -10,7 +10,10 @@ from .models import (
     PaymentIntent, Task, TaskStatus, utcnow,
 )
 from .store import Store
-from .llm import LLMProvider, OpenAIProvider, ProviderError
+from .llm import (
+    DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BASE_SECONDS, LLMProvider, OpenAIProvider,
+    ProviderError, RETRYABLE_FAILURE_CLASSES, retry_delay_seconds,
+)
 
 TERMINAL = {MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.STOPPED, MissionStatus.BLOCKED}
 
@@ -38,7 +41,8 @@ EventSink = Callable[[MissionEvent], Awaitable[None]]
 
 
 class SwarmRuntime:
-    def __init__(self, store: Store, sink: EventSink | None = None, controller: LLMProvider | None = None):
+    def __init__(self, store: Store, sink: EventSink | None = None, controller: LLMProvider | None = None,
+                 max_retries: int = DEFAULT_MAX_RETRIES, retry_base_seconds: float = DEFAULT_RETRY_BASE_SECONDS):
         self.store, self.sink = store, sink
         self.agents: dict[UUID, list[AgentSpec]] = defaultdict(list)
         self.tasks: dict[UUID, list[Task]] = defaultdict(list)
@@ -47,6 +51,8 @@ class SwarmRuntime:
         self.wallet = WalletAdapter()
         self.controller = controller or OpenAIProvider()
         self.lock = asyncio.Lock()
+        self.max_retries = max_retries
+        self.retry_base_seconds = retry_base_seconds
 
     async def emit(self, mission_id: UUID, event_type: str, payload: dict[str, Any], actor_id: UUID | None = None):
         event = self.store.append(MissionEvent(mission_id=mission_id, event_type=event_type, actor_id=actor_id, payload=payload))
@@ -84,19 +90,43 @@ class SwarmRuntime:
             self.runs[mission.id] = job
             job.add_done_callback(lambda done: self.runs.pop(mission.id, None) if self.runs.get(mission.id) is done else None)
 
+    def remaining_runtime(self, mission: Mission) -> float:
+        return mission.limits.max_runtime_seconds - (utcnow() - mission.updated_at).total_seconds()
+
+    async def _sleep(self, seconds: float):
+        if seconds > 0:
+            await asyncio.sleep(seconds)
+
     async def model_call(self, mission: Mission, actor: AgentSpec, kind: str, call):
         self.check_stopped(mission.id)
-        await self.emit(mission.id, "llm.started", {"kind": kind, "model": getattr(self.controller, "model", "demo"),
+        model = getattr(self.controller, "model", "demo")
+        await self.emit(mission.id, "llm.started", {"kind": kind, "model": model,
                         "reasoning_effort": getattr(self.controller, "reasoning", None)}, actor.id)
-        try:
-            response = await call()
-        except ProviderError as exc:
-            await self.emit(mission.id, "llm.failed", {
-                "kind": kind, "model": getattr(self.controller, "model", "demo"),
-                "failure_class": str(exc.failure_class), "error": str(exc),
-            }, actor.id)
-            raise
+        attempts = self.max_retries + 1
+        response = None
+        for attempt in range(1, attempts + 1):
+            self.check_stopped(mission.id)
+            try:
+                response = await call()
+                break
+            except ProviderError as exc:
+                retryable = exc.failure_class in RETRYABLE_FAILURE_CLASSES and attempt < attempts
+                delay = retry_delay_seconds(attempt, self.retry_base_seconds) if retryable else 0.0
+                if retryable and self.remaining_runtime(mission) > delay:
+                    await self.emit(mission.id, "llm.retry", {
+                        "kind": kind, "model": model, "failure_class": str(exc.failure_class),
+                        "error": str(exc), "attempt": attempt, "max_attempts": attempts,
+                        "delay_seconds": delay,
+                    }, actor.id)
+                    await self._sleep(delay)
+                    continue
+                await self.emit(mission.id, "llm.failed", {
+                    "kind": kind, "model": model, "failure_class": str(exc.failure_class),
+                    "error": str(exc), "attempt": attempt, "max_attempts": attempts,
+                }, actor.id)
+                raise
         self.check_stopped(mission.id)
+        assert response is not None
         metadata = response.pop("_meta", None)
         if metadata:
             await self.emit(mission.id, "llm.completed", {"kind": kind, **metadata}, actor.id)

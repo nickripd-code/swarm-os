@@ -4,8 +4,15 @@ import asyncio
 from app.models import Mission, FailureClass
 from app.runtime import SwarmRuntime, PolicyError
 from app.llm import FallbackController
-from app.llm import LLMProvider, ProviderError
+from app.llm import LLMProvider, ProviderError, DEFAULT_MAX_RETRIES, retry_delay_seconds
 from app.store import Store
+
+
+@pytest.fixture(autouse=True)
+def instant_retry_backoff(monkeypatch):
+    async def _instant(self, seconds):
+        return
+    monkeypatch.setattr("app.runtime.SwarmRuntime._sleep", _instant)
 
 
 @pytest.mark.asyncio
@@ -68,6 +75,112 @@ async def test_failure_never_becomes_fake_success(tmp_path):
     assert failed and failed[-1].payload["failure_class"] == "RATE_LIMIT"
     llm_failed = [e for e in events if e.event_type == "llm.failed"]
     assert llm_failed and llm_failed[-1].payload["failure_class"] == "RATE_LIMIT"
+
+
+class CountingFailProvider(LLMProvider):
+    def __init__(self, fail_count: int, failure_class: FailureClass, message: str):
+        self.fail_count = fail_count
+        self.failure_class = failure_class
+        self.message = message
+        self.calls = 0
+
+    async def decide(self, state):
+        self.calls += 1
+        if self.calls <= self.fail_count:
+            raise ProviderError(self.message, self.failure_class)
+        return {"action": "finish", "summary": "Recovered after retry"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_class,message", [
+    (FailureClass.RATE_LIMIT, "OpenAI quota or rate limit reached"),
+    (FailureClass.TIMEOUT, "OpenAI request timed out; no demo result was substituted"),
+])
+async def test_retryable_provider_error_then_success(tmp_path, failure_class, message):
+    store = Store(str(tmp_path / "swarm.db"))
+    provider = CountingFailProvider(DEFAULT_MAX_RETRIES, failure_class, message)
+    runtime = SwarmRuntime(store, controller=provider)
+    mission = Mission(goal="Recover from a transient provider error")
+    store.save_mission(mission)
+    await runtime.run(mission)
+    saved = store.get_mission(mission.id)
+    assert saved.status == "completed"
+    assert saved.result["summary"] == "Recovered after retry"
+    assert provider.calls == DEFAULT_MAX_RETRIES + 1
+    events = store.events(mission.id)
+    retries = [e for e in events if e.event_type == "llm.retry"]
+    assert len(retries) == DEFAULT_MAX_RETRIES
+    assert [e.payload["failure_class"] for e in retries] == [str(failure_class)] * DEFAULT_MAX_RETRIES
+    assert [e.payload["delay_seconds"] for e in retries] == [
+        retry_delay_seconds(i) for i in range(1, DEFAULT_MAX_RETRIES + 1)
+    ]
+    assert not any(e.event_type in {"llm.failed", "mission.failed", "controller.fallback"} for e in events)
+    assert any(e.event_type == "mission.completed" for e in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_class,message", [
+    (FailureClass.RATE_LIMIT, "OpenAI quota or rate limit reached"),
+    (FailureClass.TIMEOUT, "OpenAI request timed out; no demo result was substituted"),
+])
+async def test_retryable_provider_error_exhausted_fails_closed(tmp_path, failure_class, message):
+    store = Store(str(tmp_path / "swarm.db"))
+    provider = CountingFailProvider(99, failure_class, message)
+    runtime = SwarmRuntime(store, controller=provider)
+    mission = Mission(goal="Exhaust retries")
+    store.save_mission(mission)
+    await runtime.run(mission)
+    saved = store.get_mission(mission.id)
+    assert saved.status == "failed"
+    assert saved.result == {"error": message, "failure_class": str(failure_class)}
+    assert provider.calls == DEFAULT_MAX_RETRIES + 1
+    events = store.events(mission.id)
+    retries = [e for e in events if e.event_type == "llm.retry"]
+    assert len(retries) == DEFAULT_MAX_RETRIES
+    assert all(e.payload["failure_class"] == str(failure_class) for e in retries)
+    llm_failed = [e for e in events if e.event_type == "llm.failed"]
+    assert len(llm_failed) == 1
+    assert llm_failed[0].payload["failure_class"] == str(failure_class)
+    assert llm_failed[0].payload["attempt"] == DEFAULT_MAX_RETRIES + 1
+    assert not any(e.event_type in {"mission.completed", "controller.fallback"} for e in events)
+    failed = [e for e in events if e.event_type == "mission.failed"]
+    assert failed and failed[-1].payload == {"error": message, "failure_class": str(failure_class)}
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_provider_error_fails_immediately(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    provider = CountingFailProvider(99, FailureClass.AUTHORIZATION_REQUIRED, "OpenAI rejected the API key")
+    runtime = SwarmRuntime(store, controller=provider)
+    mission = Mission(goal="Do not retry auth failures")
+    store.save_mission(mission)
+    await runtime.run(mission)
+    saved = store.get_mission(mission.id)
+    assert saved.status == "failed"
+    assert saved.result["failure_class"] == "AUTHORIZATION_REQUIRED"
+    assert provider.calls == 1
+    events = store.events(mission.id)
+    assert not any(e.event_type == "llm.retry" for e in events)
+    llm_failed = [e for e in events if e.event_type == "llm.failed"]
+    assert llm_failed and llm_failed[-1].payload["failure_class"] == "AUTHORIZATION_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_retry_skipped_when_backoff_exceeds_mission_deadline(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    provider = CountingFailProvider(99, FailureClass.RATE_LIMIT, "OpenAI quota or rate limit reached")
+    runtime = SwarmRuntime(store, controller=provider, retry_base_seconds=30)
+    mission = Mission(goal="No time left to retry", limits={"max_runtime_seconds": 1})
+    store.save_mission(mission)
+    await runtime.run(mission)
+    saved = store.get_mission(mission.id)
+    assert saved.status == "failed"
+    assert saved.result["failure_class"] == "RATE_LIMIT"
+    assert provider.calls == 1
+    events = store.events(mission.id)
+    assert not any(e.event_type == "llm.retry" for e in events)
+    assert any(e.event_type == "mission.failed" and e.payload.get("failure_class") == "RATE_LIMIT"
+               for e in events)
 
 
 class SlowProvider(LLMProvider):
