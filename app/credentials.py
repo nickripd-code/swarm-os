@@ -89,6 +89,11 @@ def get_cerebras_api_key() -> str | None:
     return key.strip() if key else None
 
 
+def get_sambanova_api_key() -> str | None:
+    key = os.getenv("SAMBANOVA_API_KEY")
+    return key.strip() if key else None
+
+
 def get_api_key() -> str | None:
     if os.getenv("OPENAI_API_KEY"):
         return os.environ["OPENAI_API_KEY"].strip()

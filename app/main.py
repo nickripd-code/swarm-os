@@ -16,8 +16,8 @@ from .health import (
     anthropic_status, azure_status, bedrock_status, browser_health_status, cerebras_status,
     cohere_status, deepseek_status, fireworks_status, gemini_status, groq_status,
     huggingface_status, llamacpp_health_status, mistral_status, ollama_health_status,
-    openai_status, openrouter_status, perplexity_status, selfmod_health_status,
-    together_status, vllm_health_status, xai_status,
+    openai_status, openrouter_status, perplexity_status, sambanova_status,
+    selfmod_health_status, together_status, vllm_health_status, xai_status,
 )
 from .tools import tools_status
 
@@ -61,6 +61,7 @@ async def health():
             "bedrock": bedrock_status(),
             "huggingface": huggingface_status(),
             "cerebras": cerebras_status(),
+            "sambanova": sambanova_status(),
             "ollama": await ollama_health_status(), "vllm": await vllm_health_status(),
             "llamacpp": await llamacpp_health_status(),
             "tools": tools_status(runtime.tools),
@@ -83,7 +84,7 @@ async def stop_all():
 @app.post("/api/missions", response_model=Mission, status_code=201)
 async def create_mission(request: MissionCreate):
     if not runtime.controller.configured():
-        raise HTTPException(503, "No model provider is configured. Set OPENAI_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY, ANTHROPIC_API_KEY, MISTRAL_API_KEY, GEMINI_API_KEY, COHERE_API_KEY, DEEPSEEK_API_KEY, TOGETHER_API_KEY, GROQ_API_KEY, FIREWORKS_API_KEY, AZURE_OPENAI_API_KEY with AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_DEPLOYMENT, PERPLEXITY_API_KEY, BEDROCK_API_KEY, HUGGINGFACE_API_KEY, CEREBRAS_API_KEY, or OLLAMA_MODEL / OLLAMA_BASE_URL on the server before launching.")
+        raise HTTPException(503, "No model provider is configured. Set OPENAI_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY, ANTHROPIC_API_KEY, MISTRAL_API_KEY, GEMINI_API_KEY, COHERE_API_KEY, DEEPSEEK_API_KEY, TOGETHER_API_KEY, GROQ_API_KEY, FIREWORKS_API_KEY, AZURE_OPENAI_API_KEY with AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_DEPLOYMENT, PERPLEXITY_API_KEY, BEDROCK_API_KEY, HUGGINGFACE_API_KEY, CEREBRAS_API_KEY, SAMBANOVA_API_KEY, or OLLAMA_MODEL / OLLAMA_BASE_URL on the server before launching.")
     mission = Mission(goal=request.goal, budget=request.budget, live_payments=request.live_payments,
                       privacy=request.privacy, limits=request.limits)
     store.save_mission(mission)
