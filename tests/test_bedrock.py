@@ -3,21 +3,22 @@ import json
 import httpx
 import pytest
 
-from app.health import azure_status
+from app.health import bedrock_status
 from app.llm import (
-    AzureOpenAIModelProvider, OllamaModelProvider, OpenAIResponsesModelProvider,
-    build_controller, build_model_provider, build_router,
+    BedrockModelProvider, DEFAULT_BEDROCK_MODEL,
+    DEFAULT_BEDROCK_REGION, OllamaModelProvider, OpenAIResponsesModelProvider,
+    build_controller, build_model_provider, build_router, default_bedrock_base_url,
 )
 from app.models import FailureClass
 from app.providers import FailoverModelProvider, ModelProvider, ModelRequest, ProviderError
 from app.router import CapabilityRequest, ModelRouter
 
 
-AZURE_ENDPOINT = "https://example.openai.azure.com"
-AZURE_DEPLOYMENT = "gpt-4o"
-AZURE_API_VERSION = "2024-10-21"
+BEDROCK_MODEL = DEFAULT_BEDROCK_MODEL
+BEDROCK_REGION = DEFAULT_BEDROCK_REGION
+BEDROCK_BASE_URL = default_bedrock_base_url(BEDROCK_REGION)
 REQUEST = ModelRequest(
-    model=AZURE_DEPLOYMENT,
+    model=BEDROCK_MODEL,
     instructions="Return JSON",
     input={"question": "test"},
     response_format={"type": "json_schema", "name": "answer", "strict": True,
@@ -27,45 +28,38 @@ REQUEST = ModelRequest(
 )
 
 
-def completed_chat(output=None, model=AZURE_DEPLOYMENT):
+def completed_converse(output=None, *, as_text=False, stop_reason="tool_use"):
+    payload = output or {"answer": "ok"}
+    if as_text:
+        content = [{"text": json.dumps(payload)}]
+        stop_reason = "end_turn"
+    else:
+        content = [{"toolUse": {"toolUseId": "tooluse_contract", "name": "answer", "input": payload}}]
     return httpx.Response(200, json={
-        "id": "azure_contract",
-        "model": model,
-        "choices": [{"finish_reason": "stop", "message": {
-            "role": "assistant",
-            "content": json.dumps(output or {"answer": "ok"}),
-        }}],
-        "usage": {
-            "prompt_tokens": 11,
-            "completion_tokens": 7,
-            "completion_tokens_details": {"reasoning_tokens": 3},
-        },
+        "output": {"message": {"role": "assistant", "content": content}},
+        "stopReason": stop_reason,
+        "usage": {"inputTokens": 11, "outputTokens": 7, "totalTokens": 18},
     })
 
 
-def azure_transport(handler):
+def bedrock_transport(handler):
     return httpx.MockTransport(handler)
 
 
-def azure_provider(**kwargs):
-    defaults = dict(
-        api_key="azure-secret",
-        endpoint=AZURE_ENDPOINT,
-        deployment=AZURE_DEPLOYMENT,
-    )
+def bedrock_provider(**kwargs):
+    defaults = dict(api_key="bedrock-secret", region=BEDROCK_REGION, model=BEDROCK_MODEL)
     defaults.update(kwargs)
-    return AzureOpenAIModelProvider(**defaults)
+    return BedrockModelProvider(**defaults)
 
 
-def opt_in_azure(monkeypatch, **overrides):
-    values = {
-        "AZURE_OPENAI_API_KEY": "azure-test",
-        "AZURE_OPENAI_ENDPOINT": AZURE_ENDPOINT,
-        "AZURE_OPENAI_DEPLOYMENT": AZURE_DEPLOYMENT,
-    }
+def opt_in_bedrock(monkeypatch, **overrides):
+    values = {"BEDROCK_API_KEY": "bedrock-test"}
     values.update(overrides)
     for name, value in values.items():
-        monkeypatch.setenv(name, value)
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
 
 
 @pytest.fixture
@@ -117,96 +111,105 @@ def no_extra_providers(monkeypatch):
     monkeypatch.delenv("BEDROCK_MODEL", raising=False)
     monkeypatch.delenv("BEDROCK_REGION", raising=False)
     monkeypatch.delenv("BEDROCK_BASE_URL", raising=False)
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("AWS_REGION", raising=False)
 
 
 @pytest.mark.asyncio
-async def test_azure_adapter_implements_provider_contract_and_tracks_usage(no_extra_providers):
+async def test_bedrock_adapter_implements_provider_contract_and_tracks_usage(no_extra_providers):
     captured = {}
 
     def handler(request):
         captured["url"] = str(request.url)
         captured["method"] = request.method
         captured["body"] = json.loads(request.content)
-        captured["api_key"] = request.headers.get("api-key")
         captured["authorization"] = request.headers.get("Authorization")
-        return completed_chat()
+        captured["api_key"] = request.headers.get("api-key")
+        return completed_converse()
 
-    provider = azure_provider(transport=azure_transport(handler))
+    provider = bedrock_provider(transport=bedrock_transport(handler))
     assert isinstance(provider, ModelProvider)
     models = await provider.list_models()
-    assert models[0].provider == "azure"
-    assert models[0].model == AZURE_DEPLOYMENT
+    assert models[0].provider == "bedrock"
+    assert models[0].model == BEDROCK_MODEL
     assert models[0].local is False
     assert models[0].capabilities.structured_outputs is True
 
     response = await provider.complete(REQUEST)
     assert response.output == {"answer": "ok"}
-    assert response.provider == "azure"
+    assert response.provider == "bedrock"
     assert response.usage.model_dump() == {
         "input_tokens": 11,
         "output_tokens": 7,
-        "reasoning_tokens": 3,
+        "reasoning_tokens": 0,
     }
-    assert captured["url"] == (
-        f"{AZURE_ENDPOINT}/openai/deployments/{AZURE_DEPLOYMENT}"
-        f"/chat/completions?api-version={AZURE_API_VERSION}"
-    )
-    assert captured["api_key"] == "azure-secret"
-    assert captured["authorization"] is None
-    assert "azure-secret" not in captured["url"]
-    assert captured["body"]["model"] == AZURE_DEPLOYMENT
-    assert captured["body"]["response_format"]["type"] == "json_schema"
-    assert "json_schema" in captured["body"]["response_format"]
-    assert "provider" not in captured["body"]
+    assert captured["url"] == f"{BEDROCK_BASE_URL}/model/{BEDROCK_MODEL}/converse"
+    assert captured["authorization"] == "Bearer bedrock-secret"
+    assert captured["api_key"] is None
+    assert "bedrock-secret" not in captured["url"]
+    assert "model" not in captured["body"]
+    assert captured["body"]["system"] == [{"text": "Return JSON"}]
+    assert captured["body"]["inferenceConfig"]["maxTokens"] == 100
+    assert captured["body"]["toolConfig"]["toolChoice"]["tool"]["name"] == "answer"
+    assert captured["body"]["toolConfig"]["tools"][0]["toolSpec"]["name"] == "answer"
     dumped = json.dumps(response.model_dump())
-    assert "azure-secret" not in dumped
+    assert "bedrock-secret" not in dumped
     assert (await provider.health()).status == "healthy"
     assert provider.estimate_cost(REQUEST).known is False
 
 
 @pytest.mark.asyncio
+async def test_bedrock_accepts_text_json_fallback(no_extra_providers):
+    provider = bedrock_provider(transport=bedrock_transport(lambda _: completed_converse(as_text=True)))
+    response = await provider.complete(REQUEST)
+    assert response.output == {"answer": "ok"}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("response,expected,failure_class", [
-    (httpx.Response(401, json={"error": {"message": "azure-secret"}}),
+    (httpx.Response(401, json={"message": "bedrock-secret"}),
      "rejected the API key", FailureClass.AUTHORIZATION_REQUIRED),
-    (httpx.Response(402, json={"error": {}}), "credits are exhausted", FailureClass.RESOURCE_EXHAUSTED),
-    (httpx.Response(429, json={"error": {}}), "quota or rate limit", FailureClass.RATE_LIMIT),
-    (httpx.Response(503, json={"error": {}}), "HTTP 503", FailureClass.PROVIDER_OUTAGE),
-    (httpx.Response(404, json={"error": {}}), "deployment is unavailable", FailureClass.CAPABILITY_MISMATCH),
-    (httpx.Response(422, json={"error": {}}), "rejected the model request", FailureClass.MODEL_FAILURE),
-    (httpx.Response(200, json={"choices": [{"finish_reason": "length", "message": {"content": "{}"}}]}),
-     "incomplete", FailureClass.CONTEXT_LIMIT),
-    (httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": "not-json"}}]}),
+    (httpx.Response(402, json={}), "credits are exhausted", FailureClass.RESOURCE_EXHAUSTED),
+    (httpx.Response(429, json={}), "quota or rate limit", FailureClass.RATE_LIMIT),
+    (httpx.Response(503, json={}), "HTTP 503", FailureClass.PROVIDER_OUTAGE),
+    (httpx.Response(404, json={}), "model is unavailable", FailureClass.CAPABILITY_MISMATCH),
+    (httpx.Response(422, json={}), "rejected the model request", FailureClass.MODEL_FAILURE),
+    (httpx.Response(424, json={}), "rejected the model request", FailureClass.MODEL_FAILURE),
+    (completed_converse(stop_reason="max_tokens"), "incomplete", FailureClass.CONTEXT_LIMIT),
+    (httpx.Response(200, json={"output": {"message": {"content": [{"text": "not-json"}]}},
+                               "stopReason": "end_turn"}),
      "invalid structured", FailureClass.INVALID_OUTPUT),
-    (httpx.Response(200, json={"choices": [{"finish_reason": "content_filter", "message": {"content": ""}}]}),
-     "declined", FailureClass.POLICY_REFUSAL),
+    (completed_converse(stop_reason="guardrail_intervened"), "declined", FailureClass.POLICY_REFUSAL),
+    (completed_converse(stop_reason="content_filtered"), "declined", FailureClass.POLICY_REFUSAL),
 ])
-async def test_azure_errors_are_classified_and_do_not_leak(
+async def test_bedrock_errors_are_classified_and_do_not_leak(
         no_extra_providers, response, expected, failure_class):
-    provider = azure_provider(transport=azure_transport(lambda _: response))
+    provider = bedrock_provider(transport=bedrock_transport(lambda _: response))
     with pytest.raises(ProviderError, match=expected) as error:
         await provider.complete(REQUEST)
-    assert "azure-secret" not in str(error.value)
+    assert "bedrock-secret" not in str(error.value)
     assert error.value.failure_class == failure_class
 
 
 @pytest.mark.asyncio
-async def test_azure_timeout_and_outage_are_classified(no_extra_providers):
-    timeout_provider = azure_provider(
-        transport=azure_transport(lambda _: (_ for _ in ()).throw(httpx.ReadTimeout("timed out"))))
+async def test_bedrock_timeout_and_outage_are_classified(no_extra_providers):
+    timeout_provider = bedrock_provider(
+        transport=bedrock_transport(lambda _: (_ for _ in ()).throw(httpx.ReadTimeout("timed out"))))
     with pytest.raises(ProviderError, match="timed out") as timeout_error:
         await timeout_provider.complete(REQUEST)
     assert timeout_error.value.failure_class == FailureClass.TIMEOUT
 
-    outage_provider = azure_provider(
-        transport=azure_transport(lambda _: (_ for _ in ()).throw(httpx.ConnectError("offline"))))
-    with pytest.raises(ProviderError, match="Could not reach Azure OpenAI") as outage_error:
+    outage_provider = bedrock_provider(
+        transport=bedrock_transport(lambda _: (_ for _ in ()).throw(httpx.ConnectError("offline"))))
+    with pytest.raises(ProviderError, match="Could not reach Bedrock") as outage_error:
         await outage_provider.complete(REQUEST)
     assert outage_error.value.failure_class == FailureClass.PROVIDER_OUTAGE
 
 
 @pytest.mark.asyncio
 async def test_health_unconfigured_when_key_missing(no_extra_providers):
-    provider = AzureOpenAIModelProvider()
+    provider = BedrockModelProvider()
     assert provider.configured() is False
     health = await provider.health()
     assert health.status == "unconfigured"
@@ -217,73 +220,89 @@ async def test_health_unconfigured_when_key_missing(no_extra_providers):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("env", [
-    {"AZURE_OPENAI_API_KEY": "azure-secret"},
-    {"AZURE_OPENAI_ENDPOINT": AZURE_ENDPOINT},
-    {"AZURE_OPENAI_DEPLOYMENT": AZURE_DEPLOYMENT},
-    {"AZURE_OPENAI_API_KEY": "azure-secret", "AZURE_OPENAI_ENDPOINT": AZURE_ENDPOINT},
-    {"AZURE_OPENAI_API_KEY": "azure-secret", "AZURE_OPENAI_DEPLOYMENT": AZURE_DEPLOYMENT},
-    {"AZURE_OPENAI_ENDPOINT": AZURE_ENDPOINT, "AZURE_OPENAI_DEPLOYMENT": AZURE_DEPLOYMENT},
+    {"BEDROCK_MODEL": "amazon.nova-pro-v1:0"},
+    {"BEDROCK_REGION": "us-west-2"},
+    {"BEDROCK_BASE_URL": "https://bedrock.internal"},
+    {"AWS_ACCESS_KEY_ID": "AKIAEXAMPLE", "AWS_SECRET_ACCESS_KEY": "aws-secret",
+     "AWS_REGION": "us-east-1"},
 ])
-async def test_partial_azure_env_does_not_opt_in(monkeypatch, no_extra_providers, env):
+async def test_partial_bedrock_env_does_not_opt_in(monkeypatch, no_extra_providers, env):
     for name, value in env.items():
         monkeypatch.setenv(name, value)
-    provider = AzureOpenAIModelProvider()
+    provider = BedrockModelProvider()
     assert provider.configured() is False
     health = await provider.health()
     assert health.status == "unconfigured"
     with pytest.raises(ProviderError, match="not configured") as error:
         await provider.complete(REQUEST)
     assert error.value.failure_class == FailureClass.AUTHORIZATION_REQUIRED
-    assert "azure-secret" not in str(error.value)
+    assert "aws-secret" not in str(error.value)
+    assert "AKIAEXAMPLE" not in str(error.value)
 
 
 @pytest.mark.asyncio
-async def test_custom_endpoint_and_api_version_are_used(no_extra_providers):
+async def test_aws_bearer_token_alias_opts_in(monkeypatch, no_extra_providers):
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-alias")
+    captured = {}
+
+    def handler(request):
+        captured["authorization"] = request.headers.get("Authorization")
+        return completed_converse()
+
+    provider = BedrockModelProvider(transport=bedrock_transport(handler))
+    assert provider.configured() is True
+    assert (await provider.health()).status == "healthy"
+    await provider.complete(REQUEST)
+    assert captured["authorization"] == "Bearer bedrock-alias"
+
+
+@pytest.mark.asyncio
+async def test_custom_region_and_base_url_are_used(no_extra_providers):
     captured = {}
 
     def handler(request):
         captured["url"] = str(request.url)
-        return completed_chat(model="gpt-4o-mini")
+        return completed_converse()
 
-    provider = azure_provider(
-        model="gpt-4o-mini",
-        endpoint="https://internal.openai.azure.com",
-        deployment="gpt-4o-mini",
-        api_version="2024-08-01-preview",
-        transport=azure_transport(handler),
+    provider = bedrock_provider(
+        model="anthropic.claude-sonnet-4-5-20250929-v1:0",
+        region="eu-west-1",
+        base_url="https://vpce.bedrock-runtime.eu-west-1.vpce.amazonaws.com",
+        transport=bedrock_transport(handler),
     )
-    await provider.complete(REQUEST.model_copy(update={"model": "gpt-4o-mini"}))
+    await provider.complete(REQUEST.model_copy(
+        update={"model": "anthropic.claude-sonnet-4-5-20250929-v1:0"}))
     assert captured["url"] == (
-        "https://internal.openai.azure.com/openai/deployments/gpt-4o-mini"
-        "/chat/completions?api-version=2024-08-01-preview"
+        "https://vpce.bedrock-runtime.eu-west-1.vpce.amazonaws.com"
+        "/model/anthropic.claude-sonnet-4-5-20250929-v1:0/converse"
     )
 
 
-def test_azure_health_status_is_truthful_and_does_not_expose_key(monkeypatch, no_extra_providers):
-    status = azure_status()
+def test_bedrock_health_status_is_truthful_and_does_not_expose_key(monkeypatch, no_extra_providers):
+    status = bedrock_status()
     assert status == {
         "configured": False,
-        "model": None,
-        "endpoint": None,
-        "deployment": None,
-        "api_version": AZURE_API_VERSION,
-        "provider": "azure",
+        "model": BEDROCK_MODEL,
+        "region": BEDROCK_REGION,
+        "base_url": BEDROCK_BASE_URL,
+        "provider": "bedrock",
         "fallback": False,
     }
-    opt_in_azure(monkeypatch, AZURE_OPENAI_API_KEY="azure-secret",
-                 AZURE_OPENAI_DEPLOYMENT="gpt-4o-mini")
-    configured = azure_status()
+    opt_in_bedrock(monkeypatch, BEDROCK_API_KEY="bedrock-secret",
+                   BEDROCK_MODEL="amazon.nova-pro-v1:0", BEDROCK_REGION="us-west-2")
+    configured = bedrock_status()
     assert configured["configured"] is True
-    assert configured["model"] == "gpt-4o-mini"
-    assert configured["deployment"] == "gpt-4o-mini"
-    assert configured["endpoint"] == AZURE_ENDPOINT
+    assert configured["model"] == "amazon.nova-pro-v1:0"
+    assert configured["region"] == "us-west-2"
+    assert configured["base_url"] == default_bedrock_base_url("us-west-2")
     assert configured["fallback"] is False
     dumped = json.dumps(configured)
-    assert "azure-secret" not in dumped
-    assert "AZURE_OPENAI_API_KEY" not in dumped
+    assert "bedrock-secret" not in dumped
+    assert "BEDROCK_API_KEY" not in dumped
+    assert "AWS_BEARER_TOKEN_BEDROCK" not in dumped
 
 
-def test_build_model_provider_openai_only_ignores_unconfigured_azure(monkeypatch, no_extra_providers):
+def test_build_model_provider_openai_only_ignores_unconfigured_bedrock(monkeypatch, no_extra_providers):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     provider = build_model_provider()
     assert isinstance(provider, OpenAIResponsesModelProvider)
@@ -292,18 +311,18 @@ def test_build_model_provider_openai_only_ignores_unconfigured_azure(monkeypatch
     assert [item.provider_id for item in router.providers] == ["openai"]
 
 
-def test_build_router_registers_azure_when_fully_configured(monkeypatch, no_extra_providers):
+def test_build_router_registers_bedrock_when_key_set(monkeypatch, no_extra_providers):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    opt_in_azure(monkeypatch)
+    opt_in_bedrock(monkeypatch)
     stacked = build_model_provider()
     assert isinstance(stacked, FailoverModelProvider)
     assert stacked.primary.provider_id == "openai"
-    assert stacked.secondary.provider_id == "azure"
+    assert stacked.secondary.provider_id == "bedrock"
     router = build_router()
-    assert [item.provider_id for item in router.providers] == ["openai", "azure"]
+    assert [item.provider_id for item in router.providers] == ["openai", "bedrock"]
 
 
-def test_build_router_cloud_plus_azure_and_ollama(monkeypatch, no_extra_providers):
+def test_build_router_cloud_plus_bedrock_and_ollama(monkeypatch, no_extra_providers):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-test")
     monkeypatch.setenv("XAI_API_KEY", "xai-test")
@@ -315,7 +334,11 @@ def test_build_router_cloud_plus_azure_and_ollama(monkeypatch, no_extra_provider
     monkeypatch.setenv("TOGETHER_API_KEY", "together-test")
     monkeypatch.setenv("GROQ_API_KEY", "groq-test")
     monkeypatch.setenv("FIREWORKS_API_KEY", "fireworks-test")
-    opt_in_azure(monkeypatch)
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "azure-test")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com")
+    monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
+    monkeypatch.setenv("PERPLEXITY_API_KEY", "perplexity-test")
+    opt_in_bedrock(monkeypatch)
     monkeypatch.setenv("OLLAMA_MODEL", "llama3.2")
     stacked = build_model_provider()
     assert isinstance(stacked, FailoverModelProvider)
@@ -324,81 +347,81 @@ def test_build_router_cloud_plus_azure_and_ollama(monkeypatch, no_extra_provider
     router = build_router()
     assert [item.provider_id for item in router.providers] == [
         "openai", "openrouter", "xai", "anthropic", "mistral", "gemini", "cohere", "deepseek",
-        "together", "groq", "fireworks", "azure", "ollama",
+        "together", "groq", "fireworks", "azure", "perplexity", "bedrock", "ollama",
     ]
     controller = build_controller()
     assert [item.provider_id for item in controller.router.providers] == [
         "openai", "openrouter", "xai", "anthropic", "mistral", "gemini", "cohere", "deepseek",
-        "together", "groq", "fireworks", "azure", "ollama",
+        "together", "groq", "fireworks", "azure", "perplexity", "bedrock", "ollama",
     ]
 
 
-def test_build_model_provider_azure_only(monkeypatch, no_extra_providers):
-    opt_in_azure(monkeypatch)
+def test_build_model_provider_bedrock_only(monkeypatch, no_extra_providers):
+    opt_in_bedrock(monkeypatch)
     monkeypatch.setattr("app.llm.get_api_key", lambda: None)
     primary = OpenAIResponsesModelProvider(api_key="unused")
     monkeypatch.setattr(primary, "configured", lambda: False)
     provider = build_model_provider(primary=primary)
-    assert isinstance(provider, AzureOpenAIModelProvider)
+    assert isinstance(provider, BedrockModelProvider)
     router = build_router(model_provider=provider)
-    assert [item.provider_id for item in router.providers] == ["azure"]
+    assert [item.provider_id for item in router.providers] == ["bedrock"]
 
 
-def test_openai_plus_openrouter_still_failover_when_azure_set(monkeypatch, no_extra_providers):
+def test_openai_plus_openrouter_still_failover_when_bedrock_set(monkeypatch, no_extra_providers):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-test")
-    opt_in_azure(monkeypatch)
+    opt_in_bedrock(monkeypatch)
     stacked = build_model_provider()
     assert isinstance(stacked, FailoverModelProvider)
     assert stacked.primary.provider_id == "openai"
     assert stacked.secondary.provider_id == "openrouter"
     router = build_router()
-    assert [item.provider_id for item in router.providers] == ["openai", "openrouter", "azure"]
+    assert [item.provider_id for item in router.providers] == ["openai", "openrouter", "bedrock"]
 
 
 @pytest.mark.asyncio
-async def test_router_outage_walks_to_azure(no_extra_providers):
+async def test_router_outage_walks_to_bedrock(no_extra_providers):
     from tests.test_router import openai_like, openrouter_like
 
     def handler(_request):
-        return completed_chat(output={"answer": "from azure"})
+        return completed_converse(output={"answer": "from bedrock"})
 
     openai = openai_like(error=ProviderError("Could not reach OpenAI", FailureClass.PROVIDER_OUTAGE))
     openrouter = openrouter_like(
         error=ProviderError("Could not reach OpenRouter", FailureClass.PROVIDER_OUTAGE),
     )
-    azure = azure_provider(transport=azure_transport(handler))
-    router = ModelRouter([openai, openrouter, azure])
+    bedrock = bedrock_provider(transport=bedrock_transport(handler))
+    router = ModelRouter([openai, openrouter, bedrock])
     response = await router.complete(CapabilityRequest(reasoning="high"), REQUEST)
     assert openai.calls == 1
     assert openrouter.calls == 1
-    assert response.provider == "azure"
-    assert response.output == {"answer": "from azure"}
+    assert response.provider == "bedrock"
+    assert response.output == {"answer": "from bedrock"}
     assert response.failover_from == "openai"
     assert response.failover_reason == "PROVIDER_OUTAGE"
 
 
 @pytest.mark.asyncio
-async def test_local_only_does_not_select_azure(no_extra_providers):
+async def test_local_only_does_not_select_bedrock(no_extra_providers):
     from tests.test_router import openai_like, openrouter_like
 
-    azure = azure_provider(transport=azure_transport(lambda _: completed_chat()))
-    ollama = OllamaModelProvider(model="llama3.2", transport=azure_transport(lambda _: completed_chat()))
-    router = ModelRouter([openai_like(), openrouter_like(), azure, ollama])
+    bedrock = bedrock_provider(transport=bedrock_transport(lambda _: completed_converse()))
+    ollama = OllamaModelProvider(model="llama3.2", transport=bedrock_transport(lambda _: completed_converse()))
+    router = ModelRouter([openai_like(), openrouter_like(), bedrock, ollama])
     decision = await router.select(CapabilityRequest(privacy="local_only"))
     assert decision.selected.provider_id == "ollama"
-    assert all(candidate.provider_id != "azure" for candidate in decision.chain)
+    assert all(candidate.provider_id != "bedrock" for candidate in decision.chain)
 
 
 @pytest.mark.asyncio
-async def test_unconfigured_azure_is_skipped_and_cloud_still_serves(no_extra_providers):
+async def test_unconfigured_bedrock_is_skipped_and_cloud_still_serves(no_extra_providers):
     from tests.test_router import openai_like
 
-    azure = AzureOpenAIModelProvider()
+    bedrock = BedrockModelProvider()
     openai = openai_like(output={"answer": "cloud"})
-    router = ModelRouter([openai, azure])
+    router = ModelRouter([openai, bedrock])
     response = await router.complete(CapabilityRequest(reasoning="high"), REQUEST)
     assert response.provider == "openai"
     assert openai.calls == 1
     with pytest.raises(ProviderError, match="not configured"):
-        await azure.complete(REQUEST)
+        await bedrock.complete(REQUEST)

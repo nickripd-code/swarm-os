@@ -87,6 +87,11 @@ def no_local_env(monkeypatch):
     monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
     monkeypatch.delenv("PERPLEXITY_MODEL", raising=False)
     monkeypatch.delenv("PERPLEXITY_BASE_URL", raising=False)
+    monkeypatch.delenv("BEDROCK_API_KEY", raising=False)
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+    monkeypatch.delenv("BEDROCK_MODEL", raising=False)
+    monkeypatch.delenv("BEDROCK_REGION", raising=False)
+    monkeypatch.delenv("BEDROCK_BASE_URL", raising=False)
 
 
 @pytest.mark.asyncio

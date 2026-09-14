@@ -70,6 +70,15 @@ def get_perplexity_api_key() -> str | None:
     return key.strip() if key else None
 
 
+def get_bedrock_api_key() -> str | None:
+    """Bedrock bearer token. Prefer BEDROCK_API_KEY; AWS_BEARER_TOKEN_BEDROCK is the AWS alias.
+
+    Ambient IAM keys (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) do not opt in.
+    """
+    key = os.getenv("BEDROCK_API_KEY") or os.getenv("AWS_BEARER_TOKEN_BEDROCK")
+    return key.strip() if key else None
+
+
 def get_api_key() -> str | None:
     if os.getenv("OPENAI_API_KEY"):
         return os.environ["OPENAI_API_KEY"].strip()
