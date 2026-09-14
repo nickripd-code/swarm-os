@@ -136,6 +136,8 @@ class OpenAIResponsesModelProvider(ModelProvider):
         return [ModelDescriptor(
             provider=self.provider_id,
             model=self.model,
+            privacy="cloud",
+            available=self.configured(),
             capabilities=self.capabilities(self.model),
             context_limits=self.context_limits(self.model),
         )]
@@ -253,6 +255,8 @@ class OpenRouterModelProvider(ModelProvider):
         return [ModelDescriptor(
             provider=self.provider_id,
             model=self.model,
+            privacy="cloud",
+            available=self.configured(),
             capabilities=self.capabilities(self.model),
             context_limits=self.context_limits(self.model),
         )]

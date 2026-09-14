@@ -62,6 +62,8 @@ async def test_openai_adapter_implements_provider_contract_and_tracks_usage():
     models = await provider.list_models()
     assert [m.model for m in models] == ["gpt-6-astra"]
     assert models[0].provider == "openai"
+    assert models[0].privacy == "cloud"
+    assert models[0].available is True
     assert models[0].capabilities.structured_outputs is True
     assert models[0].context_limits.context_tokens is None
 
@@ -96,6 +98,8 @@ async def test_openrouter_adapter_implements_provider_contract_and_tracks_usage(
     models = await provider.list_models()
     assert models[0].provider == "openrouter"
     assert models[0].model == "openai/gpt-4o"
+    assert models[0].privacy == "cloud"
+    assert models[0].available is True
 
     request = REQUEST.model_copy(update={"model": "openai/gpt-4o"})
     response = await provider.complete(request)

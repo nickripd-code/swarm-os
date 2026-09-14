@@ -35,10 +35,14 @@ class ModelDescriptor(BaseModel):
     provider: str
     model: str
     local: bool = False
+    privacy: Literal["cloud", "local", "unknown"] = "unknown"
     capabilities: ModelCapabilities = Field(default_factory=ModelCapabilities)
     context_limits: ContextLimits = Field(default_factory=ContextLimits)
     price_input_per_million: float | None = Field(default=None, ge=0)
     price_output_per_million: float | None = Field(default=None, ge=0)
+    latency_ms: float | None = Field(default=None, ge=0)
+    reliability: float | None = Field(default=None, ge=0, le=1)
+    available: bool | None = None
 
 
 class ModelRequest(BaseModel):

@@ -38,7 +38,7 @@ Mission, agent, task, and event state is durable in SQLite. A graceful server sh
 
 ## Next integration seams
 
-- Add a fuller provider registry and capability-based routing beyond outage failover.
+- Wire the provider-neutral registry/router in `app/routing.py` into `AgentSpec` and the runtime agent factory. It already produces ranked primary/fallback plans with hard capability, budget, latency, context and privacy filters; live mission execution still uses the fixed OpenAI/OpenRouter outage path.
 - Add concrete research, code, messaging, and HTTP tool adapters.
 - Implement an isolated EVM wallet service behind `WalletAdapter` with recipient/asset/amount policy checks.
 
