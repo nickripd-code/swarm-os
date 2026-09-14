@@ -57,6 +57,9 @@ class EventType(StrEnum):
     VERIFICATION_STARTED = "verification.started"
     VERIFICATION_PASSED = "verification.passed"
     VERIFICATION_FAILED = "verification.failed"
+    VERIFICATION_EVIDENCE_STARTED = "verification.evidence.started"
+    VERIFICATION_EVIDENCE_PASSED = "verification.evidence.passed"
+    VERIFICATION_EVIDENCE_FAILED = "verification.evidence.failed"
 
     PAYMENT_CREATED = "payment.created"
     USER_ANSWERED = "user.answered"

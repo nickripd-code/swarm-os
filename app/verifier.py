@@ -2,6 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from .evidence import (
+    EvidenceRunner,
+    collect_evidence_steps,
+    covered_fabricated_markers,
+    normalize_step,
+    public_evidence_runs,
+)
 from .models import FailureClass
 from .providers import ProviderError
 
@@ -65,6 +72,8 @@ def validate_verification(output: dict[str, Any]) -> dict[str, Any]:
     }
     if "_meta" in output:
         result["_meta"] = output["_meta"]
+    if "evidence_runs" in output:
+        result["evidence_runs"] = public_evidence_runs(output.get("evidence_runs"))
     return result
 
 
@@ -73,7 +82,11 @@ def fabricated_claims(summary: str) -> list[str]:
     return [marker.strip() for marker in _FABRICATED_MARKERS if marker in text]
 
 
-def local_evidence_check(state: dict[str, Any], claim: dict[str, Any]) -> dict[str, Any]:
+def local_evidence_check(
+    state: dict[str, Any],
+    claim: dict[str, Any],
+    evidence_steps: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Deterministic fail-closed precheck. A pass here is not success — the model must still verify."""
     summary = str((claim or {}).get("summary") or "").strip()
     if not summary:
@@ -105,12 +118,15 @@ def local_evidence_check(state: dict[str, Any], claim: dict[str, Any]) -> dict[s
             "rationale": "Specialists produced no completed artifacts to verify",
             "evidence": [str(agent.get("role") or "specialist") for agent in specialists],
         }
+    steps = evidence_steps if evidence_steps is not None else collect_evidence_steps(state, claim)
+    normalized = [normalize_step(step) for step in steps]
     fabricated = fabricated_claims(summary)
-    if fabricated:
+    remaining = [marker for marker in fabricated if marker not in covered_fabricated_markers(normalized)]
+    if remaining:
         return {
             "verdict": "fail",
             "rationale": "Claim asserts unverified external work",
-            "evidence": fabricated,
+            "evidence": remaining,
         }
     evidence = [summary, *outputs[:5]]
     return {
@@ -118,3 +134,29 @@ def local_evidence_check(state: dict[str, Any], claim: dict[str, Any]) -> dict[s
         "rationale": "Claim has local artifact support; model verification is still required",
         "evidence": evidence,
     }
+
+
+async def check_claim_with_evidence(
+    state: dict[str, Any],
+    claim: dict[str, Any],
+    runner: EvidenceRunner | None = None,
+) -> dict[str, Any]:
+    """Local precheck plus optional external runners. A pass is still not mission success."""
+    steps = collect_evidence_steps(state, claim)
+    pretest = local_evidence_check(state, claim, evidence_steps=steps)
+    if not verification_accepted(pretest):
+        return pretest
+    if not steps:
+        return pretest
+    evidence = await (runner or EvidenceRunner()).run(steps, state)
+    pretest["evidence_runs"] = public_evidence_runs(evidence.get("runs"))
+    pretest["evidence"] = [
+        *list(pretest.get("evidence") or []),
+        *[str(run.get("detail") or "") for run in pretest["evidence_runs"] if run.get("detail")],
+    ]
+    if not evidence.get("ok"):
+        pretest["verdict"] = "fail"
+        pretest["rationale"] = str(evidence.get("rationale") or "External evidence failed")
+        return pretest
+    pretest["rationale"] = str(evidence.get("rationale") or pretest["rationale"])
+    return pretest

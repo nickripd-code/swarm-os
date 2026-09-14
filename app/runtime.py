@@ -23,6 +23,7 @@ from .llm import (
     ProviderError, RETRYABLE_FAILURE_CLASSES, retry_delay_seconds,
 )
 from .tools import ToolCall, ToolError, ToolProvider, build_tool_provider, public_tool_data
+from .evidence import public_evidence_runs
 from .verifier import public_verification, verification_accepted
 from .payments import PaymentError, PaymentProvider, resolve_payment_provider
 from .workspace import WorkspaceError, WorkspaceProvider, build_workspace_provider
@@ -856,6 +857,9 @@ class SwarmRuntime:
                         ))
                         claim = {"summary": decision["summary"], "mode": self.controller.mode,
                                  "outputs": [t.output for t in self.tasks[mission.id] if t.output]}
+                        steps = decision.get("evidence_steps") or decision.get("checks")
+                        if isinstance(steps, list):
+                            claim["evidence_steps"] = steps
                         await self._verify_finish(mission, root, claim)
                         mission.result = claim
                         mission.status = MissionStatus.COMPLETED
@@ -991,6 +995,7 @@ class SwarmRuntime:
                 ) from exc
             raise
         public = public_verification(result)
+        await self._emit_evidence_events(mission.id, public, root.id)
         if not verification_accepted(public):
             await self.emit(mission.id, EventType.VERIFICATION_FAILED, {
                 **public,
@@ -1001,6 +1006,22 @@ class SwarmRuntime:
                 FailureClass.VERIFICATION_FAILURE,
             )
         await self.emit(mission.id, EventType.VERIFICATION_PASSED, public, root.id)
+
+    async def _emit_evidence_events(self, mission_id, public: dict[str, Any], actor_id) -> None:
+        runs = public_evidence_runs(public.get("evidence_runs"))
+        if not runs:
+            return
+        await self.emit(mission_id, EventType.VERIFICATION_EVIDENCE_STARTED, {
+            "count": len(runs),
+            "kinds": [str(run.get("kind") or "unknown") for run in runs],
+        }, actor_id)
+        for run in runs:
+            event = (
+                EventType.VERIFICATION_EVIDENCE_PASSED
+                if run.get("ok")
+                else EventType.VERIFICATION_EVIDENCE_FAILED
+            )
+            await self.emit(mission_id, event, run, actor_id)
 
     def _state(self, mission: Mission) -> dict[str, Any]:
         used = self.tool_calls_used(mission.id)
