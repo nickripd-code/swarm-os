@@ -19,7 +19,7 @@ from .leases import ClaimOutcome, LeaseConflict, WorkerLeases
 from .models import utcnow
 from .store import Store, WorkItemRow
 
-JOB_STATUSES = frozenset({"pending", "claimed", "completed"})
+JOB_STATUSES = frozenset({"pending", "claimed", "completed", "failed"})
 DEFAULT_JOB_KIND = "work"
 
 
@@ -81,6 +81,13 @@ class WorkItem:
 class ClaimedWork:
     item: WorkItem
     lease: ClaimOutcome
+
+
+@dataclass(frozen=True)
+class FailedWork:
+    item: WorkItem
+    released_lease_id: str
+    retry_scheduled: bool
 
 
 def _row_to_item(row: WorkItemRow) -> WorkItem:
@@ -217,8 +224,8 @@ class WorkQueue:
             row = db.get(WorkItemRow, item_id)
             if row is None:
                 raise QueueError("Work item not found")
-            if row.status == "completed":
-                raise QueueError("Work item already completed")
+            if row.status in {"completed", "failed"}:
+                raise QueueError(f"Work item already {row.status}")
             if row.status != "claimed":
                 raise QueueError("Only a claimed work item can be completed")
             if row.owner_id != owner_id:
@@ -237,6 +244,61 @@ class WorkQueue:
             db.flush()
             return _row_to_item(row)
 
+    def fail(
+        self,
+        item_id: str,
+        owner_id: str,
+        error: dict[str, Any],
+        *,
+        mission_id: str | None = None,
+        retry_at: datetime | None = None,
+    ) -> FailedWork:
+        """Record a real worker failure and optionally requeue after a not-before time."""
+        if not owner_id:
+            raise QueueError("Lease owner is required")
+        if not isinstance(error, dict) or not error:
+            raise QueueError("Work item failure must be a non-empty object")
+        with self.store.sessions.begin() as db:
+            row = db.get(WorkItemRow, item_id)
+            if row is None:
+                raise QueueError("Work item not found")
+            if mission_id and row.mission_id != mission_id:
+                raise QueueError("Work item does not belong to this mission")
+            if row.status in {"completed", "failed"}:
+                raise QueueError(f"Work item already {row.status}")
+            if row.status != "claimed":
+                raise QueueError("Only a claimed work item can report failure")
+            if row.owner_id != owner_id:
+                raise LeaseConflict("Only the claiming worker can fail a work item")
+            now = utcnow()
+            if row.expires_at is None or _aware(row.expires_at) <= now:
+                raise LeaseConflict("Expired jobs must be reclaimed, not failed")
+            if not row.lease_id:
+                raise QueueError("Claimed work item is missing a lease")
+            released_lease_id = row.lease_id
+            self.leases.release_in_session(db, released_lease_id, owner_id)
+            row.result = _dump_object(error)
+            row.updated_at = now
+            if retry_at is None:
+                row.status = "failed"
+                row.completed_at = now
+                row.expires_at = now
+                retry_scheduled = False
+            else:
+                row.status = "pending"
+                row.owner_id = None
+                row.lease_id = None
+                row.available_at = _aware(retry_at)
+                row.expires_at = None
+                row.completed_at = None
+                retry_scheduled = True
+            db.flush()
+            return FailedWork(
+                item=_row_to_item(row),
+                released_lease_id=released_lease_id,
+                retry_scheduled=retry_scheduled,
+            )
+
     def _select_row(self, db, *, item_id: str | None, mission_id: str | None,
                     owner_id: str, now: datetime) -> WorkItemRow | None:
         if item_id:
@@ -245,8 +307,8 @@ class WorkQueue:
                 raise QueueError("Work item not found")
             if mission_id and row.mission_id != mission_id:
                 raise QueueError("Work item does not belong to this mission")
-            if row.status == "completed":
-                raise QueueError("Work item already completed")
+            if row.status in {"completed", "failed"}:
+                raise QueueError(f"Work item already {row.status}")
             if row.status not in JOB_STATUSES:
                 raise QueueError(f"Unsupported work item status: {row.status}")
             if _held(row, now) and row.owner_id != owner_id:

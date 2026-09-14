@@ -74,6 +74,8 @@ UI_EVENT_TYPES = {
     "lease.released",
     "job.enqueued",
     "job.completed",
+    "job.failed",
+    "job.retry_scheduled",
     "budget.updated",
     "budget.warning",
 }
@@ -103,6 +105,8 @@ def test_event_type_values_match_historical_ui_strings():
     assert EventType.LEASE_RELEASED == "lease.released"
     assert EventType.JOB_ENQUEUED == "job.enqueued"
     assert EventType.JOB_COMPLETED == "job.completed"
+    assert EventType.JOB_FAILED == "job.failed"
+    assert EventType.JOB_RETRY_SCHEDULED == "job.retry_scheduled"
     assert EventType.BUDGET_UPDATED == "budget.updated"
     assert EventType.BUDGET_WARNING == "budget.warning"
     assert EventType.ORG_CHANGED == "org.changed"
