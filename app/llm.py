@@ -779,6 +779,22 @@ def response_format(name: str, properties: dict) -> dict:
                        "required": list(properties), "additionalProperties": False}}
 
 
+EVIDENCE_STEP_FORMAT = {
+    "type": "object",
+    "properties": {
+        "kind": {"type": "string", "enum": ["pytest", "http", "file"]},
+        "paths": {"type": ["array", "null"], "items": {"type": "string"}},
+        "path": {"type": ["string", "null"]},
+        "url": {"type": ["string", "null"]},
+        "status": {"type": ["integer", "null"]},
+        "contains": {"type": ["string", "null"]},
+        "sha256": {"type": ["string", "null"]},
+    },
+    "required": ["kind", "paths", "path", "url", "status", "contains", "sha256"],
+    "additionalProperties": False,
+}
+
+
 DECISION_FORMAT = response_format("mission_decision", {
     "action": {"type": "string", "enum": ["spawn", "replace", "reparent", "retire", "finish", "wait", "ask", "blocked", "use_tool"]},
     "role": {"type": ["string", "null"]},
@@ -791,7 +807,7 @@ DECISION_FORMAT = response_format("mission_decision", {
     "question": {"type": ["string", "null"]},
     "tool": {"type": ["string", "null"]},
     "arguments_json": {"type": ["string", "null"]},
-    "evidence_steps": {"type": ["array", "null"], "items": {"type": "object"}},
+    "evidence_steps": {"type": ["array", "null"], "items": EVIDENCE_STEP_FORMAT},
 })
 WORK_FORMAT = response_format("worker_result", {
     "status": {"type": "string", "enum": ["completed", "blocked", "use_tool", "ask"]},
@@ -800,7 +816,7 @@ WORK_FORMAT = response_format("worker_result", {
     "question": {"type": ["string", "null"]},
     "tool": {"type": ["string", "null"]},
     "arguments_json": {"type": ["string", "null"]},
-    "evidence_steps": {"type": ["array", "null"], "items": {"type": "object"}},
+    "evidence_steps": {"type": ["array", "null"], "items": EVIDENCE_STEP_FORMAT},
 })
 VERIFICATION_FORMAT = response_format("verification_result", {
     "verdict": {"type": "string", "enum": ["pass", "fail", "inconclusive"]},

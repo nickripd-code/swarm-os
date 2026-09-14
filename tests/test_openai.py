@@ -2,7 +2,7 @@ import json
 import httpx
 import pytest
 
-from app.llm import OpenAIProvider, ProviderError, retry_delay_seconds
+from app.llm import DECISION_FORMAT, WORK_FORMAT, OpenAIProvider, ProviderError, retry_delay_seconds
 from app.models import FailureClass
 
 
@@ -70,3 +70,13 @@ def test_retry_delay_is_bounded_exponential_backoff():
     assert retry_delay_seconds(2) == 1.0
     assert retry_delay_seconds(3) == 2.0
     assert retry_delay_seconds(10) == 8.0
+
+
+def test_strict_response_schemas_close_nested_evidence_objects():
+    for response_schema in (DECISION_FORMAT, WORK_FORMAT):
+        schema = response_schema["schema"]
+        assert schema["additionalProperties"] is False
+        item = schema["properties"]["evidence_steps"]["items"]
+        assert item["additionalProperties"] is False
+        assert set(item["required"]) == set(item["properties"])
+        assert item["properties"]["kind"]["enum"] == ["pytest", "http", "file"]
