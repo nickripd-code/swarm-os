@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .models import AnswerRequest, Mission, MissionCreate, PaymentIntent, MissionStatus, utcnow
+from .models import AnswerRequest, Mission, MissionCreate, PaymentIntent, MissionStatus
 from .runtime import PolicyError, SwarmRuntime
 from .store import Store
 from .health import openai_status
@@ -21,11 +21,9 @@ BASE = Path(__file__).parent
 async def lifespan(app):
     for mission in store.list_missions():
         if mission.status in {MissionStatus.PENDING, MissionStatus.RUNNING, MissionStatus.WAITING}:
-            mission.status, mission.updated_at = MissionStatus.STOPPED, utcnow()
-            store.save_mission(mission)
-            await runtime.emit(mission.id, "mission.stopped", {"reason": "Server restarted; execution was interrupted"})
+            await runtime.resume(mission)
     yield
-    await runtime.stop_all()
+    await runtime.suspend_all()
 
 
 app = FastAPI(title="Agent Swarm", version="0.2.0", lifespan=lifespan)

@@ -7,3 +7,4 @@ swarm.db
 .env.*
 !.env.example
 swarm.db-*
+.worktrees/

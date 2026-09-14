@@ -1,7 +1,10 @@
 import pytest
 import asyncio
+from datetime import timedelta
 
-from app.models import Mission, FailureClass
+from app.models import (
+    AgentStatus, FailureClass, Mission, MissionStatus, Task, TaskStatus, utcnow,
+)
 from app.runtime import SwarmRuntime, PolicyError
 from app.llm import FallbackController
 from app.llm import LLMProvider, ProviderError, DEFAULT_MAX_RETRIES, retry_delay_seconds
@@ -234,3 +237,112 @@ async def test_runtime_deadline_cancels_worker(tmp_path):
     assert saved.result["failure_class"] == "TIMEOUT"
     assert any(e.event_type == "mission.failed" and e.payload.get("failure_class") == "TIMEOUT"
                for e in store.events(mission.id))
+
+
+class ResumeProvider(LLMProvider):
+    mode = "test"
+
+    def __init__(self):
+        self.work_calls = 0
+        self.decision_calls = 0
+
+    async def work(self, state, agent):
+        self.work_calls += 1
+        return {"status": "completed", "finding": "Recovered work completed", "limitations": []}
+
+    async def decide(self, state):
+        self.decision_calls += 1
+        assert any(task["status"] == "completed" for task in state["tasks"])
+        return {"action": "finish", "summary": "Recovered mission completed"}
+
+
+@pytest.mark.asyncio
+async def test_unfinished_mission_rehydrates_and_resumes_without_duplicate_controller(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    provider = ResumeProvider()
+    before_crash = SwarmRuntime(store, controller=provider)
+    mission = Mission(goal="Survive a process crash", status=MissionStatus.RUNNING)
+    mission.updated_at = utcnow()
+    store.save_mission(mission)
+    root = await before_crash.spawn(mission, "mission_controller", "Coordinate",
+                                    capabilities=["spawn", "coordinate", "reason"])
+    await before_crash.agent_status(root, AgentStatus.RUNNING)
+    child = await before_crash.spawn(mission, "researcher", "Recover this assignment", root, ["reason"])
+    await before_crash.agent_status(child, AgentStatus.RUNNING)
+    interrupted = Task(mission_id=mission.id, agent_id=child.id, title="Researcher",
+                       description=child.purpose, status=TaskStatus.RUNNING)
+    await before_crash.emit(mission.id, "task.started", interrupted.model_dump(mode="json"), child.id)
+
+    recovered = SwarmRuntime(store, controller=provider)
+    await recovered.resume(store.get_mission(mission.id))
+    job = recovered.runs[mission.id]
+    await job
+
+    saved = store.get_mission(mission.id)
+    assert saved.status == MissionStatus.COMPLETED
+    assert saved.result["summary"] == "Recovered mission completed"
+    assert provider.work_calls == 1
+    assert len(recovered.agents[mission.id]) == 2
+    assert len([agent for agent in recovered.agents[mission.id] if agent.parent_id is None]) == 1
+    events = store.events(mission.id)
+    assert any(event.event_type == "mission.resumed" for event in events)
+    old_task_events = [event for event in events
+                       if event.payload.get("id") == str(interrupted.id)]
+    assert old_task_events[-1].event_type == "task.stopped"
+    projected = store.project(mission.id)
+    assert sorted(task["status"] for task in projected["tasks"]) == ["completed", "stopped"]
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_original_runtime_deadline(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    provider = ResumeProvider()
+    mission = Mission(goal="Expired work", status=MissionStatus.RUNNING,
+                      limits={"max_runtime_seconds": 1})
+    mission.updated_at = utcnow() - timedelta(seconds=10)
+    store.save_mission(mission)
+
+    recovered = SwarmRuntime(store, controller=provider)
+    await recovered.resume(mission)
+    await recovered.runs[mission.id]
+
+    saved = store.get_mission(mission.id)
+    assert saved.status == MissionStatus.FAILED
+    assert saved.result["failure_class"] == "TIMEOUT"
+    assert provider.work_calls == 0
+    assert provider.decision_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_process_suspend_preserves_running_mission_for_recovery(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    provider = SlowProvider()
+    runtime = SwarmRuntime(store, controller=provider)
+    mission = Mission(goal="Continue after graceful server restart")
+    store.save_mission(mission)
+    await runtime.start(mission)
+    await asyncio.wait_for(provider.entered.wait(), 2)
+
+    suspended = await asyncio.wait_for(runtime.suspend_all(), 2)
+
+    assert suspended == [mission.id]
+    assert provider.cancelled
+    saved = store.get_mission(mission.id)
+    assert saved.status == MissionStatus.RUNNING
+    assert saved.result is None
+    events = store.events(mission.id)
+    assert any(event.event_type == "mission.suspended" for event in events)
+    assert not any(event.event_type in {"mission.stopped", "mission.failed"} for event in events)
+    projected = store.project(mission.id)
+    assert any(task["status"] == "running" for task in projected["tasks"])
+
+
+def test_runtime_deadline_uses_start_anchor_not_later_mission_update(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(store, controller=ResumeProvider())
+    mission = Mission(goal="Do not extend my deadline", status=MissionStatus.RUNNING,
+                      limits={"max_runtime_seconds": 5})
+    runtime.started_at[mission.id] = utcnow() - timedelta(seconds=10)
+    mission.updated_at = utcnow()
+
+    assert runtime.remaining_runtime(mission) < 0
