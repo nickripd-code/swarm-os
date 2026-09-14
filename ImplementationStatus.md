@@ -40,7 +40,7 @@ This is an early FastAPI Mission Control MVP. Most of the north star is not buil
 - Health endpoint reports OpenAI configured/model/reasoning, `fallback: false`.
 - Human stop: per-mission stop and global STOP ALL; in-flight workers are cancelled.
 - Server restart marks leftover pending/running/waiting missions `stopped` (does not resume).
-- Vanilla JS control room: live event stream, agent tree, inspector, activity, result panel, explicit **preview** mode labeled as non-running.
+- Vanilla JS control room: live event stream, agent tree, inspector, activity, result panel, explicit **preview** mode labeled as non-running, **objective HUD** (`#objectiveHud`) with truthful mode/status chips, and a critical **alert stack** (`#alerts`) for real terminal events (`mission.failed` including `failure_class`, `mission.completed`, blocked, stop/stop-all). Optional Notification API only after a launch gesture, and only when the tab is hidden.
 - Tests: runtime completion/replay, spawn limits, simulated payments, provider failure stays failed with class, stop-all, runtime deadline/`TIMEOUT`, OpenAI usage + classified HTTP/timeout/outage errors, retry-then-success and retry-exhausted for `RATE_LIMIT`/`TIMEOUT`, non-retryable classes fail immediately.
 
 ---
@@ -58,7 +58,7 @@ This is an early FastAPI Mission Control MVP. Most of the north star is not buil
 | Persistence | Missions + events survive process restart | Agents/tasks are in-memory during a run; restart **stops** work instead of resuming. No checkpoints, no org graph table. |
 | Policy | Limits + capability allowlist + fail-closed wallet | Not an external Policy Engine. LLM can still choose actions inside the allowlist; no human-approval gate for irreversible acts beyond payments. |
 | Credentials | Key stays in env/cred manager | No capability broker. Agents do not request capabilities through a broker; the process holds the OpenAI key and calls the API. |
-| UI | Agent tree + inspector + HUD-ish stats | Not a game world. Preview mode is synthetic (explicitly labeled). No cost HUD, replay scrubber, command bar, org graph view. |
+| UI | Agent tree + inspector + objective HUD (mode/status) + critical in-app alerts | Not a game world. Preview is synthetic (explicitly labeled). No cost HUD, replay scrubber, command bar, org graph view, or Pixi/React. Alerts are terminal mission events only — no fake work animations. |
 | Human control | Stop / stop-all | No pause/resume, approve/deny, inject info that the runtime consumes, kill individual agent, change budget. `/answers/{question_id}` stores an event only. |
 | Memory | Mission JSON + event log | No scoped memory, retrieval, or learned strategy store. Each model call gets a dump of current agents/tasks. |
 | Cost | `budget` / `spent` on payments only | No token-cost accounting, estimates, or ResourceScheduler. Token counts are usage telemetry, not money. |
@@ -125,7 +125,7 @@ Nothing in the current test suite is known red. UI preview is synthetic by desig
 
 ## What must stay untouched (this and nearby slices)
 
-- Vanilla JS Mission Control unless a **tiny** status surface is required. Do not rewrite the UI; do not add React/Pixi until a dedicated UI slice.
+- Vanilla JS Mission Control **plus** the truthful status HUD / critical alert stack. Do not replace with React/Pixi in this phase. Do not add fake progress or decorative workers.
 - Fail-closed behavior: no fake success, no silent `FallbackController` in production, no demo substitute after provider errors.
 - Credential handling: keys never in model context or HTTP responses.
 - Simulated payments by default; live wallet remains unconfigured/fail-closed.
@@ -152,9 +152,11 @@ Nothing in the current test suite is known red. UI preview is synthetic by desig
 
 ## NEXT PRIORITY
 
-**Recommended next slice (slice 3):** provider-independent `ModelProvider` contract (health, model id, complete) + **OpenRouter** as a second adapter behind the same `LLMProvider.decide/work` used today, so classified `PROVIDER_OUTAGE` has a real alternative. Still fail closed if every provider is down. Still no UI rewrite.
+**Parallel UI slice (this change):** Mission Control now shows truthful mode/status, `failure_class` on failed results, and critical alerts for real websocket/stop events. That does **not** replace the provider lane.
 
-Why this, not a UI rewrite or full ModelRouter:
+**Recommended next backend slice:** provider-independent `ModelProvider` contract (health, model id, complete) + **OpenRouter** as a second adapter behind the same `LLMProvider.decide/work` used today, so classified `PROVIDER_OUTAGE` has a real alternative. Still fail closed if every provider is down. Still no game-world UI rewrite.
+
+Why OpenRouter next, not a game-world rewrite or full ModelRouter:
 
 1. Retries now absorb transient `RATE_LIMIT` / `TIMEOUT` on the current OpenAI path. A true outage still kills the objective.
 2. A second adapter is the smallest way to act on `PROVIDER_OUTAGE` without inventing a routing framework.
@@ -178,4 +180,4 @@ Why this, not a UI rewrite or full ModelRouter:
 - Single production provider: `OpenAIProvider` → `https://api.openai.com/v1/responses`. `FallbackController` is a test fixture (`mode = "demo"`). Retry/backoff for `RATE_LIMIT`/`TIMEOUT` lives in `SwarmRuntime.model_call`, not inside the HTTP adapter (so events and the mission deadline apply).
 - Tests are extended in this slice rather than replaced.
 - No TODOs in application code.
-- Hypotheses checked: OpenAI-only in `app/llm.py`; classified `RATE_LIMIT`/`TIMEOUT` now retry then fail closed; SQLite missions+events; agents/tasks in-memory / event-projected; UI vanilla JS and left unchanged this slice.
+- Hypotheses checked: OpenAI-only in `app/llm.py`; classified `RATE_LIMIT`/`TIMEOUT` now retry then fail closed; SQLite missions+events; agents/tasks in-memory / event-projected; UI vanilla JS with objective HUD + critical alerts wired to existing events.

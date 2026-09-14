@@ -20,6 +20,24 @@
       <form id="missionForm" class="mission-form"><label class="sr-only" for="goal">Your mission</label><span class="command-prompt" aria-hidden="true">↗</span><input id="goal" name="goal" required minlength="3" maxlength="4000" placeholder="Give the swarm a goal…" autocomplete="off"><button id="launch" type="submit">Launch mission <span aria-hidden="true">↗</span></button></form>
       <div class="command-footer"><span id="missionCaption">One mission. As many minds as it needs.</span><div class="mission-tools"><button id="preview" type="button" class="text-button">Explore a preview</button><label class="sr-only" for="history">Mission history</label><select id="history"><option value="">Mission history</option></select></div></div>
     </section>
+    <section class="objective-hud" id="objectiveHud" aria-label="Mission status">
+      <div class="hud-row">
+        <div class="hud-objective">
+          <span class="eyebrow">OBJECTIVE</span>
+          <p id="objectiveText">Awaiting a mission.</p>
+        </div>
+        <div class="hud-chips">
+          <span id="missionMode" class="hud-chip mode standby">STANDBY</span>
+          <span id="missionStatus" class="hud-chip status idle">IDLE</span>
+        </div>
+      </div>
+      <dl class="hud-stats">
+        <div><dt>Elapsed</dt><dd id="hudElapsed">—</dd></div>
+        <div><dt>Agents</dt><dd id="hudAgents">0</dd></div>
+        <div><dt>Tasks done</dt><dd id="hudTasks">0</dd></div>
+        <div><dt>Tokens</dt><dd id="hudTokens">0</dd></div>
+      </dl>
+    </section>
     <div class="notice" id="notice" role="alert" hidden></div>
     <section class="workspace">
       <div class="map-panel">
@@ -36,8 +54,9 @@
         <section class="activity-section"><div class="activity-heading"><h2>Activity</h2><span id="eventCount">0 events</span></div><ol id="activity"><li class="empty-activity">The mission’s story will appear here.</li></ol></section>
       </aside>
     </section>
-    <section class="result-panel" id="resultPanel" hidden><div class="result-heading"><div><span class="eyebrow">MISSION OUTPUT</span><h2 id="resultTitle">The result</h2></div><button class="text-button" id="copyResult" type="button">Copy result</button></div><div id="resultText"></div></section>
+    <section class="result-panel" id="resultPanel" hidden><div class="result-heading"><div><span class="eyebrow">MISSION OUTPUT</span><h2 id="resultTitle">The result</h2><p id="resultMeta" class="result-meta" hidden></p></div><button class="text-button" id="copyResult" type="button">Copy result</button></div><div id="resultText"></div></section>
   </main>
+  <div id="alerts" class="alert-stack" role="region" aria-label="Critical alerts" aria-live="assertive"></div>
   <div id="announcement" class="sr-only" aria-live="polite"></div>
 </body>
 </html>
