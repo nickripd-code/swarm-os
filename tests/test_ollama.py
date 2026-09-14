@@ -65,6 +65,9 @@ def no_ollama_env(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_MODEL", raising=False)
     monkeypatch.delenv("GEMINI_BASE_URL", raising=False)
+    monkeypatch.delenv("COHERE_API_KEY", raising=False)
+    monkeypatch.delenv("COHERE_MODEL", raising=False)
+    monkeypatch.delenv("COHERE_BASE_URL", raising=False)
 
 
 @pytest.mark.asyncio
