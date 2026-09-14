@@ -9,7 +9,7 @@ from uuid import UUID
 from sqlalchemy import DateTime, Integer, String, Text, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
-from .models import Mission, MissionEvent
+from .models import AgentSpec, Mission, MissionEvent, Task, utcnow
 
 
 class Base(DeclarativeBase):
@@ -33,10 +33,29 @@ class MissionRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class AgentRow(Base):
+    __tablename__ = "agents"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    mission_id: Mapped[str] = mapped_column(String(36), index=True)
+    payload: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class TaskRow(Base):
+    __tablename__ = "tasks"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    mission_id: Mapped[str] = mapped_column(String(36), index=True)
+    payload: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class Store:
     def __init__(self, path: str = "swarm.db"):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.engine = create_engine(f"sqlite:///{path}", connect_args={"check_same_thread": False})
+        # create_all is additive: existing missions/events tables and rows are left intact.
         Base.metadata.create_all(self.engine)
         self.sessions = sessionmaker(self.engine, expire_on_commit=False)
 
@@ -59,7 +78,49 @@ class Store:
             rows = db.scalars(select(MissionRow).order_by(MissionRow.updated_at.desc())).all()
             return [Mission.model_validate_json(row.payload) for row in rows]
 
+    def save_agent(self, agent: AgentSpec) -> None:
+        with self.sessions.begin() as db:
+            row = db.get(AgentRow, str(agent.id))
+            payload = agent.model_dump_json()
+            now = utcnow()
+            if row:
+                row.payload, row.updated_at = payload, now
+            else:
+                db.add(AgentRow(id=str(agent.id), mission_id=str(agent.mission_id), payload=payload,
+                                created_at=agent.created_at, updated_at=now))
+
+    def save_task(self, task: Task) -> None:
+        with self.sessions.begin() as db:
+            row = db.get(TaskRow, str(task.id))
+            payload = task.model_dump_json()
+            now = utcnow()
+            if row:
+                row.payload, row.updated_at = payload, now
+            else:
+                db.add(TaskRow(id=str(task.id), mission_id=str(task.mission_id), payload=payload,
+                               created_at=now, updated_at=now))
+
+    def load_agents(self, mission_id: UUID) -> list[AgentSpec]:
+        with self.sessions() as db:
+            rows = db.scalars(select(AgentRow).where(AgentRow.mission_id == str(mission_id))
+                              .order_by(AgentRow.created_at, AgentRow.id)).all()
+            return [AgentSpec.model_validate_json(row.payload) for row in rows]
+
+    def load_tasks(self, mission_id: UUID) -> list[Task]:
+        with self.sessions() as db:
+            rows = db.scalars(select(TaskRow).where(TaskRow.mission_id == str(mission_id))
+                              .order_by(TaskRow.created_at, TaskRow.id)).all()
+            return [Task.model_validate_json(row.payload) for row in rows]
+
     def project(self, mission_id: UUID) -> dict:
+        agents = self.load_agents(mission_id)
+        tasks = self.load_tasks(mission_id)
+        if agents or tasks:
+            return {"agents": [a.model_dump(mode="json") for a in agents],
+                    "tasks": [t.model_dump(mode="json") for t in tasks]}
+        return self.project_events(mission_id)
+
+    def project_events(self, mission_id: UUID) -> dict:
         agents, tasks = {}, {}
         for event in self.events(mission_id):
             p = event.payload
