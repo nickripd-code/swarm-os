@@ -74,6 +74,8 @@ class EventType(StrEnum):
 
     JOB_ENQUEUED = "job.enqueued"
     JOB_COMPLETED = "job.completed"
+    JOB_FAILED = "job.failed"
+    JOB_RETRY_SCHEDULED = "job.retry_scheduled"
 
 
 # controller.fallback is a test sentinel and must never be writable.

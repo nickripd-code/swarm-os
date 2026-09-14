@@ -231,6 +231,61 @@ class SwarmRuntime:
         })
         return item
 
+    async def fail_job(
+        self,
+        mission: Mission,
+        job_id: str,
+        error: str,
+        failure_class: FailureClass,
+        *,
+        retry_at: datetime | None = None,
+    ):
+        """Report a claimed job failure; optionally requeue it for a later attempt."""
+        try:
+            classified = FailureClass(failure_class)
+        except (TypeError, ValueError) as exc:
+            raise PolicyError("Unknown job failure class", FailureClass.INVALID_OUTPUT) from exc
+        message = (error or "").strip()
+        if not message:
+            raise PolicyError("Job failure requires an error", FailureClass.INVALID_OUTPUT)
+        payload = failure_payload(message, classified)
+        try:
+            resolution = self.queue.fail(
+                job_id,
+                self._owner(),
+                payload,
+                mission_id=str(mission.id),
+                retry_at=retry_at,
+            )
+        except LeaseConflict as exc:
+            raise PolicyError(str(exc), FailureClass.POLICY_REFUSAL) from exc
+        except QueueError as exc:
+            raise PolicyError(str(exc), FailureClass.POLICY_REFUSAL) from exc
+        self._held_leases.pop(("job", job_id), None)
+        item = resolution.item
+        event_type = (
+            EventType.JOB_RETRY_SCHEDULED
+            if resolution.retry_scheduled
+            else EventType.JOB_FAILED
+        )
+        event_payload = {
+            "id": item.id,
+            "kind": item.kind,
+            "status": item.status,
+            "attempt": item.attempt,
+            **payload,
+        }
+        if resolution.retry_scheduled:
+            event_payload["available_at"] = item.available_at.isoformat()
+        await self.emit(mission.id, event_type, event_payload)
+        await self.emit(mission.id, EventType.LEASE_RELEASED, {
+            "scope": "job",
+            "scope_id": item.id,
+            "lease_id": resolution.released_lease_id,
+            "owner_id": self._owner(),
+        })
+        return item
+
     async def _emit_planning(self, mission_id: UUID, actor_id: UUID | None):
         planning = getattr(self.controller, "last_planning", None)
         if not isinstance(planning, dict) or planning.get("mode") != "multi":
