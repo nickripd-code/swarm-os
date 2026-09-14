@@ -12,6 +12,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from .events import (
     EventType, coerce_event_type, is_task_event, parse_event_type, task_status_from_event,
 )
+from .migrations import apply_migrations
 from .models import AgentSpec, Mission, MissionEvent, Task, utcnow
 
 
@@ -58,8 +59,7 @@ class Store:
     def __init__(self, path: str = "swarm.db"):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.engine = create_engine(f"sqlite:///{path}", connect_args={"check_same_thread": False})
-        # create_all is additive: existing missions/events tables and rows are left intact.
-        Base.metadata.create_all(self.engine)
+        apply_migrations(self.engine)
         self.sessions = sessionmaker(self.engine, expire_on_commit=False)
 
     def save_mission(self, mission: Mission) -> None:
