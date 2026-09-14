@@ -153,7 +153,7 @@ Nothing in the current test suite is known red. UI preview is synthetic by desig
 
 ## NEXT PRIORITY
 
-**This slice:** honesty for `MissionLimits.max_tool_calls` and `MissionStatus.WAITING`. Tool-call budget is enforced (`RESOURCE_EXHAUSTED` when exceeded; `TOOL_MISSING` when no provider is connected). Controller `wait` with pending/running tasks persists `WAITING` and emits `mission.waiting` / `mission.running`; invalid wait stays `PolicyError`. Do not edit `app/static/*`. Durable recovery APIs (`hydrate`, `resume_incomplete`, `suspend_all`) stay unchanged. Multi-planner/judge is not rewritten.
+**This slice:** honesty for `MissionLimits.max_tool_calls` and `MissionStatus.WAITING`. Tool-call budget is enforced (`RESOURCE_EXHAUSTED` when exceeded; `TOOL_MISSING` when no provider is connected). Controller `wait` with pending/running tasks persists `WAITING` and emits `mission.waiting` / `mission.running`; invalid wait stays `PolicyError`. Do not edit `app/static/*`. Durable recovery APIs (`hydrate`, `resume_incomplete`, `suspend_all`) stay unchanged. Multi-planner/judge is not rewritten. Tests: `python3 -m pytest tests/ -q` → **128 passed**.
 
 **Recommended next backend slice:** OrganizationDesigner (mutable org topology from the judged plan) **or** an independent Verifier so `finish` is not “the model said done.” Either is a valid next claim; this repo does not reserve one. Still fail closed. Still no game-world UI rewrite.
 
