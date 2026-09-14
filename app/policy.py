@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Literal
 
 from .models import FailureClass, Mission
 
-PolicyAction = Literal["spawn", "finish", "tool_use"]
+PolicyAction = Literal["spawn", "finish", "tool_use", "org_change", "live_payment"]
 PrivacyMode = Literal["cloud_allowed", "local_only"]
+ApprovalVerdict = Literal["approve", "deny"]
 
 SAFE_SPECIALIST_CAPABILITIES = frozenset({"reason", "write", "review"})
 CONTROLLER_CAPABILITIES = frozenset({"spawn", "coordinate", "reason"})
@@ -39,12 +41,26 @@ OPTED_IN_BROWSER_TOOLS = frozenset({
 OPTED_IN_SELFMOD_DIFF_TOOLS = frozenset({"selfmod.propose", "selfmod.diff"})
 OPTED_IN_SELFMOD_WRITE_TOOLS = frozenset({"selfmod.apply"})
 TRUE_ENV = frozenset({"1", "true", "yes", "on"})
+IRREVERSIBLE_ORG_OPS = frozenset({"replace", "reparent", "retire"})
+APPROVE_TOKENS = frozenset({"approve", "approved", "yes", "allow"})
+DENY_TOKENS = frozenset({"deny", "denied", "no", "reject", "refuse"})
+_APPROVAL_TOKEN_RE = re.compile(r"[^a-z]+")
 
 
 class PolicyError(Exception):
     def __init__(self, message: str, failure_class: FailureClass = FailureClass.POLICY_REFUSAL):
         super().__init__(message)
         self.failure_class = failure_class
+
+
+@dataclass(frozen=True)
+class ApprovalRequirement:
+    """PolicyGate mark that the runtime must park WAITING until a matching approve/deny."""
+
+    action: PolicyAction
+    question: str
+    reason: str
+    org_op: str | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +76,30 @@ class PolicyRequest:
     summary: str | None = None
     mode: str = "openai"
     parent_ok: bool = True
+    org_op: str | None = None
+
+
+def parse_approval_answer(text: str) -> ApprovalVerdict | None:
+    """Map a human answer to approve/deny. Anything else is undecided (fail closed)."""
+    token = _APPROVAL_TOKEN_RE.split((text or "").strip().lower(), maxsplit=1)[0]
+    if token in APPROVE_TOKENS:
+        return "approve"
+    if token in DENY_TOKENS:
+        return "deny"
+    return None
+
+
+def interpret_approval(text: str) -> None:
+    """Resume only after an explicit approve. Deny and ambiguous answers fail closed."""
+    verdict = parse_approval_answer(text)
+    if verdict == "approve":
+        return
+    if verdict == "deny":
+        raise PolicyError("Human denied the action", FailureClass.POLICY_REFUSAL)
+    raise PolicyError(
+        "Human approval is required; answer must be approve or deny",
+        FailureClass.AUTHORIZATION_REQUIRED,
+    )
 
 
 def mission_privacy(mission: Mission) -> PrivacyMode:
@@ -125,7 +165,40 @@ class PolicyGate:
         if request.action == "tool_use":
             self._authorize_tool(request)
             return
+        if request.action == "org_change":
+            self._authorize_org_change(request)
+            return
+        if request.action == "live_payment":
+            self._authorize_live_payment(request)
+            return
         raise PolicyError(f"Unknown policy action: {request.action}", FailureClass.POLICY_REFUSAL)
+
+    def approval_required(self, request: PolicyRequest) -> ApprovalRequirement | None:
+        """Mark irreversible acts that must pause for an explicit human approve/deny.
+
+        Never implies auto-approve. `authorize` still fail-closes invalid acts first.
+        """
+        if request.action == "finish" and request.mission.limits.require_finish_approval:
+            return ApprovalRequirement(
+                action="finish",
+                question="Approve completing this mission? Reply approve or deny.",
+                reason="Finish requires human approval",
+            )
+        if request.action == "live_payment":
+            return ApprovalRequirement(
+                action="live_payment",
+                question="Approve this live payment? Reply approve or deny.",
+                reason="Live payment requires human approval",
+            )
+        if request.action == "org_change" and (request.org_op or "") in IRREVERSIBLE_ORG_OPS:
+            op = request.org_op or "org_change"
+            return ApprovalRequirement(
+                action="org_change",
+                question=f"Approve organization change '{op}'? Reply approve or deny.",
+                reason=f"Organization {op} requires human approval",
+                org_op=op,
+            )
+        return None
 
     def check_tool_budget(self, mission: Mission, used: int) -> None:
         if used >= mission.limits.max_tool_calls:
@@ -167,3 +240,12 @@ class PolicyGate:
             raise PolicyError("local_only policy forbids cloud or network tools", FailureClass.POLICY_REFUSAL)
         if tool_is_dangerous(name) and not tool_is_opted_in_browser(name) and not tool_is_opted_in_selfmod(name):
             raise PolicyError(f"Tool '{name}' is denied by default", FailureClass.POLICY_REFUSAL)
+
+    def _authorize_org_change(self, request: PolicyRequest) -> None:
+        op = (request.org_op or "").strip()
+        if op not in {"spawn", "replace", "reparent", "retire"}:
+            raise PolicyError("Unknown organization operation", FailureClass.INVALID_OUTPUT)
+
+    def _authorize_live_payment(self, request: PolicyRequest) -> None:
+        if not request.mission.live_payments:
+            raise PolicyError("Live payments are not enabled for this mission", FailureClass.POLICY_REFUSAL)

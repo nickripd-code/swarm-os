@@ -15,7 +15,7 @@ from .models import (
     AgentSpec, AgentStatus, FailureClass, Mission, MissionEvent,
     MissionStatus, PaymentIntent, PendingQuestion, Task, TaskStatus, utcnow,
 )
-from .policy import PolicyError, PolicyGate, PolicyRequest
+from .policy import PolicyError, PolicyGate, PolicyRequest, interpret_approval
 from .resources import ResourceScheduler, listed_prices_from_meta, usage_from_meta
 from .store import AnswerStateError, Store
 from .memory import MemoryError, MemoryProvider, StoreMemoryProvider
@@ -564,20 +564,58 @@ class SwarmRuntime:
                 self._answer_waiters.pop(mission.id, None)
 
     async def _ask_human(self, mission: Mission, actor: AgentSpec, question: str,
-                         reason: str | None = None) -> None:
+                         reason: str | None = None, *,
+                         kind: str = "question",
+                         approval_action: str | None = None) -> None:
         """Emit a real question and park until the matching answer. Ignore model-supplied ids."""
         text = (question or "").strip()
         if not text:
             raise PolicyError("Asked without a question", FailureClass.INVALID_OUTPUT)
         if mission.pending_question is not None:
             raise PolicyError("A question is already awaiting an answer", FailureClass.INVALID_OUTPUT)
+        pending_kind = "approval" if kind == "approval" else "question"
         pending = PendingQuestion(
             question_id=str(uuid4()),
             question=text,
             reason=(str(reason).strip() or None) if reason is not None else None,
+            kind=pending_kind,
+            approval_action=(str(approval_action).strip() or None) if pending_kind == "approval" else None,
         )
         mission.pending_question = pending
         await self._park_for_human_answer(mission, actor, pending, asked_now=True)
+
+    def _matching_approval(self, mission: Mission, action: str):
+        for item in reversed(mission.answers):
+            if item.kind == "approval" and item.approval_action == action:
+                return item
+        return None
+
+    def _approval_granted(self, mission: Mission, action: str) -> bool:
+        record = self._matching_approval(mission, action)
+        if record is None:
+            return False
+        interpret_approval(record.answer)
+        return True
+
+    async def _enforce_human_approval(self, mission: Mission, actor: AgentSpec,
+                                      request: PolicyRequest) -> None:
+        """Park WAITING for a PolicyGate approval mark. Never auto-approves."""
+        needed = self.policy.approval_required(request)
+        if needed is None:
+            return
+        if self._approval_granted(mission, needed.action):
+            return
+        await self._ask_human(
+            mission, actor, needed.question, needed.reason,
+            kind="approval", approval_action=needed.action,
+        )
+        record = self._matching_approval(mission, needed.action)
+        if record is None:
+            raise PolicyError(
+                "Cannot continue without a matching human answer",
+                FailureClass.AUTHORIZATION_REQUIRED,
+            )
+        interpret_approval(record.answer)
 
     async def _park_for_human_answer(self, mission: Mission, root: AgentSpec,
                                      pending: PendingQuestion, *, asked_now: bool) -> None:
@@ -585,11 +623,16 @@ class SwarmRuntime:
         payload = pending.model_dump(mode="json")
         if asked_now:
             await self.emit(mission.id, EventType.MISSION_QUESTION, payload, root.id)
-        await self.emit(mission.id, EventType.MISSION_WAITING, {
+        waiting = {
             "reason": pending.reason or "Waiting for a human answer",
             "question_id": pending.question_id,
             "question": pending.question,
-        }, root.id)
+        }
+        if pending.kind == "approval":
+            waiting["kind"] = "approval"
+            if pending.approval_action:
+                waiting["approval_action"] = pending.approval_action
+        await self.emit(mission.id, EventType.MISSION_WAITING, waiting, root.id)
         await self._await_answer(mission, pending.question_id)
         if mission.id in self.stopped or mission.id in self.suspending:
             raise asyncio.CancelledError()
@@ -851,13 +894,15 @@ class SwarmRuntime:
                         if mission.pending_question is not None:
                             raise PolicyError("Cannot finish while a question is unanswered",
                                               FailureClass.INVALID_OUTPUT)
-                        self.policy.authorize(PolicyRequest(
+                        finish_request = PolicyRequest(
                             action="finish",
                             mission=mission,
                             in_flight_tasks=len(self._in_flight_tasks(mission)),
                             summary=decision.get("summary"),
                             mode=getattr(self.controller, "mode", "openai"),
-                        ))
+                        )
+                        self.policy.authorize(finish_request)
+                        await self._enforce_human_approval(mission, root, finish_request)
                         claim = {"summary": decision["summary"], "mode": self.controller.mode,
                                  "outputs": [t.output for t in self.tasks[mission.id] if t.output]}
                         steps = decision.get("evidence_steps") or decision.get("checks")
@@ -1326,6 +1371,12 @@ class SwarmRuntime:
             raise PolicyError("Mission was stopped")
         if amount > mission.limits.max_payment_amount or mission.spent + amount > mission.budget:
             raise PolicyError("Payment exceeds mission budget or payment cap", FailureClass.RESOURCE_EXHAUSTED)
+        if mission.live_payments:
+            pay_request = PolicyRequest(action="live_payment", mission=mission)
+            self.policy.authorize(pay_request)
+            needed = self.policy.approval_required(pay_request)
+            if needed is not None and not self._approval_granted(mission, needed.action):
+                raise PolicyError(needed.reason, FailureClass.AUTHORIZATION_REQUIRED)
         intent = PaymentIntent(mission_id=mission.id, recipient=recipient, amount=amount, reason=reason,
                                idempotency_key=key)
         intent = await self.wallet.pay(intent, mission)

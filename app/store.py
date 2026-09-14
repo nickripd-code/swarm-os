@@ -168,7 +168,13 @@ class Store:
                     raise AnswerStateError("status", "Mission is not accepting answers in its current state")
                 if pending.question_id != question_id:
                     raise AnswerStateError("mismatch", "Answer does not match the open question")
-                record = MissionAnswer(question_id=question_id, question=pending.question, answer=answer)
+                record = MissionAnswer(
+                    question_id=question_id,
+                    question=pending.question,
+                    answer=answer,
+                    kind=pending.kind,
+                    approval_action=pending.approval_action,
+                )
                 mission.answers.append(record)
                 mission.pending_question = None
                 mission.updated_at = utcnow()

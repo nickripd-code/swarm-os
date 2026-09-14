@@ -70,6 +70,7 @@ class MissionLimits(BaseModel):
     max_runtime_seconds: int = Field(default=300, ge=1, le=86400)
     max_payment_amount: float = Field(default=0, ge=0)
     max_token_cost: float | None = Field(default=None, ge=0)
+    require_finish_approval: bool = False
 
 
 class MissionCreate(BaseModel):
@@ -84,6 +85,8 @@ class PendingQuestion(BaseModel):
     question_id: str
     question: str
     reason: str | None = None
+    kind: Literal["question", "approval"] = "question"
+    approval_action: str | None = None
 
 
 class MissionAnswer(BaseModel):
@@ -92,6 +95,8 @@ class MissionAnswer(BaseModel):
     answer: str
     answered_at: datetime = Field(default_factory=utcnow)
     consumed_at: datetime | None = None
+    kind: Literal["question", "approval"] = "question"
+    approval_action: str | None = None
 
 
 class Mission(BaseModel):
