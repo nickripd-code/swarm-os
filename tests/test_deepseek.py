@@ -80,6 +80,10 @@ def no_extra_providers(monkeypatch):
     monkeypatch.delenv("FIREWORKS_API_KEY", raising=False)
     monkeypatch.delenv("FIREWORKS_MODEL", raising=False)
     monkeypatch.delenv("FIREWORKS_BASE_URL", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_DEPLOYMENT", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_API_VERSION", raising=False)
 
 
 @pytest.mark.asyncio
