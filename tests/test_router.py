@@ -7,7 +7,7 @@ from app.providers import (
     ModelProvider, ModelRequest, ModelResponse, ModelUsage, ProviderError, ProviderHealth,
 )
 from app.router import (
-    CapabilityRequest, ModelRouter, capability_request_for, score_model,
+    CapabilityRequest, ModelRouter, ProviderHistory, capability_request_for, score_model,
 )
 from app.runtime import SwarmRuntime
 from app.store import Store
@@ -99,6 +99,11 @@ def openai_like(**kwargs) -> FakeModelProvider:
         reasoning="high", coding="high", tool_use=True, structured_outputs=True, vision=False,
     ))
     return FakeModelProvider("openai", "gpt-6-astra", capabilities=caps, **kwargs)
+
+
+EQUAL_CAPS = ModelCapabilities(
+    reasoning="high", coding="high", tool_use=True, structured_outputs=True, vision=False,
+)
 
 
 def openrouter_like(**kwargs) -> FakeModelProvider:
@@ -194,6 +199,9 @@ async def test_router_prefers_cheaper_model_when_cost_is_known():
     decision = await router.select(CapabilityRequest(reasoning="high", coding="high"))
     assert decision.selected.provider_id == "openrouter"
     assert decision.fallbacks[0].provider_id == "openai"
+    assert any("lowest known cost among eligible" in reason for reason in decision.selected.reasons)
+    assert any("listed output price 1/M" in reason for reason in decision.selected.reasons)
+    assert any("relative cost" in reason for reason in decision.fallbacks[0].reasons)
 
 
 @pytest.mark.asyncio
@@ -372,6 +380,8 @@ async def test_controller_with_router_records_route_metadata():
     assert result["_meta"]["model"] == "gpt-6-astra"
     assert result["_meta"]["route"]["provider"] == "openai"
     assert result["_meta"]["route"]["fallbacks"] == [{"provider": "openrouter", "model": "openai/gpt-4o"}]
+    assert "selected openai/gpt-6-astra" in result["_meta"]["route"]["rationale"]
+    assert "no recent outcomes" in result["_meta"]["route"]["rationale"]
     assert openai.requested_models == ["gpt-6-astra"]
 
 
@@ -422,3 +432,147 @@ async def test_runtime_router_both_down_never_uses_demo_fallback(tmp_path):
     assert not any(e.event_type in {"controller.fallback", "mission.completed"} for e in events)
     assert any(e.event_type == "mission.failed" and e.payload.get("failure_class") == "PROVIDER_OUTAGE"
                for e in events)
+
+
+def test_empty_history_is_unknown_not_success():
+    history = ProviderHistory()
+    request = CapabilityRequest(reasoning="high")
+    descriptor = ModelDescriptor(
+        provider="openai", model="gpt-6-astra",
+        capabilities=ModelCapabilities(reasoning="high", structured_outputs=True),
+    )
+    score, reasons = score_model(descriptor, request, history=history)
+    bare, _ = score_model(descriptor, request)
+    assert score == bare
+    assert history.score_delta() == 0.0
+    assert "no recent outcomes" in reasons
+    assert not any(reason.startswith("recent success") for reason in reasons)
+
+
+def test_recent_failures_rank_below_recent_successes():
+    request = CapabilityRequest(reasoning="high")
+    descriptor = ModelDescriptor(
+        provider="openai", model="gpt-6-astra",
+        capabilities=ModelCapabilities(reasoning="high", structured_outputs=True),
+    )
+    failing = ProviderHistory()
+    succeeding = ProviderHistory()
+    for _ in range(3):
+        failing.record(False)
+        succeeding.record(True)
+    fail_score, fail_reasons = score_model(descriptor, request, history=failing)
+    win_score, win_reasons = score_model(descriptor, request, history=succeeding)
+    assert win_score > fail_score
+    assert "recent success 0/3" in fail_reasons
+    assert "recent success 3/3" in win_reasons
+
+
+def test_history_does_not_override_hard_capability_reject():
+    request = CapabilityRequest(reasoning="high")
+    weak = ModelDescriptor(
+        provider="local", model="tiny",
+        capabilities=ModelCapabilities(reasoning="low", structured_outputs=True),
+    )
+    history = ProviderHistory()
+    for _ in range(8):
+        history.record(True)
+    assert score_model(weak, request, history=history) is None
+
+
+def test_history_window_keeps_only_recent_outcomes():
+    history = ProviderHistory(window=8)
+    for _ in range(8):
+        history.record(False)
+    history.record(True)
+    assert history.samples == 8
+    assert history.successes == 1
+    assert history.failures == 7
+
+
+@pytest.mark.asyncio
+async def test_router_reranks_after_recorded_provider_failure():
+    openai = openai_like(error=ProviderError("invalid structured", FailureClass.INVALID_OUTPUT))
+    openrouter = openrouter_like(capabilities=EQUAL_CAPS)
+    router = ModelRouter([openai, openrouter])
+    first = await router.select(CapabilityRequest(reasoning="high", coding="high"))
+    assert first.selected.provider_id == "openai"
+    assert "no recent outcomes" in first.selected.reasons
+    with pytest.raises(ProviderError) as error:
+        await router.complete(CapabilityRequest(reasoning="high", coding="high"), REQUEST)
+    assert error.value.failure_class == FailureClass.INVALID_OUTPUT
+    assert openrouter.calls == 0
+    second = await router.select(CapabilityRequest(reasoning="high", coding="high"))
+    assert second.selected.provider_id == "openrouter"
+    assert "no recent outcomes" in second.selected.reasons
+    openai_candidate = next(item for item in second.chain if item.provider_id == "openai")
+    assert "recent success 0/1" in openai_candidate.reasons
+    assert "selected openrouter/openai/gpt-4o" in second.rationale
+
+
+@pytest.mark.asyncio
+async def test_history_does_not_drop_the_only_provider():
+    openai = openai_like(error=ProviderError("Could not reach OpenAI", FailureClass.PROVIDER_OUTAGE))
+    router = ModelRouter([openai])
+    with pytest.raises(ProviderError):
+        await router.complete(CapabilityRequest(reasoning="high"), REQUEST)
+    decision = await router.select(CapabilityRequest(reasoning="high"))
+    assert decision.selected.provider_id == "openai"
+    assert "recent success 0/1" in decision.selected.reasons
+    assert decision.fallbacks == []
+
+
+@pytest.mark.asyncio
+async def test_same_complete_walk_does_not_skip_chain_because_of_history():
+    openai = openai_like(error=ProviderError("Could not reach OpenAI", FailureClass.PROVIDER_OUTAGE))
+    openrouter = openrouter_like(output={"answer": "from openrouter"}, capabilities=EQUAL_CAPS)
+    router = ModelRouter([openai, openrouter])
+    response = await router.complete(CapabilityRequest(reasoning="high", coding="high"), REQUEST)
+    assert openai.calls == 1
+    assert openrouter.calls == 1
+    assert response.provider == "openrouter"
+    assert router.history_for("openai").failures == 1
+    assert router.history_for("openrouter").successes == 1
+
+
+@pytest.mark.asyncio
+async def test_recent_success_beats_cheaper_failing_model():
+    expensive = openai_like(price_output_per_million=20)
+    cheap = openrouter_like(capabilities=EQUAL_CAPS, price_output_per_million=1)
+    router = ModelRouter([expensive, cheap])
+    before = await router.select(CapabilityRequest(reasoning="high", coding="high"))
+    assert before.selected.provider_id == "openrouter"
+    for _ in range(3):
+        router.record_outcome("openai", True)
+        router.record_outcome("openrouter", False)
+    after = await router.select(CapabilityRequest(reasoning="high", coding="high"))
+    assert after.selected.provider_id == "openai"
+    assert "recent success 3/3" in after.selected.reasons
+    assert any("recent success 0/3" in reason for reason in after.fallbacks[0].reasons)
+
+
+@pytest.mark.asyncio
+async def test_unknown_cost_is_not_treated_as_cheapest():
+    priced = openai_like(price_output_per_million=20)
+    unknown = openrouter_like(capabilities=EQUAL_CAPS)
+    router = ModelRouter([priced, unknown])
+    decision = await router.select(CapabilityRequest(reasoning="high", coding="high"))
+    combined = [reason for item in decision.chain for reason in item.reasons]
+    assert "lowest known cost among eligible" not in combined
+    assert not any(reason.startswith("relative cost") for reason in combined)
+
+
+@pytest.mark.asyncio
+async def test_complete_on_records_failure_without_failover():
+    openai = openai_like(error=ProviderError("invalid structured", FailureClass.INVALID_OUTPUT))
+    openrouter = openrouter_like(capabilities=EQUAL_CAPS)
+    router = ModelRouter([openai, openrouter])
+    candidate = (await router.select(CapabilityRequest(reasoning="high", coding="high"))).selected
+    assert candidate.provider_id == "openai"
+    with pytest.raises(ProviderError) as error:
+        await router.complete_on(candidate, REQUEST)
+    assert error.value.failure_class == FailureClass.INVALID_OUTPUT
+    assert openrouter.calls == 0
+    decision = await router.select(CapabilityRequest(reasoning="high", coding="high"))
+    assert decision.selected.provider_id == "openrouter"
+    assert router.history_for("openai").failures == 1
+
