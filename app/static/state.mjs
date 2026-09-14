@@ -1,5 +1,80 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
+export function killRoutePresent(spec) {
+  if (!spec || typeof spec !== "object") return false;
+  const paths = spec.paths || {};
+  return Object.keys(paths).some((path) => {
+    if (!KILL_ROUTE_PATTERN.test(path)) return false;
+    const item = paths[path];
+    return !!(item && (item.post || item.POST));
+  });
+}
+export function parseCommand(raw) {
+  const text = String(raw ?? "").trim();
+  if (!text) return {ok: false, error: "Command is empty"};
+  const stripped = text.replace(/^\/+/, "").trim();
+  const tokens = stripped.split(/\s+/).filter(Boolean);
+  if (!tokens.length) return {ok: false, error: "Command is empty"};
+  const verb = tokens[0].toLowerCase();
+  const rest = stripped.slice(tokens[0].length).trim();
+  if (verb === "stop" && tokens.length === 1) return {ok: true, action: "stop"};
+  if (
+    (verb === "stop-all" || verb === "stopall") && tokens.length === 1
+    || (verb === "stop" && tokens[1]?.toLowerCase() === "all" && tokens.length === 2)
+  ) {
+    return {ok: true, action: "stop-all"};
+  }
+  if (verb === "kill") {
+    if (tokens.length > 2) return {ok: false, error: "kill takes at most one agent id"};
+    return {ok: true, action: "kill", agentId: rest || null};
+  }
+  if (verb === "answer") {
+    if (!rest) return {ok: false, error: "answer requires text"};
+    return {ok: true, action: "answer", text: rest};
+  }
+  return {ok: false, error: "Unknown command: " + tokens[0]};
+}
+export function resolveCommand(parsed, context = {}) {
+  if (!parsed?.ok) {
+    return parsed?.error ? parsed : {ok: false, error: "Unknown command"};
+  }
+  const preview = context.preview === true;
+  const missionId = preview ? null : (context.missionId || null);
+  if (parsed.action === "stop") {
+    if (!missionId) return {ok: false, error: "No live mission to stop"};
+    return {ok: true, action: "stop", method: "POST", path: "/api/missions/" + missionId + "/stop"};
+  }
+  if (parsed.action === "stop-all") {
+    return {ok: true, action: "stop-all", method: "POST", path: "/api/stop-all"};
+  }
+  if (parsed.action === "kill") {
+    const agentId = parsed.agentId || context.selectedAgentId || null;
+    if (!agentId) return {ok: false, error: "kill requires an agent id"};
+    if (context.killAvailable !== true) return {ok: false, error: "Kill agent is not available"};
+    if (!missionId) return {ok: false, error: "No live mission for kill"};
+    return {
+      ok: true,
+      action: "kill",
+      method: "POST",
+      path: "/api/missions/" + missionId + "/agents/" + encodeURIComponent(agentId) + "/kill",
+      agentId,
+    };
+  }
+  if (parsed.action === "answer") {
+    if (!missionId) return {ok: false, error: "No live mission to answer"};
+    const questionId = context.pendingQuestionId || null;
+    if (!questionId) return {ok: false, error: "No open question to answer"};
+    return {
+      ok: true,
+      action: "answer",
+      method: "POST",
+      path: "/api/missions/" + missionId + "/answers/" + encodeURIComponent(questionId),
+      body: {answer: parsed.text},
+    };
+  }
+  return {ok: false, error: "Unknown command"};
+}
 export function newState(mission = null) {
   return {mission, agents: new Map(), tasks: new Map(), seen: new Set(), events: [],
     usage: {input: 0, output: 0, reasoning: 0, cost: null, budget: null, known: false}, decisions: 0, preview: false};
