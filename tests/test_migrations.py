@@ -223,11 +223,20 @@ def test_failed_migration_rolls_back_and_keeps_data(tmp_path):
 
     assert _version(engine) == 1
     with engine.connect() as conn:
-        columns = {col["name"] for col in inspect(conn).get_columns("missions")}
-        assert "boom" not in columns
         payload = conn.execute(text("SELECT payload FROM missions WHERE id = :id"),
                                {"id": str(mission.id)}).scalar()
     assert Mission.model_validate_json(payload).goal == "do not drop me"
+
+    # SQLite may keep ADD COLUMN even when the version row rolls back.
+    # The stamp is the fail-closed record; retry must be idempotent.
+    def add_boom(conn):
+        add_column_if_missing(conn, "missions", "boom", "TEXT")
+
+    assert apply_migrations(engine, MIGRATIONS + (Migration(2, "boom", add_boom),)) == 2
+    with engine.connect() as conn:
+        columns = {col["name"] for col in inspect(conn).get_columns("missions")}
+        assert "boom" in columns
+        assert current_version(conn) == 2
 
 
 def test_newer_database_fails_closed(tmp_path):

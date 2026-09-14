@@ -5,8 +5,10 @@ databases are treated as version 0 and upgraded in place with CREATE TABLE /
 CREATE INDEX IF NOT EXISTS so rows are not dropped.
 
 Future column changes belong in a new Migration(version=N+1, ...) that uses
-`add_column_if_missing`. Apply is transactional and fail-closed: a failed
-upgrade rolls back and leaves the previous version intact.
+`add_column_if_missing`. A failed upgrade does not stamp `schema_migrations`
+and leaves existing rows intact. SQLite may still keep an ADD COLUMN from
+that attempt; retries must use `add_column_if_missing` so they stay
+idempotent. A database newer than this build fails closed.
 """
 from __future__ import annotations
 
