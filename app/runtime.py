@@ -5,7 +5,10 @@ from collections import defaultdict
 from typing import Any, Awaitable, Callable
 from uuid import UUID
 
-from .models import AgentSpec, AgentStatus, Mission, MissionEvent, MissionStatus, PaymentIntent, Task, TaskStatus, utcnow
+from .models import (
+    AgentSpec, AgentStatus, FailureClass, Mission, MissionEvent, MissionStatus,
+    PaymentIntent, Task, TaskStatus, utcnow,
+)
 from .store import Store
 from .llm import LLMProvider, OpenAIProvider, ProviderError
 
@@ -13,7 +16,13 @@ TERMINAL = {MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.STOPPED
 
 
 class PolicyError(Exception):
-    pass
+    def __init__(self, message: str, failure_class: FailureClass = FailureClass.POLICY_REFUSAL):
+        super().__init__(message)
+        self.failure_class = failure_class
+
+
+def failure_payload(error: str, failure_class: FailureClass) -> dict[str, Any]:
+    return {"error": error, "failure_class": str(failure_class)}
 
 
 class WalletAdapter:
@@ -22,7 +31,7 @@ class WalletAdapter:
             intent.status = "simulated"
             intent.transaction_hash = None
             return intent
-        raise PolicyError("Live wallet provider is not configured")
+        raise PolicyError("Live wallet provider is not configured", FailureClass.AUTHORIZATION_REQUIRED)
 
 
 EventSink = Callable[[MissionEvent], Awaitable[None]]
@@ -56,7 +65,7 @@ class SwarmRuntime:
         if parent and parent.mission_id != mission.id:
             raise PolicyError("Parent must belong to this mission")
         if depth > mission.limits.max_depth or len(current) >= mission.limits.max_agents:
-            raise PolicyError("Agent spawning limit reached")
+            raise PolicyError("Agent spawning limit reached", FailureClass.RESOURCE_EXHAUSTED)
         agent = AgentSpec(mission_id=mission.id, parent_id=parent.id if parent else None,
                           role=role, purpose=purpose, capabilities=capabilities or [], depth=depth)
         current.append(agent)
@@ -79,7 +88,14 @@ class SwarmRuntime:
         self.check_stopped(mission.id)
         await self.emit(mission.id, "llm.started", {"kind": kind, "model": getattr(self.controller, "model", "demo"),
                         "reasoning_effort": getattr(self.controller, "reasoning", None)}, actor.id)
-        response = await call()
+        try:
+            response = await call()
+        except ProviderError as exc:
+            await self.emit(mission.id, "llm.failed", {
+                "kind": kind, "model": getattr(self.controller, "model", "demo"),
+                "failure_class": str(exc.failure_class), "error": str(exc),
+            }, actor.id)
+            raise
         self.check_stopped(mission.id)
         metadata = response.pop("_meta", None)
         if metadata:
@@ -103,15 +119,18 @@ class SwarmRuntime:
                     action = decision.get("action")
                     if action == "spawn":
                         if not decision.get("role") or not decision.get("purpose"):
-                            raise PolicyError("Model omitted the new agent's role or purpose")
+                            raise PolicyError("Model omitted the new agent's role or purpose",
+                                              FailureClass.INVALID_OUTPUT)
                         parent = root
                         if decision.get("parent_id"):
                             parent = next((a for a in self.agents[mission.id] if str(a.id) == decision["parent_id"]), None)
                             if parent is None:
-                                raise PolicyError("Model selected an unknown parent agent")
+                                raise PolicyError("Model selected an unknown parent agent",
+                                                  FailureClass.INVALID_OUTPUT)
                         caps = decision.get("capabilities") or ["reason"]
                         if self.controller.mode != "demo" and set(caps) - {"reason", "write", "review"}:
-                            raise PolicyError("Model requested an unavailable capability")
+                            raise PolicyError("Model requested an unavailable capability",
+                                              FailureClass.CAPABILITY_MISMATCH)
                         child = await self.spawn(mission, decision["role"], decision["purpose"], parent, caps)
                         await self.emit(mission.id, "agent.message", {
                             "from_id": str(root.id), "to_id": str(child.id), "kind": "assignment",
@@ -119,9 +138,9 @@ class SwarmRuntime:
                         await self._run_tasks(mission)
                     elif action == "finish":
                         if any(t.status in {TaskStatus.PENDING, TaskStatus.RUNNING} for t in self.tasks[mission.id]):
-                            raise PolicyError("Cannot finish while tasks are active")
+                            raise PolicyError("Cannot finish while tasks are active", FailureClass.INVALID_OUTPUT)
                         if not decision.get("summary"):
-                            raise PolicyError("Model omitted the final deliverable")
+                            raise PolicyError("Model omitted the final deliverable", FailureClass.INVALID_OUTPUT)
                         mission.result = {"summary": decision["summary"], "mode": self.controller.mode,
                                           "outputs": [t.output for t in self.tasks[mission.id] if t.output]}
                         mission.status = MissionStatus.COMPLETED
@@ -131,11 +150,13 @@ class SwarmRuntime:
                         mission.result = {"reason": decision.get("reason") or "Required capability or information is unavailable"}
                         break
                     elif action == "wait":
-                        raise PolicyError("Controller requested a wait with no work in flight")
+                        raise PolicyError("Controller requested a wait with no work in flight",
+                                          FailureClass.INVALID_OUTPUT)
                     else:
-                        raise PolicyError("Model returned an unsupported controller action")
+                        raise PolicyError("Model returned an unsupported controller action",
+                                          FailureClass.INVALID_OUTPUT)
                 else:
-                    raise PolicyError("Controller iteration limit reached")
+                    raise PolicyError("Controller iteration limit reached", FailureClass.RESOURCE_EXHAUSTED)
                 if root:
                     await self.agent_status(root, AgentStatus.COMPLETED if mission.status == MissionStatus.COMPLETED else AgentStatus.BLOCKED)
         except asyncio.CancelledError:
@@ -143,13 +164,13 @@ class SwarmRuntime:
             mission.result = {"reason": "Execution stopped"}
         except TimeoutError:
             mission.status = MissionStatus.FAILED
-            mission.result = {"error": "Mission runtime limit reached"}
+            mission.result = failure_payload("Mission runtime limit reached", FailureClass.TIMEOUT)
         except (ProviderError, PolicyError) as exc:
             mission.status = MissionStatus.FAILED
-            mission.result = {"error": str(exc)}
+            mission.result = failure_payload(str(exc), exc.failure_class)
         except Exception:
             mission.status = MissionStatus.FAILED
-            mission.result = {"error": "Unexpected runtime error"}
+            mission.result = failure_payload("Unexpected runtime error", FailureClass.UNKNOWN_FAILURE)
         finally:
             for task in self.tasks[mission.id]:
                 if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
@@ -177,7 +198,7 @@ class SwarmRuntime:
                 continue
             self.check_stopped(mission.id)
             if len(self.tasks[mission.id]) >= mission.limits.max_tasks:
-                raise PolicyError("Task limit reached")
+                raise PolicyError("Task limit reached", FailureClass.RESOURCE_EXHAUSTED)
             task = Task(mission_id=mission.id, agent_id=agent.id, title=agent.role.replace("_", " ").title(),
                         description=agent.purpose, status=TaskStatus.RUNNING)
             self.tasks[mission.id].append(task)
@@ -186,7 +207,7 @@ class SwarmRuntime:
             result = await self.model_call(mission, agent, "work",
                        lambda: self.controller.work(self._state(mission), agent.model_dump(mode="json")))
             if result.get("status") not in {"completed", "blocked"} or not result.get("finding"):
-                raise PolicyError("Worker did not return a valid result")
+                raise PolicyError("Worker did not return a valid result", FailureClass.INVALID_OUTPUT)
             task.output = result
             task.status = TaskStatus.COMPLETED if result["status"] == "completed" else TaskStatus.BLOCKED
             agent.output = result
@@ -220,7 +241,7 @@ class SwarmRuntime:
         if mission.id in self.stopped:
             raise PolicyError("Mission was stopped")
         if amount > mission.limits.max_payment_amount or mission.spent + amount > mission.budget:
-            raise PolicyError("Payment exceeds mission budget or payment cap")
+            raise PolicyError("Payment exceeds mission budget or payment cap", FailureClass.RESOURCE_EXHAUSTED)
         intent = PaymentIntent(mission_id=mission.id, recipient=recipient, amount=amount, reason=reason)
         intent = await self.wallet.pay(intent, mission)
         mission.spent += amount

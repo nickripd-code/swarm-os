@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 from .credentials import get_api_key
+from .models import FailureClass
 
 DEFAULT_MODEL = "gpt-6-astra"
 DEFAULT_REASONING = "high"
@@ -13,6 +14,27 @@ DEFAULT_REASONING = "high"
 
 class ProviderError(RuntimeError):
     """A safe user-facing error; does not include response bodies or credentials."""
+
+    def __init__(self, message: str, failure_class: FailureClass = FailureClass.UNKNOWN_FAILURE):
+        super().__init__(message)
+        self.failure_class = failure_class
+
+
+_OPENAI_HTTP_ERRORS = {
+    401: ("OpenAI rejected the API key", FailureClass.AUTHORIZATION_REQUIRED),
+    403: ("OpenAI denied model/project access", FailureClass.AUTHORIZATION_REQUIRED),
+    429: ("OpenAI quota or rate limit reached", FailureClass.RATE_LIMIT),
+    400: ("OpenAI rejected the model request", FailureClass.MODEL_FAILURE),
+    404: ("The configured OpenAI model is unavailable", FailureClass.CAPABILITY_MISMATCH),
+}
+
+
+def openai_http_error(status_code: int) -> ProviderError:
+    if status_code in _OPENAI_HTTP_ERRORS:
+        message, failure_class = _OPENAI_HTTP_ERRORS[status_code]
+        return ProviderError(message, failure_class)
+    failure_class = FailureClass.PROVIDER_OUTAGE if status_code >= 500 else FailureClass.MODEL_FAILURE
+    return ProviderError(f"OpenAI service error (HTTP {status_code})", failure_class)
 
 
 def response_format(name: str, properties: dict) -> dict:
@@ -65,7 +87,7 @@ class OpenAIProvider(LLMProvider):
     async def _request(self, instructions: str, data: dict, schema: dict) -> dict:
         key = self._api_key or get_api_key()
         if not key:
-            raise ProviderError("OpenAI API key is not configured")
+            raise ProviderError("OpenAI API key is not configured", FailureClass.AUTHORIZATION_REQUIRED)
         body = {"model": self.model, "instructions": instructions,
                 "input": json.dumps(data, default=str), "text": {"format": schema},
                 "reasoning": {"effort": self.reasoning},
@@ -76,27 +98,30 @@ class OpenAIProvider(LLMProvider):
                 response = await client.post("https://api.openai.com/v1/responses",
                                              headers={"Authorization": f"Bearer {key}"}, json=body)
         except httpx.TimeoutException:
-            raise ProviderError("OpenAI request timed out; no demo result was substituted") from None
+            raise ProviderError("OpenAI request timed out; no demo result was substituted",
+                                FailureClass.TIMEOUT) from None
         except httpx.RequestError:
-            raise ProviderError("Could not reach OpenAI") from None
+            raise ProviderError("Could not reach OpenAI", FailureClass.PROVIDER_OUTAGE) from None
         if response.is_error:
-            messages = {401: "OpenAI rejected the API key", 403: "OpenAI denied model/project access",
-                        429: "OpenAI quota or rate limit reached", 400: "OpenAI rejected the model request",
-                        404: "The configured OpenAI model is unavailable"}
-            raise ProviderError(messages.get(response.status_code, f"OpenAI service error (HTTP {response.status_code})"))
+            raise openai_http_error(response.status_code)
         try:
             result = response.json()
             if result.get("status") != "completed":
-                raise ProviderError("OpenAI response was incomplete; increase the output limit or simplify the task")
+                raise ProviderError(
+                    "OpenAI response was incomplete; increase the output limit or simplify the task",
+                    FailureClass.CONTEXT_LIMIT)
             content = [c for item in result.get("output", []) for c in item.get("content", [])]
             if any(c.get("type") == "refusal" for c in content):
-                raise ProviderError("The model declined the request")
+                raise ProviderError("The model declined the request", FailureClass.POLICY_REFUSAL)
             text = "".join(c["text"] for c in content if c.get("type") == "output_text")
             output = json.loads(text)
             if not isinstance(output, dict):
                 raise ValueError()
+        except ProviderError:
+            raise
         except (ValueError, KeyError, TypeError):
-            raise ProviderError("OpenAI returned an invalid structured response") from None
+            raise ProviderError("OpenAI returned an invalid structured response",
+                                FailureClass.INVALID_OUTPUT) from None
         usage = result.get("usage") or {}
         output["_meta"] = {"provider": "openai", "model": result.get("model", self.model),
                            "reasoning_effort": self.reasoning, "response_id": result.get("id"),
