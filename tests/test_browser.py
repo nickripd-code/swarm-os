@@ -196,8 +196,7 @@ async def test_health_is_unconfigured_by_default(monkeypatch):
     assert "secret" not in json.dumps(status)
 
 
-@pytest.mark.asyncio
-async def test_policy_still_denies_browser_without_opt_in(monkeypatch):
+def test_policy_still_denies_browser_without_opt_in(monkeypatch):
     _no_browser_env(monkeypatch)
     gate = PolicyGate()
     mission = Mission(goal="tools")
@@ -210,8 +209,7 @@ async def test_policy_still_denies_browser_without_opt_in(monkeypatch):
         gate.authorize(PolicyRequest(action="tool_use", mission=mission, tool="browser.open"))
 
 
-@pytest.mark.asyncio
-async def test_policy_allows_opted_in_browser_tools_only(monkeypatch):
+def test_policy_allows_opted_in_browser_tools_only(monkeypatch):
     monkeypatch.setenv("SWARM_BROWSER", "1")
     gate = PolicyGate()
     mission = Mission(goal="browse")
@@ -224,8 +222,7 @@ async def test_policy_allows_opted_in_browser_tools_only(monkeypatch):
         gate.authorize(PolicyRequest(action="tool_use", mission=mission, tool="browser.open"))
 
 
-@pytest.mark.asyncio
-async def test_local_only_still_denies_opted_in_browser(monkeypatch):
+def test_local_only_still_denies_opted_in_browser(monkeypatch):
     monkeypatch.setenv("SWARM_BROWSER", "1")
     gate = PolicyGate()
     mission = Mission(goal="private", privacy="local_only")
