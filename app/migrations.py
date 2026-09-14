@@ -20,7 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
 SCHEMA_TABLE = "schema_migrations"
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 class MigrationError(RuntimeError):
@@ -127,9 +127,37 @@ def _upgrade_002_worker_leases(conn: Connection) -> None:
     conn.execute(text("CREATE INDEX IF NOT EXISTS ix_idempotency_keys_mission_id ON idempotency_keys (mission_id)"))
 
 
+def _upgrade_003_work_items(conn: Connection) -> None:
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS work_items (
+            id VARCHAR(36) PRIMARY KEY,
+            kind VARCHAR(64) NOT NULL,
+            mission_id VARCHAR(36) NOT NULL,
+            payload TEXT NOT NULL DEFAULT '{}',
+            status VARCHAR(32) NOT NULL DEFAULT 'pending',
+            owner_id VARCHAR(36),
+            lease_id VARCHAR(36),
+            attempt INTEGER NOT NULL DEFAULT 0,
+            available_at DATETIME NOT NULL,
+            expires_at DATETIME,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            completed_at DATETIME,
+            result TEXT
+        )
+    """))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_work_items_mission_id ON work_items (mission_id)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_work_items_status ON work_items (status)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_work_items_kind ON work_items (kind)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_work_items_owner_id ON work_items (owner_id)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_work_items_available_at ON work_items (available_at)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_work_items_expires_at ON work_items (expires_at)"))
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial_schema", _upgrade_001_initial),
     Migration(2, "worker_leases_and_idempotency_keys", _upgrade_002_worker_leases),
+    Migration(3, "work_items_queue", _upgrade_003_work_items),
 )
 
 

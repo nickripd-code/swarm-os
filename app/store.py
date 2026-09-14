@@ -91,6 +91,24 @@ class IdempotencyRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class WorkItemRow(Base):
+    __tablename__ = "work_items"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(64), index=True)
+    mission_id: Mapped[str] = mapped_column(String(36), index=True)
+    payload: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    lease_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class Store:
     def __init__(self, path: str = "swarm.db"):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
