@@ -3,9 +3,9 @@ from __future__ import annotations
 import os
 from .credentials import get_api_key, get_openrouter_api_key
 from .llm import (
-    DEFAULT_MODEL, DEFAULT_OLLAMA_BASE_URL, DEFAULT_OPENROUTER_MODEL, DEFAULT_REASONING,
-    DEFAULT_VLLM_BASE_URL, OllamaModelProvider, VllmModelProvider, ollama_opted_in,
-    vllm_opted_in,
+    DEFAULT_LLAMACPP_BASE_URL, DEFAULT_MODEL, DEFAULT_OLLAMA_BASE_URL, DEFAULT_OPENROUTER_MODEL,
+    DEFAULT_REASONING, DEFAULT_VLLM_BASE_URL, LlamaCppModelProvider, OllamaModelProvider,
+    VllmModelProvider, llamacpp_opted_in, ollama_opted_in, vllm_opted_in,
 )
 
 
@@ -43,3 +43,15 @@ def vllm_status() -> dict:
 async def vllm_health_status() -> dict:
     health = await VllmModelProvider().health()
     return {**vllm_status(), "status": health.status, "detail": health.detail}
+
+
+def llamacpp_status() -> dict:
+    return {"configured": llamacpp_opted_in(),
+            "model": os.getenv("LLAMACPP_MODEL"),
+            "base_url": os.getenv("LLAMACPP_BASE_URL", DEFAULT_LLAMACPP_BASE_URL),
+            "provider": "llamacpp", "fallback": False}
+
+
+async def llamacpp_health_status() -> dict:
+    health = await LlamaCppModelProvider().health()
+    return {**llamacpp_status(), "status": health.status, "detail": health.detail}

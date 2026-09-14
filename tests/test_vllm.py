@@ -49,6 +49,8 @@ def no_local_env(monkeypatch):
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     monkeypatch.delenv("VLLM_MODEL", raising=False)
     monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLAMACPP_MODEL", raising=False)
+    monkeypatch.delenv("LLAMACPP_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 

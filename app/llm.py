@@ -27,6 +27,7 @@ DEFAULT_OPENROUTER_MODEL = "openai/gpt-4o"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
 DEFAULT_VLLM_BASE_URL = "http://127.0.0.1:8000/v1"
+DEFAULT_LLAMACPP_BASE_URL = "http://127.0.0.1:8080/v1"
 
 
 # Bounded retry is applied by SwarmRuntime.model_call (events + mission deadline).
@@ -123,6 +124,29 @@ def vllm_http_error(status_code: int) -> ProviderError:
 def vllm_opted_in() -> bool:
     """Local vLLM needs no cloud key; opt in with VLLM_MODEL and/or VLLM_BASE_URL."""
     return bool(os.getenv("VLLM_MODEL") or os.getenv("VLLM_BASE_URL"))
+
+
+_LLAMACPP_HTTP_ERRORS = {
+    401: ("llama.cpp rejected the request credentials", FailureClass.AUTHORIZATION_REQUIRED),
+    403: ("llama.cpp denied model access", FailureClass.AUTHORIZATION_REQUIRED),
+    408: ("llama.cpp request timed out; no demo result was substituted", FailureClass.TIMEOUT),
+    429: ("llama.cpp rate limit reached", FailureClass.RATE_LIMIT),
+    400: ("llama.cpp rejected the model request", FailureClass.MODEL_FAILURE),
+    404: ("The configured llama.cpp model is unavailable", FailureClass.CAPABILITY_MISMATCH),
+}
+
+
+def llamacpp_http_error(status_code: int) -> ProviderError:
+    if status_code in _LLAMACPP_HTTP_ERRORS:
+        message, failure_class = _LLAMACPP_HTTP_ERRORS[status_code]
+        return ProviderError(message, failure_class)
+    failure_class = FailureClass.PROVIDER_OUTAGE if status_code >= 500 else FailureClass.MODEL_FAILURE
+    return ProviderError(f"llama.cpp service error (HTTP {status_code})", failure_class)
+
+
+def llamacpp_opted_in() -> bool:
+    """Local llama.cpp needs no cloud key; opt in with LLAMACPP_MODEL and/or LLAMACPP_BASE_URL."""
+    return bool(os.getenv("LLAMACPP_MODEL") or os.getenv("LLAMACPP_BASE_URL"))
 
 
 def chat_response_format(schema: dict | None) -> dict | None:
@@ -766,6 +790,164 @@ class VllmModelProvider(ModelProvider):
         )
 
 
+
+class LlamaCppModelProvider(ModelProvider):
+    """OpenAI-compatible Chat Completions adapter for a local llama.cpp server."""
+
+    provider_id = "llamacpp"
+
+    def __init__(self, model: str | None = None, transport=None, base_url: str | None = None):
+        self._model_arg = model
+        self._base_url_arg = base_url
+        self.model = model if model is not None else os.getenv("LLAMACPP_MODEL")
+        self.transport = transport
+        self.base_url = (base_url or os.getenv("LLAMACPP_BASE_URL") or DEFAULT_LLAMACPP_BASE_URL).rstrip("/")
+        self.max_output_tokens = int(os.getenv("SWARM_MAX_OUTPUT_TOKENS", "8192"))
+        self._usage = ModelUsage()
+
+    def configured(self) -> bool:
+        if self._model_arg or self._base_url_arg:
+            return True
+        return llamacpp_opted_in()
+
+    def _descriptor(self, model: str) -> ModelDescriptor:
+        return ModelDescriptor(
+            provider=self.provider_id,
+            model=model,
+            local=True,
+            capabilities=self.capabilities(model),
+            context_limits=self.context_limits(model),
+            price_input_per_million=0,
+            price_output_per_million=0,
+        )
+
+    async def list_models(self) -> list[ModelDescriptor]:
+        if self.model:
+            return [self._descriptor(self.model)]
+        return [self._descriptor(model_id) for model_id in await self._remote_model_ids()]
+
+    async def _request(self, method: str, path: str, *, json_body: dict | None = None,
+                       timeout: httpx.Timeout) -> httpx.Response:
+        try:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False,
+                                         transport=self.transport) as client:
+                return await client.request(method, f"{self.base_url}{path}", json=json_body)
+        except httpx.TimeoutException:
+            raise ProviderError("llama.cpp request timed out; no demo result was substituted",
+                                FailureClass.TIMEOUT) from None
+        except httpx.RequestError:
+            raise ProviderError("Could not reach llama.cpp", FailureClass.PROVIDER_OUTAGE) from None
+
+    async def _remote_model_ids(self) -> list[str]:
+        try:
+            response = await self._request("GET", "/models", timeout=httpx.Timeout(5.0, connect=2.0))
+        except ProviderError:
+            return []
+        if response.is_error:
+            return []
+        try:
+            payload = response.json()
+            return [item["id"] for item in payload.get("data") or []
+                    if isinstance(item, dict) and item.get("id")]
+        except (ValueError, KeyError, TypeError):
+            return []
+
+    def capabilities(self, model: str) -> ModelCapabilities:
+        del model
+        return ModelCapabilities(
+            reasoning="unknown",
+            coding="unknown",
+            vision=None,
+            tool_use=True,
+            structured_outputs=True,
+            streaming=False,
+        )
+
+    def context_limits(self, model: str) -> ContextLimits:
+        del model
+        return ContextLimits(max_output_tokens=self.max_output_tokens)
+
+    async def health(self) -> ProviderHealth:
+        if not self.configured():
+            return ProviderHealth(
+                provider=self.provider_id,
+                status="unconfigured",
+                detail="llama.cpp is not configured",
+            )
+        try:
+            response = await self._request("GET", "/models", timeout=httpx.Timeout(5.0, connect=2.0))
+        except ProviderError as exc:
+            if exc.failure_class == FailureClass.TIMEOUT:
+                return ProviderHealth(
+                    provider=self.provider_id, status="unavailable",
+                    detail="llama.cpp health check timed out",
+                )
+            return ProviderHealth(
+                provider=self.provider_id, status="unavailable",
+                detail="llama.cpp daemon is not reachable",
+            )
+        if response.is_error:
+            return ProviderHealth(
+                provider=self.provider_id,
+                status="unavailable",
+                detail=f"llama.cpp daemon is not reachable (HTTP {response.status_code})",
+            )
+        return ProviderHealth(
+            provider=self.provider_id,
+            status="healthy",
+            detail="llama.cpp daemon reachable",
+        )
+
+    def estimate_cost(self, request: ModelRequest) -> CostEstimate:
+        return CostEstimate(
+            provider=self.provider_id,
+            model=request.model,
+            estimated_cost=0,
+            known=True,
+            reason="Local llama.cpp inference is not metered",
+        )
+
+    def usage(self) -> ModelUsage:
+        return self._usage.model_copy()
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        if not self.configured():
+            raise ProviderError("llama.cpp is not configured", FailureClass.AUTHORIZATION_REQUIRED)
+        payload = request.input if isinstance(request.input, str) else json.dumps(request.input, default=str)
+        body: dict[str, Any] = {
+            "model": request.model,
+            "messages": [
+                {"role": "system", "content": request.instructions},
+                {"role": "user", "content": payload},
+            ],
+            "max_tokens": request.max_output_tokens or self.max_output_tokens,
+        }
+        formatted = chat_response_format(request.response_format)
+        if formatted is not None:
+            body["response_format"] = formatted
+        response = await self._request(
+            "POST", "/chat/completions", json_body=body, timeout=httpx.Timeout(180, connect=10),
+        )
+        if response.is_error:
+            raise llamacpp_http_error(response.status_code)
+        try:
+            result = response.json()
+            output, usage = chat_completion_output(result, label="llama.cpp")
+        except ProviderError:
+            raise
+        except (ValueError, KeyError, TypeError):
+            raise ProviderError("llama.cpp returned an invalid structured response",
+                                FailureClass.INVALID_OUTPUT) from None
+        self._usage = self._usage.plus(usage)
+        return ModelResponse(
+            provider=self.provider_id,
+            model=result.get("model", request.model),
+            output=output,
+            response_id=result.get("id"),
+            usage=usage,
+        )
+
+
 class OpenAIProvider(LLMProvider):
     """Mission controller/worker adapter backed by a provider-neutral model client."""
     mode = "openai"
@@ -936,10 +1118,11 @@ def build_model_provider(primary: ModelProvider | None = None,
                          secondary: ModelProvider | None = None,
                          local: ModelProvider | None = None,
                          vllm: ModelProvider | None = None,
+                         llamacpp: ModelProvider | None = None,
                          openai_api_key: str | None = None,
                          openrouter_api_key: str | None = None,
                          transport=None) -> ModelProvider:
-    """Cloud OpenAI + optional OpenRouter, with opted-in local Ollama/vLLM as last resort.
+    """Cloud OpenAI + optional OpenRouter, with opted-in local Ollama/vLLM/llama.cpp as last resort.
 
     OpenAI-only (or OpenRouter-only) is unchanged when no local adapter is opted in.
     Two cloud keys still wrap as Failover(OpenAI, OpenRouter); the router registers
@@ -949,10 +1132,11 @@ def build_model_provider(primary: ModelProvider | None = None,
     secondary = secondary or OpenRouterModelProvider(api_key=openrouter_api_key, transport=transport)
     local = local or OllamaModelProvider(transport=transport)
     vllm = vllm or VllmModelProvider(transport=transport)
+    llamacpp = llamacpp or LlamaCppModelProvider(transport=transport)
     if primary.configured() and secondary.configured():
         return FailoverModelProvider(primary, secondary)
     cloud = secondary if secondary.configured() and not primary.configured() else primary
-    first_local = _first_configured_local(local, vllm)
+    first_local = _first_configured_local(local, vllm, llamacpp)
     if first_local is not None and provider_configured(cloud):
         return FailoverModelProvider(cloud, first_local)
     if first_local is not None and not provider_configured(cloud):
@@ -962,9 +1146,11 @@ def build_model_provider(primary: ModelProvider | None = None,
 
 def build_router(model_provider: ModelProvider | None = None,
                  local: ModelProvider | None = None,
-                 vllm: ModelProvider | None = None, **kwargs) -> ModelRouter:
+                 vllm: ModelProvider | None = None,
+                 llamacpp: ModelProvider | None = None, **kwargs) -> ModelRouter:
     """Register configured ModelProviders. OpenAI-only stays a one-entry catalog."""
-    provider = model_provider or build_model_provider(local=local, vllm=vllm, **kwargs)
+    provider = model_provider or build_model_provider(
+        local=local, vllm=vllm, llamacpp=llamacpp, **kwargs)
     providers = registered_providers(provider)
     ollama = local or next((item for item in providers if item.provider_id == "ollama"), None)
     if ollama is None:
@@ -972,8 +1158,12 @@ def build_router(model_provider: ModelProvider | None = None,
     extra_vllm = vllm or next((item for item in providers if item.provider_id == "vllm"), None)
     if extra_vllm is None:
         extra_vllm = VllmModelProvider(transport=kwargs.get("transport"))
+    extra_llamacpp = llamacpp or next((item for item in providers if item.provider_id == "llamacpp"), None)
+    if extra_llamacpp is None:
+        extra_llamacpp = LlamaCppModelProvider(transport=kwargs.get("transport"))
     _register_if_configured(providers, ollama)
     _register_if_configured(providers, extra_vllm)
+    _register_if_configured(providers, extra_llamacpp)
     return ModelRouter(providers)
 
 

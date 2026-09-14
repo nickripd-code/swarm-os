@@ -325,6 +325,8 @@ def test_build_router_openai_only_does_not_register_openrouter(monkeypatch):
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     monkeypatch.delenv("VLLM_MODEL", raising=False)
     monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLAMACPP_MODEL", raising=False)
+    monkeypatch.delenv("LLAMACPP_BASE_URL", raising=False)
     router = build_router()
     assert [provider.provider_id for provider in router.providers] == ["openai"]
     stacked = build_model_provider()
@@ -338,6 +340,8 @@ def test_build_router_both_keys_unwraps_failover(monkeypatch):
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     monkeypatch.delenv("VLLM_MODEL", raising=False)
     monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLAMACPP_MODEL", raising=False)
+    monkeypatch.delenv("LLAMACPP_BASE_URL", raising=False)
     stacked = build_model_provider()
     assert isinstance(stacked, FailoverModelProvider)
     router = build_router()
