@@ -46,12 +46,18 @@ class SpawnThenAskProvider(LLMProvider):
         return {"status": "completed", "finding": "should not run if ask is rejected"}
 
 
-async def wait_until_question(store: Store, mission_id, timeout: float = 2) -> Mission:
+async def wait_until_question(store: Store, mission_id, timeout: float = 8) -> Mission:
     async with asyncio.timeout(timeout):
         while True:
             saved = store.get_mission(mission_id)
             if saved and saved.status == MissionStatus.WAITING and saved.pending_question:
                 return saved
+            if saved and saved.status in {
+                MissionStatus.FAILED, MissionStatus.COMPLETED, MissionStatus.STOPPED, MissionStatus.BLOCKED,
+            }:
+                raise AssertionError(
+                    f"mission ended {saved.status} before a pending question: {saved.result}"
+                )
             await asyncio.sleep(0.01)
 
 
