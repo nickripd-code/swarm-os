@@ -5,7 +5,7 @@ import pytest
 
 from app.llm import (
     OllamaModelProvider, OpenAIResponsesModelProvider, OpenRouterModelProvider,
-    build_controller, build_model_provider, build_router,
+    VllmModelProvider, build_controller, build_model_provider, build_router,
 )
 from app.models import FailureClass
 from app.providers import FailoverModelProvider, ModelProvider, ModelRequest, ProviderError
@@ -13,7 +13,7 @@ from app.router import CapabilityRequest, ModelRouter
 
 
 REQUEST = ModelRequest(
-    model="llama3.2",
+    model="meta-llama/Llama-3.1-8B-Instruct",
     instructions="Return JSON",
     input={"question": "test"},
     response_format={"type": "json_schema", "name": "answer", "strict": True,
@@ -23,9 +23,9 @@ REQUEST = ModelRequest(
 )
 
 
-def completed_chat(output=None, model="llama3.2"):
+def completed_chat(output=None, model="meta-llama/Llama-3.1-8B-Instruct"):
     return httpx.Response(200, json={
-        "id": "ollama_contract",
+        "id": "vllm_contract",
         "model": model,
         "choices": [{"finish_reason": "stop", "message": {
             "role": "assistant",
@@ -39,12 +39,12 @@ def models_list(*ids):
     return httpx.Response(200, json={"object": "list", "data": [{"id": model_id} for model_id in ids]})
 
 
-def ollama_transport(handler):
+def vllm_transport(handler):
     return httpx.MockTransport(handler)
 
 
 @pytest.fixture
-def no_ollama_env(monkeypatch):
+def no_local_env(monkeypatch):
     monkeypatch.delenv("OLLAMA_MODEL", raising=False)
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     monkeypatch.delenv("VLLM_MODEL", raising=False)
@@ -54,7 +54,7 @@ def no_ollama_env(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_ollama_adapter_implements_provider_contract_and_tracks_usage(no_ollama_env):
+async def test_vllm_adapter_implements_provider_contract_and_tracks_usage(no_local_env):
     captured = {}
 
     def handler(request):
@@ -64,24 +64,26 @@ async def test_ollama_adapter_implements_provider_contract_and_tracks_usage(no_o
         assert "Authorization" not in request.headers
         return completed_chat()
 
-    provider = OllamaModelProvider(model="llama3.2", transport=ollama_transport(handler))
+    provider = VllmModelProvider(
+        model="meta-llama/Llama-3.1-8B-Instruct", transport=vllm_transport(handler),
+    )
     assert isinstance(provider, ModelProvider)
     models = await provider.list_models()
-    assert models[0].provider == "ollama"
-    assert models[0].model == "llama3.2"
+    assert models[0].provider == "vllm"
+    assert models[0].model == "meta-llama/Llama-3.1-8B-Instruct"
     assert models[0].local is True
     assert models[0].price_output_per_million == 0
 
     response = await provider.complete(REQUEST)
     assert response.output == {"answer": "ok"}
-    assert response.provider == "ollama"
+    assert response.provider == "vllm"
     assert response.usage.model_dump() == {
         "input_tokens": 11,
         "output_tokens": 7,
         "reasoning_tokens": 0,
     }
-    assert captured["url"] == "http://127.0.0.1:11434/v1/chat/completions"
-    assert captured["body"]["model"] == "llama3.2"
+    assert captured["url"] == "http://127.0.0.1:8000/v1/chat/completions"
+    assert captured["body"]["model"] == "meta-llama/Llama-3.1-8B-Instruct"
     assert captured["body"]["response_format"]["type"] == "json_schema"
     assert "json_schema" in captured["body"]["response_format"]
     assert "provider" not in captured["body"]
@@ -103,33 +105,36 @@ async def test_ollama_adapter_implements_provider_contract_and_tracks_usage(no_o
     (httpx.Response(200, json={"choices": [{"finish_reason": "content_filter", "message": {"content": ""}}]}),
      "declined", FailureClass.POLICY_REFUSAL),
 ])
-async def test_ollama_errors_are_classified_and_do_not_fake_success(no_ollama_env, response, expected, failure_class):
-    provider = OllamaModelProvider(model="llama3.2", transport=ollama_transport(lambda _: response))
+async def test_vllm_errors_are_classified_and_do_not_fake_success(no_local_env, response, expected, failure_class):
+    provider = VllmModelProvider(
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        transport=vllm_transport(lambda _: response),
+    )
     with pytest.raises(ProviderError, match=expected) as error:
         await provider.complete(REQUEST)
     assert error.value.failure_class == failure_class
 
 
 @pytest.mark.asyncio
-async def test_ollama_timeout_and_outage_are_classified(no_ollama_env):
-    timeout_provider = OllamaModelProvider(
-        model="llama3.2",
-        transport=ollama_transport(lambda _: (_ for _ in ()).throw(httpx.ReadTimeout("timed out"))))
+async def test_vllm_timeout_and_outage_are_classified(no_local_env):
+    timeout_provider = VllmModelProvider(
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        transport=vllm_transport(lambda _: (_ for _ in ()).throw(httpx.ReadTimeout("timed out"))))
     with pytest.raises(ProviderError, match="timed out") as timeout_error:
         await timeout_provider.complete(REQUEST)
     assert timeout_error.value.failure_class == FailureClass.TIMEOUT
 
-    outage_provider = OllamaModelProvider(
-        model="llama3.2",
-        transport=ollama_transport(lambda _: (_ for _ in ()).throw(httpx.ConnectError("offline"))))
-    with pytest.raises(ProviderError, match="Could not reach Ollama") as outage_error:
+    outage_provider = VllmModelProvider(
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        transport=vllm_transport(lambda _: (_ for _ in ()).throw(httpx.ConnectError("offline"))))
+    with pytest.raises(ProviderError, match="Could not reach vLLM") as outage_error:
         await outage_provider.complete(REQUEST)
     assert outage_error.value.failure_class == FailureClass.PROVIDER_OUTAGE
 
 
 @pytest.mark.asyncio
-async def test_health_unconfigured_when_not_opted_in(no_ollama_env):
-    provider = OllamaModelProvider()
+async def test_health_unconfigured_when_not_opted_in(no_local_env):
+    provider = VllmModelProvider()
     assert provider.configured() is False
     health = await provider.health()
     assert health.status == "unconfigured"
@@ -139,44 +144,44 @@ async def test_health_unconfigured_when_not_opted_in(no_ollama_env):
 
 
 @pytest.mark.asyncio
-async def test_health_unavailable_when_daemon_down(no_ollama_env):
-    provider = OllamaModelProvider(
-        model="llama3.2",
-        transport=ollama_transport(lambda _: (_ for _ in ()).throw(httpx.ConnectError("offline"))),
+async def test_health_unavailable_when_daemon_down(no_local_env):
+    provider = VllmModelProvider(
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        transport=vllm_transport(lambda _: (_ for _ in ()).throw(httpx.ConnectError("offline"))),
     )
     health = await provider.health()
     assert health.status == "unavailable"
-    assert health.detail == "Ollama daemon is not reachable"
+    assert health.detail == "vLLM daemon is not reachable"
 
 
 @pytest.mark.asyncio
-async def test_health_healthy_when_models_endpoint_ok(no_ollama_env):
-    provider = OllamaModelProvider(
-        model="llama3.2",
-        transport=ollama_transport(lambda _: models_list("llama3.2")),
+async def test_health_healthy_when_models_endpoint_ok(no_local_env):
+    provider = VllmModelProvider(
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        transport=vllm_transport(lambda _: models_list("meta-llama/Llama-3.1-8B-Instruct")),
     )
     health = await provider.health()
     assert health.status == "healthy"
 
 
 @pytest.mark.asyncio
-async def test_custom_base_url_is_used(no_ollama_env):
+async def test_custom_base_url_is_used(no_local_env):
     captured = {}
 
     def handler(request):
         captured["url"] = str(request.url)
-        return completed_chat(model="mistral")
+        return completed_chat(model="Qwen/Qwen2.5-7B-Instruct")
 
-    provider = OllamaModelProvider(
-        model="mistral",
-        base_url="http://ollama.internal:11434/v1",
-        transport=ollama_transport(handler),
+    provider = VllmModelProvider(
+        model="Qwen/Qwen2.5-7B-Instruct",
+        base_url="http://vllm.internal:8001/v1",
+        transport=vllm_transport(handler),
     )
-    await provider.complete(REQUEST.model_copy(update={"model": "mistral"}))
-    assert captured["url"] == "http://ollama.internal:11434/v1/chat/completions"
+    await provider.complete(REQUEST.model_copy(update={"model": "Qwen/Qwen2.5-7B-Instruct"}))
+    assert captured["url"] == "http://vllm.internal:8001/v1/chat/completions"
 
 
-def test_build_model_provider_openai_only_ignores_unconfigured_ollama(monkeypatch, no_ollama_env):
+def test_build_model_provider_openai_only_ignores_unconfigured_vllm(monkeypatch, no_local_env):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     provider = build_model_provider()
     assert isinstance(provider, OpenAIResponsesModelProvider)
@@ -185,103 +190,113 @@ def test_build_model_provider_openai_only_ignores_unconfigured_ollama(monkeypatc
     assert [item.provider_id for item in router.providers] == ["openai"]
 
 
-def test_build_model_provider_openrouter_only_ignores_unconfigured_ollama(monkeypatch, no_ollama_env):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "or-test")
-    monkeypatch.setattr("app.llm.get_api_key", lambda: None)
-    primary = OpenAIResponsesModelProvider(api_key="unused")
-    monkeypatch.setattr(primary, "configured", lambda: False)
-    provider = build_model_provider(primary=primary, secondary=OpenRouterModelProvider(api_key="or-test"))
-    assert isinstance(provider, OpenRouterModelProvider)
-
-
-def test_build_router_registers_ollama_when_opted_in(monkeypatch, no_ollama_env):
+def test_build_router_registers_vllm_when_opted_in(monkeypatch, no_local_env):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("OLLAMA_MODEL", "llama3.2")
+    monkeypatch.setenv("VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
     stacked = build_model_provider()
     assert isinstance(stacked, FailoverModelProvider)
     assert stacked.primary.provider_id == "openai"
-    assert stacked.secondary.provider_id == "ollama"
+    assert stacked.secondary.provider_id == "vllm"
     router = build_router()
-    assert [item.provider_id for item in router.providers] == ["openai", "ollama"]
+    assert [item.provider_id for item in router.providers] == ["openai", "vllm"]
 
 
-def test_build_router_all_three_keeps_cloud_failover_and_registers_ollama(monkeypatch, no_ollama_env):
+def test_build_router_cloud_plus_ollama_and_vllm(monkeypatch, no_local_env):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-test")
     monkeypatch.setenv("OLLAMA_MODEL", "llama3.2")
+    monkeypatch.setenv("VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
     stacked = build_model_provider()
     assert isinstance(stacked, FailoverModelProvider)
     assert stacked.primary.provider_id == "openai"
     assert stacked.secondary.provider_id == "openrouter"
     router = build_router()
-    assert [item.provider_id for item in router.providers] == ["openai", "openrouter", "ollama"]
+    assert [item.provider_id for item in router.providers] == ["openai", "openrouter", "ollama", "vllm"]
     controller = build_controller()
-    assert [item.provider_id for item in controller.router.providers] == ["openai", "openrouter", "ollama"]
+    assert [item.provider_id for item in controller.router.providers] == [
+        "openai", "openrouter", "ollama", "vllm",
+    ]
 
 
-def test_build_model_provider_ollama_only(monkeypatch, no_ollama_env):
-    monkeypatch.setenv("OLLAMA_MODEL", "llama3.2")
+def test_build_model_provider_vllm_only(monkeypatch, no_local_env):
+    monkeypatch.setenv("VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
     monkeypatch.setattr("app.llm.get_api_key", lambda: None)
     primary = OpenAIResponsesModelProvider(api_key="unused")
     monkeypatch.setattr(primary, "configured", lambda: False)
     provider = build_model_provider(primary=primary)
-    assert isinstance(provider, OllamaModelProvider)
+    assert isinstance(provider, VllmModelProvider)
     router = build_router(model_provider=provider)
-    assert [item.provider_id for item in router.providers] == ["ollama"]
+    assert [item.provider_id for item in router.providers] == ["vllm"]
+
+
+def test_build_router_local_only_registers_both_adapters(monkeypatch, no_local_env):
+    monkeypatch.setenv("OLLAMA_MODEL", "llama3.2")
+    monkeypatch.setenv("VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
+    monkeypatch.setattr("app.llm.get_api_key", lambda: None)
+    primary = OpenAIResponsesModelProvider(api_key="unused")
+    monkeypatch.setattr(primary, "configured", lambda: False)
+    stacked = build_model_provider(primary=primary)
+    assert isinstance(stacked, OllamaModelProvider)
+    router = build_router(model_provider=stacked)
+    assert [item.provider_id for item in router.providers] == ["ollama", "vllm"]
 
 
 @pytest.mark.asyncio
-async def test_router_outage_walks_to_ollama(no_ollama_env):
+async def test_router_outage_walks_to_vllm(no_local_env):
     from tests.test_router import openai_like, openrouter_like
 
     def handler(request):
         if request.method == "GET":
-            return models_list("llama3.2")
-        return completed_chat(output={"answer": "from ollama"})
+            return models_list("meta-llama/Llama-3.1-8B-Instruct")
+        return completed_chat(output={"answer": "from vllm"})
 
     openai = openai_like(error=ProviderError("Could not reach OpenAI", FailureClass.PROVIDER_OUTAGE))
     openrouter = openrouter_like(
         error=ProviderError("Could not reach OpenRouter", FailureClass.PROVIDER_OUTAGE),
     )
-    ollama = OllamaModelProvider(model="llama3.2", transport=ollama_transport(handler))
-    router = ModelRouter([openai, openrouter, ollama])
+    vllm = VllmModelProvider(
+        model="meta-llama/Llama-3.1-8B-Instruct", transport=vllm_transport(handler),
+    )
+    router = ModelRouter([openai, openrouter, vllm])
     response = await router.complete(CapabilityRequest(reasoning="high"), REQUEST)
     assert openai.calls == 1
     assert openrouter.calls == 1
-    assert response.provider == "ollama"
-    assert response.output == {"answer": "from ollama"}
+    assert response.provider == "vllm"
+    assert response.output == {"answer": "from vllm"}
     assert response.failover_from == "openai"
     assert response.failover_reason == "PROVIDER_OUTAGE"
 
 
 @pytest.mark.asyncio
-async def test_local_only_selects_ollama(no_ollama_env):
+async def test_local_only_selects_vllm(no_local_env):
     from tests.test_router import openai_like, openrouter_like
 
     def handler(request):
         if request.method == "GET":
-            return models_list("llama3.2")
+            return models_list("meta-llama/Llama-3.1-8B-Instruct")
         return completed_chat()
 
-    ollama = OllamaModelProvider(model="llama3.2", transport=ollama_transport(handler))
-    router = ModelRouter([openai_like(), openrouter_like(), ollama])
+    vllm = VllmModelProvider(
+        model="meta-llama/Llama-3.1-8B-Instruct", transport=vllm_transport(handler),
+    )
+    router = ModelRouter([openai_like(), openrouter_like(), vllm])
     decision = await router.select(CapabilityRequest(privacy="local_only"))
-    assert decision.selected.provider_id == "ollama"
+    assert decision.selected.provider_id == "vllm"
     assert decision.fallbacks == []
 
 
 @pytest.mark.asyncio
-async def test_unavailable_ollama_is_skipped_and_cloud_still_serves(no_ollama_env):
+async def test_unavailable_vllm_is_skipped_and_cloud_still_serves(no_local_env):
     from tests.test_router import openai_like
 
-    ollama = OllamaModelProvider(
-        model="llama3.2",
-        transport=ollama_transport(lambda _: (_ for _ in ()).throw(httpx.ConnectError("offline"))),
+    vllm = VllmModelProvider(
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        transport=vllm_transport(lambda _: (_ for _ in ()).throw(httpx.ConnectError("offline"))),
     )
     openai = openai_like(output={"answer": "cloud"})
-    router = ModelRouter([openai, ollama])
+    router = ModelRouter([openai, vllm])
     response = await router.complete(CapabilityRequest(reasoning="high"), REQUEST)
     assert response.provider == "openai"
     assert openai.calls == 1
-    with pytest.raises(ProviderError, match="Could not reach Ollama"):
-        await ollama.complete(REQUEST)
+    with pytest.raises(ProviderError, match="Could not reach vLLM"):
+        await vllm.complete(REQUEST)
