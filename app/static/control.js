@@ -187,8 +187,11 @@ function describe(e){
     case "agent.message":return '<b>'+esc(label(state.agents.get(p.from_id)?.role))+'</b> → '+esc(label(state.agents.get(p.to_id)?.role))+' · '+esc(p.kind);
     case "agent.spawned":return "<b>"+esc(label(p.role))+"</b> joined the crew";
     case "controller.decision":return "<b>Controller</b> · "+esc(p.action==="spawn"?"delegated to "+label(p.role):p.action==="finish"?"assembled the final answer":p.reason||p.action);
-    case "llm.started":return "<b>"+esc(name)+"</b> is "+(p.kind==="decision"?"deciding the next move":"working");
+    case "llm.started":return "<b>"+esc(name)+"</b> is "+(p.kind==="decision"?"deciding the next move":p.kind==="verification"?"verifying the claimed result":"working");
     case "llm.completed":return "<b>"+esc(name)+"</b> · "+((p.input_tokens||0)+(p.output_tokens||0)).toLocaleString()+" tokens";
+    case "verification.started":return "<b>Verifier</b> is checking the claimed result";
+    case "verification.passed":return "<b>Verifier</b> accepted the claimed result";
+    case "verification.failed":return "<b>Verifier</b> rejected the claim"+(p.failure_class?" · "+esc(p.failure_class):"")+(p.rationale?" · "+esc(p.rationale):"");
     case "task.completed":return "<b>"+esc(name)+"</b> delivered a result";
     case "task.blocked":return "<b>"+esc(name)+"</b> needs a missing capability";
     case "mission.started":return "The mission is underway";

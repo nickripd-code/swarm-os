@@ -22,7 +22,7 @@ export function applyEvent(state, e) {
   }
   if (e.event_type === "llm.started") {
     const a = state.agents.get(e.actor_id);
-    if (a) a.activity = p.kind === "decision" ? "Deciding the next move" : "Working on the task";
+    if (a) a.activity = p.kind === "decision" ? "Deciding the next move" : p.kind === "verification" ? "Verifying the claimed result" : "Working on the task";
   }
   if (e.event_type === "llm.completed") {
     state.usage.input += p.input_tokens || 0;
@@ -98,6 +98,14 @@ export function alertFromEvent(e) {
         level: "warning",
         title: "Execution stopped",
         detail: p.reason || "All execution stopped",
+        event_type: e.event_type,
+      };
+    case "verification.failed":
+      return {
+        level: "critical",
+        title: "Verification failed",
+        detail: p.rationale || p.failure_class || "Claimed result was not accepted",
+        failure_class: p.failure_class || "VERIFICATION_FAILURE",
         event_type: e.event_type,
       };
     default:
