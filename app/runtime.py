@@ -11,12 +11,12 @@ from .events import EventType, event_type_for_mission, event_type_for_task
 from .org import OrganizationDesigner, is_org_action
 from .leases import IdempotencyError, IdempotencyGuard, LeaseConflict, LeaseError, WorkerLeases
 from .models import (
-    AgentSpec, AgentStatus, FailureClass, Mission, MissionAnswer, MissionEvent,
+    AgentSpec, AgentStatus, FailureClass, Mission, MissionEvent,
     MissionStatus, PaymentIntent, PendingQuestion, Task, TaskStatus, utcnow,
 )
 from .policy import PolicyError, PolicyGate, PolicyRequest
 from .resources import ResourceScheduler, listed_prices_from_meta, usage_from_meta
-from .store import Store
+from .store import AnswerStateError, Store
 from .llm import (
     DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BASE_SECONDS, LLMProvider, build_controller,
     ProviderError, RETRYABLE_FAILURE_CLASSES, retry_delay_seconds,
@@ -28,6 +28,11 @@ from .workspace import WorkspaceError, WorkspaceProvider, build_workspace_provid
 
 TERMINAL = {MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.STOPPED, MissionStatus.BLOCKED}
 RESUMABLE = {MissionStatus.PENDING, MissionStatus.RUNNING, MissionStatus.WAITING}
+STOPPABLE = RESUMABLE | {MissionStatus.PAUSED}
+
+
+class PauseRequested(Exception):
+    """Internal cooperative-control signal; never classified as mission failure."""
 
 
 def failure_payload(error: str, failure_class: FailureClass) -> dict[str, Any]:
@@ -62,6 +67,7 @@ class SwarmRuntime:
         self.agents: dict[UUID, list[AgentSpec]] = defaultdict(list)
         self.tasks: dict[UUID, list[Task]] = defaultdict(list)
         self.stopped: set[UUID] = set()
+        self.pausing: set[UUID] = set()
         self.suspending: set[UUID] = set()
         self.started_at: dict[UUID, datetime] = {}
         self.runs: dict[UUID, asyncio.Task] = {}
@@ -174,6 +180,8 @@ class SwarmRuntime:
     def check_stopped(self, mission_id: UUID):
         if mission_id in self.stopped:
             raise asyncio.CancelledError()
+        if mission_id in self.pausing:
+            raise PauseRequested()
 
     async def spawn(self, mission: Mission, role: str, purpose: str, parent: AgentSpec | None = None,
                     capabilities: list[str] | None = None) -> AgentSpec:
@@ -230,15 +238,49 @@ class SwarmRuntime:
 
     async def start(self, mission: Mission):
         async with self.lock:
-            if mission.id in self.runs:
+            existing = self.runs.get(mission.id)
+            if existing is not None and not existing.done():
                 raise PolicyError("Mission is already running")
+            if existing is not None:
+                self.runs.pop(mission.id, None)
             job = asyncio.create_task(self.run(mission))
             self.runs[mission.id] = job
             job.add_done_callback(lambda done: self.runs.pop(mission.id, None) if self.runs.get(mission.id) is done else None)
 
+    def _controller_configured(self) -> bool:
+        configured = getattr(self.controller, "configured", None)
+        return not callable(configured) or bool(configured())
+
+    async def _request_resume(self, mission: Mission, *, reason: str) -> bool:
+        """Schedule recovery and distinguish the request from actual mission.resumed."""
+        if not self._controller_configured():
+            return False
+        await self.emit(mission.id, EventType.MISSION_RESUME_REQUESTED, {
+            "reason": reason,
+            "from_status": str(mission.status),
+        })
+        await self.start(mission)
+        return True
+
+    async def resume(self, mission_id: UUID) -> Mission:
+        """Explicitly resume a user-paused mission; all other states fail closed."""
+        mission = self.store.get_mission(mission_id)
+        if mission is None:
+            raise PolicyError("Mission not found", FailureClass.INVALID_OUTPUT)
+        if mission.status != MissionStatus.PAUSED:
+            raise PolicyError("Only a paused mission can be resumed", FailureClass.INVALID_OUTPUT)
+        job = self.runs.get(mission_id)
+        if job is not None and not job.done():
+            raise PolicyError("Mission already has an active runtime", FailureClass.POLICY_REFUSAL)
+        self.pausing.discard(mission_id)
+        if not await self._request_resume(mission, reason="User requested resume"):
+            raise PolicyError("No model provider is configured", FailureClass.AUTHORIZATION_REQUIRED)
+        return mission
+
     def remaining_runtime(self, mission: Mission) -> float:
         started = self.started_at.get(mission.id, mission.updated_at)
-        return mission.limits.max_runtime_seconds - (utcnow() - started).total_seconds()
+        elapsed = max((utcnow() - started).total_seconds() - mission.paused_seconds, 0)
+        return mission.limits.max_runtime_seconds - elapsed
 
     def available_tools(self, mission: Mission | None = None) -> list[str]:
         _ = mission
@@ -396,25 +438,46 @@ class SwarmRuntime:
             return False
         return any(item.question_id == question_id for item in mission.answers)
 
+    async def _mark_answer_consumed(self, mission: Mission, question_id: str, root: AgentSpec,
+                                    *, source: str) -> None:
+        """Mark an accepted answer as available to the continuing controller exactly once."""
+        try:
+            saved, record, changed = self.store.mark_answer_consumed(mission.id, question_id)
+        except AnswerStateError as exc:
+            raise PolicyError(str(exc), FailureClass.AUTHORIZATION_REQUIRED) from exc
+        self._sync_answers(mission, saved)
+        if changed:
+            await self.emit(mission.id, EventType.USER_ANSWER_CONSUMED, {
+                "question_id": record.question_id,
+                "answered_at": record.answered_at.isoformat(),
+                "consumed_at": record.consumed_at.isoformat() if record.consumed_at else None,
+                "source": source,
+            }, root.id)
+
+    async def _mark_unconsumed_answers(self, mission: Mission, root: AgentSpec,
+                                       *, source: str) -> None:
+        for record in list(mission.answers):
+            if record.consumed_at is None:
+                await self._mark_answer_consumed(mission, record.question_id, root, source=source)
+
     async def _await_answer(self, mission: Mission, question_id: str) -> None:
-        """Block until the matching answer is persisted. Never fabricate one."""
+        """Wait on the local signal and poll persistence for cross-worker answers."""
         event = self._answer_waiters.get(mission.id)
         if event is None:
             event = asyncio.Event()
             self._answer_waiters[mission.id] = event
         try:
-            saved = self.store.get_mission(mission.id)
-            if self._answer_recorded(saved, question_id):
-                self._sync_answers(mission, saved)
-                return
-            await event.wait()
-            saved = self.store.get_mission(mission.id)
-            self._sync_answers(mission, saved)
-            if not self._answer_recorded(saved, question_id):
-                raise PolicyError(
-                    "Cannot continue without a matching human answer",
-                    FailureClass.AUTHORIZATION_REQUIRED,
-                )
+            while True:
+                self.check_stopped(mission.id)
+                event.clear()
+                saved = self.store.get_mission(mission.id)
+                if self._answer_recorded(saved, question_id):
+                    self._sync_answers(mission, saved)
+                    return
+                try:
+                    await asyncio.wait_for(event.wait(), timeout=0.25)
+                except TimeoutError:
+                    continue
         finally:
             if self._answer_waiters.get(mission.id) is event:
                 self._answer_waiters.pop(mission.id, None)
@@ -454,6 +517,7 @@ class SwarmRuntime:
                 "Cannot continue without a matching human answer",
                 FailureClass.AUTHORIZATION_REQUIRED,
             )
+        await self._mark_answer_consumed(mission, pending.question_id, root, source="live_waiter")
         await self._persist_status(mission, MissionStatus.RUNNING)
         await self.emit(mission.id, EventType.MISSION_RUNNING, {
             "reason": "Human answer received; controller will continue",
@@ -461,36 +525,38 @@ class SwarmRuntime:
         }, root.id)
 
     async def submit_answer(self, mission_id: UUID, question_id: str, answer: str) -> dict[str, Any]:
-        """Consume a human answer for the open question. Fail closed on mismatch."""
+        """Accept a human answer and safely resume an offline WAITING mission."""
         text = (answer or "").strip()
         if not text:
             raise PolicyError("Answer must not be empty", FailureClass.INVALID_OUTPUT)
         question_id = (question_id or "").strip()
         if not question_id:
             raise PolicyError("Question id is required", FailureClass.INVALID_OUTPUT)
-        mission = self.store.get_mission(mission_id)
-        if mission is None:
-            raise PolicyError("Mission not found", FailureClass.INVALID_OUTPUT)
-        if mission.status in TERMINAL:
-            raise PolicyError("Mission is no longer accepting answers", FailureClass.INVALID_OUTPUT)
-        pending = mission.pending_question
-        if pending is None:
-            raise PolicyError("No question is awaiting an answer", FailureClass.AUTHORIZATION_REQUIRED)
-        if pending.question_id != question_id:
-            raise PolicyError("Answer does not match the open question", FailureClass.AUTHORIZATION_REQUIRED)
-        if self._answer_recorded(mission, question_id):
-            raise PolicyError("This question was already answered", FailureClass.INVALID_OUTPUT)
-        record = MissionAnswer(question_id=question_id, question=pending.question, answer=text)
-        mission.answers.append(record)
-        mission.pending_question = None
-        mission.updated_at = utcnow()
-        self.store.save_mission(mission)
+        try:
+            mission, record = self.store.accept_answer(mission_id, question_id, text)
+        except AnswerStateError as exc:
+            failure_class = (
+                FailureClass.INVALID_OUTPUT
+                if exc.code in {"not_found", "duplicate", "conflict", "status", "terminal"}
+                else FailureClass.AUTHORIZATION_REQUIRED
+            )
+            raise PolicyError(str(exc), failure_class) from exc
         payload = record.model_dump(mode="json")
         await self.emit(mission_id, EventType.USER_ANSWERED, payload)
         waiter = self._answer_waiters.get(mission_id)
+        job = self.runs.get(mission_id)
+        live_job = job is not None and not job.done()
         if waiter:
             waiter.set()
-        return payload
+            resume = "live_waiter"
+        elif live_job:
+            resume = "active_runtime"
+        elif mission.status == MissionStatus.WAITING:
+            requested = await self._request_resume(mission, reason="Human answer accepted")
+            resume = "requested" if requested else "deferred_unconfigured"
+        else:
+            resume = "paused"
+        return {**payload, "resume": resume}
 
     async def _assign_unassigned_tasks(self, mission: Mission) -> list[Task]:
         assigned = {task.agent_id for task in self.tasks[mission.id]
@@ -603,7 +669,9 @@ class SwarmRuntime:
     async def run(self, mission: Mission):
         root = None
         suspended = False
+        paused = False
         held_mission_lease = False
+        previous_status = mission.status
         try:
             try:
                 await self.claim_work(mission, "mission", str(mission.id))
@@ -622,7 +690,15 @@ class SwarmRuntime:
             history = self.store.events(mission.id)
             started = next((event.created_at for event in history
                             if event.event_type in {EventType.MISSION_STARTED, EventType.MISSION_RESUMED}), None)
-            execution_anchor = started or (mission.updated_at if existing else utcnow())
+            if previous_status == MissionStatus.PAUSED and mission.paused_at is not None:
+                if started is not None:
+                    mission.paused_seconds += max(
+                        (utcnow() - mission.paused_at).total_seconds(), 0,
+                    )
+                mission.paused_at = None
+            execution_anchor = started or (
+                utcnow() if previous_status == MissionStatus.PAUSED or not existing else mission.updated_at
+            )
             mission.status, mission.updated_at = MissionStatus.RUNNING, utcnow()
             self.started_at[mission.id] = execution_anchor
             self.store.save_mission(mission)
@@ -635,6 +711,9 @@ class SwarmRuntime:
                     await self.emit(mission.id, EventType.MISSION_RESUMED, {
                         "goal": mission.goal, "mode": self.controller.mode,
                         "agents": len(existing), "tasks": len(self.tasks[mission.id]),
+                        "from_status": str(previous_status),
+                        "reason": ("User requested resume" if previous_status == MissionStatus.PAUSED
+                                   else "Recovering durable unfinished mission"),
                     })
                     interrupted_agents: set[UUID] = set()
                     for task in self.tasks[mission.id]:
@@ -651,8 +730,15 @@ class SwarmRuntime:
                             agent.status = AgentStatus.CREATED
                             agent.output = None
                             await self.agent_status(agent, AgentStatus.CREATED)
+                        elif agent.status == AgentStatus.PAUSED:
+                            agent.output = None
+                            await self.agent_status(
+                                agent,
+                                AgentStatus.RUNNING if agent.id == root.id else AgentStatus.CREATED,
+                            )
                     if root.status in {AgentStatus.CREATED, AgentStatus.RUNNING, AgentStatus.BLOCKED}:
                         await self.agent_status(root, AgentStatus.RUNNING)
+                    await self._mark_unconsumed_answers(mission, root, source="runtime_resume")
                     if mission.pending_question is None:
                         await self._run_tasks(mission)
                 else:
@@ -660,6 +746,7 @@ class SwarmRuntime:
                     root = await self.spawn(mission, "mission_controller", "Delegate work, inspect results and deliver the mission.",
                                             capabilities=["spawn", "coordinate", "reason"])
                     await self.agent_status(root, AgentStatus.RUNNING)
+                    await self._mark_unconsumed_answers(mission, root, source="runtime_start")
                 if mission.pending_question is not None:
                     await self._park_for_human_answer(mission, root, mission.pending_question, asked_now=False)
                 for _ in range(mission.limits.max_agents * 2 + 2):
@@ -738,8 +825,19 @@ class SwarmRuntime:
                     raise PolicyError("Controller iteration limit reached", FailureClass.RESOURCE_EXHAUSTED)
                 if root:
                     await self.agent_status(root, AgentStatus.COMPLETED if mission.status == MissionStatus.COMPLETED else AgentStatus.BLOCKED)
+        except PauseRequested:
+            paused = True
+            mission.status = MissionStatus.PAUSED
+            mission.result = None
         except asyncio.CancelledError:
-            if mission.id in self.suspending:
+            if mission.id in self.stopped:
+                mission.status = MissionStatus.STOPPED
+                mission.result = {"reason": "Execution stopped"}
+            elif mission.id in self.pausing:
+                paused = True
+                mission.status = MissionStatus.PAUSED
+                mission.result = None
+            elif mission.id in self.suspending:
                 suspended = True
                 mission.result = None
                 if mission.status != MissionStatus.WAITING:
@@ -770,6 +868,8 @@ class SwarmRuntime:
                         "mode": self.controller.mode,
                     })
                     self.suspending.discard(mission.id)
+                elif paused:
+                    await self._checkpoint_pause(mission)
                 else:
                     for task in self.tasks[mission.id]:
                         if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
@@ -918,13 +1018,74 @@ class SwarmRuntime:
                 raise PolicyError("Persisted task references an unknown agent", FailureClass.INVALID_OUTPUT)
             await self._execute_task(mission, task, agent)
 
+    async def _checkpoint_pause(self, mission: Mission) -> Mission:
+        """Persist a truthful safe-point checkpoint for an explicit user pause."""
+        reason = "Execution paused by user; a new safe task attempt will be created on resume"
+        for task in self.tasks[mission.id]:
+            if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+                task.status = TaskStatus.STOPPED
+                self.store.save_task(task)
+                payload = task.model_dump(mode="json")
+                payload["reason"] = reason
+                await self.emit(mission.id, EventType.TASK_STOPPED, payload, task.agent_id)
+        for agent in self.agents[mission.id]:
+            if agent.status in {AgentStatus.CREATED, AgentStatus.RUNNING}:
+                await self.agent_status(agent, AgentStatus.PAUSED)
+        mission.status = MissionStatus.PAUSED
+        mission.result = None
+        mission.paused_at = mission.paused_at or utcnow()
+        mission.updated_at = mission.paused_at
+        self.store.save_mission(mission)
+        await self.emit(mission.id, EventType.MISSION_PAUSED, {
+            "reason": "Execution paused by user",
+            "pending_question_id": (mission.pending_question.question_id
+                                    if mission.pending_question else None),
+        })
+        self.pausing.discard(mission.id)
+        return mission
+
+    async def pause(self, mission_id: UUID) -> Mission:
+        """Pause at a trusted-step boundary without risking side-effect replay."""
+        mission = self.store.get_mission(mission_id)
+        if mission is None:
+            raise PolicyError("Mission not found", FailureClass.INVALID_OUTPUT)
+        if mission.status == MissionStatus.PAUSED:
+            return mission
+        if mission.status not in RESUMABLE:
+            raise PolicyError("Mission cannot be paused in its current state", FailureClass.INVALID_OUTPUT)
+        job = self.runs.get(mission_id)
+        if job is not None and not job.done():
+            self.pausing.add(mission_id)
+            waiter = self._answer_waiters.get(mission_id)
+            if waiter:
+                waiter.set()
+            await asyncio.gather(job, return_exceptions=True)
+            saved = self.store.get_mission(mission_id)
+            if saved is None or saved.status != MissionStatus.PAUSED:
+                self.pausing.discard(mission_id)
+                raise PolicyError("Mission did not reach a safe pause checkpoint",
+                                  FailureClass.POLICY_REFUSAL)
+            return saved
+        latest = self.store.get_mission(mission_id)
+        if latest is None:
+            raise PolicyError("Mission not found", FailureClass.INVALID_OUTPUT)
+        if latest.status == MissionStatus.PAUSED:
+            return latest
+        if latest.status not in RESUMABLE:
+            raise PolicyError("Mission cannot be paused in its current state", FailureClass.INVALID_OUTPUT)
+        self.hydrate(mission_id)
+        return await self._checkpoint_pause(latest)
+
     async def stop(self, mission_id: UUID):
         self.stopped.add(mission_id)
+        self.pausing.discard(mission_id)
         job = self.runs.get(mission_id)
         if job and not job.done():
             job.cancel()
             await asyncio.gather(job, return_exceptions=True)
-            return self.store.get_mission(mission_id)
+            saved = self.store.get_mission(mission_id)
+            if saved is not None and saved.status in TERMINAL:
+                return saved
         self.hydrate(mission_id)
         for task in self.tasks[mission_id]:
             if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
@@ -932,7 +1093,7 @@ class SwarmRuntime:
                 self.store.save_task(task)
                 await self.emit(mission_id, EventType.TASK_STOPPED, task.model_dump(mode="json"), task.agent_id)
         for agent in self.agents[mission_id]:
-            if agent.status in {AgentStatus.CREATED, AgentStatus.RUNNING}:
+            if agent.status in {AgentStatus.CREATED, AgentStatus.RUNNING, AgentStatus.PAUSED}:
                 await self.agent_status(agent, AgentStatus.STOPPED)
         mission = self.store.get_mission(mission_id)
         if mission and mission.status not in TERMINAL:
@@ -946,7 +1107,7 @@ class SwarmRuntime:
             ids = list(dict.fromkeys([
                 *(mid for mid, job in self.runs.items() if not job.done()),
                 *(mission.id for mission in self.store.list_missions()
-                  if mission.status in RESUMABLE),
+                  if mission.status in STOPPABLE),
             ]))
             await asyncio.gather(*(self.stop(mid) for mid in ids))
         return ids

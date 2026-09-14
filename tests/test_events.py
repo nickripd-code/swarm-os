@@ -42,7 +42,9 @@ UI_EVENT_TYPES = {
     "llm.failover",
     "mission.started",
     "mission.resumed",
+    "mission.resume_requested",
     "mission.waiting",
+    "mission.paused",
     "mission.running",
     "mission.completed",
     "mission.failed",
@@ -62,6 +64,7 @@ UI_EVENT_TYPES = {
     "verification.failed",
     "payment.created",
     "user.answered",
+    "user.answer_consumed",
     "lease.claimed",
     "lease.expired",
     "lease.released",
@@ -80,7 +83,10 @@ def test_event_type_values_match_historical_ui_strings():
     assert EventType.VERIFICATION_PASSED == "verification.passed"
     assert EventType.VERIFICATION_FAILED == "verification.failed"
     assert EventType.MISSION_QUESTION == "mission.question"
+    assert EventType.MISSION_PAUSED == "mission.paused"
+    assert EventType.MISSION_RESUME_REQUESTED == "mission.resume_requested"
     assert EventType.USER_ANSWERED == "user.answered"
+    assert EventType.USER_ANSWER_CONSUMED == "user.answer_consumed"
     assert EventType.TOOL_COMPLETED == "tool.completed"
     assert EventType.LEASE_CLAIMED == "lease.claimed"
     assert EventType.LEASE_EXPIRED == "lease.expired"
@@ -133,6 +139,7 @@ def test_task_and_mission_status_mapping_is_fail_closed():
     assert event_type_for_task(TaskStatus.BLOCKED) is EventType.TASK_BLOCKED
     assert event_type_for_mission(MissionStatus.FAILED) is EventType.MISSION_FAILED
     assert event_type_for_mission(MissionStatus.BLOCKED) is EventType.MISSION_BLOCKED
+    assert event_type_for_mission(MissionStatus.PAUSED) is EventType.MISSION_PAUSED
     assert event_type_for_mission("completed") is EventType.MISSION_COMPLETED
     with pytest.raises(UnknownEventType):
         event_type_for_mission(MissionStatus.PENDING)

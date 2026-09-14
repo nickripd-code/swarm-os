@@ -139,6 +139,28 @@ async def stop_mission(mission_id: UUID):
     return {"status": mission.status}
 
 
+@app.post("/api/missions/{mission_id}/pause")
+async def pause_mission(mission_id: UUID):
+    if not store.get_mission(mission_id):
+        raise HTTPException(404, "Mission not found")
+    try:
+        mission = await runtime.pause(mission_id)
+    except PolicyError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"status": mission.status}
+
+
+@app.post("/api/missions/{mission_id}/resume")
+async def resume_mission(mission_id: UUID):
+    if not store.get_mission(mission_id):
+        raise HTTPException(404, "Mission not found")
+    try:
+        await runtime.resume(mission_id)
+    except PolicyError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"status": "resume_requested"}
+
+
 @app.post("/api/missions/{mission_id}/answers/{question_id}")
 async def answer_question(mission_id: UUID, question_id: str, request: AnswerRequest):
     if not store.get_mission(mission_id):

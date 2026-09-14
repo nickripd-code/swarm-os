@@ -98,8 +98,10 @@ async def test_ask_waits_consumes_matching_answer_and_continues(tmp_path):
     assert saved.result["summary"] == "User said: Ada"
     assert saved.pending_question is None
     assert saved.answers[0].answer == "Ada"
+    assert saved.answers[0].consumed_at is not None
     assert any(state.get("answers") for state in provider.states)
     assert any(e.event_type == "user.answered" for e in store.events(mission.id))
+    assert any(e.event_type == "user.answer_consumed" for e in store.events(mission.id))
     assert any(e.event_type == "mission.running" for e in store.events(mission.id))
     assert not any(e.event_type == "mission.failed" for e in store.events(mission.id))
 
@@ -229,7 +231,7 @@ async def test_resume_while_waiting_for_answer_does_not_fabricate_one(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_answer_persisted_offline_is_consumed_on_resume(tmp_path):
+async def test_answer_persisted_offline_requests_resume_and_is_truthfully_consumed(tmp_path):
     store = Store(str(tmp_path / "swarm.db"))
     runtime = SwarmRuntime(store, controller=AskThenFinishProvider())
     mission = Mission(goal="Need a name")
@@ -240,18 +242,74 @@ async def test_answer_persisted_offline_is_consumed_on_resume(tmp_path):
     await asyncio.wait_for(runtime.suspend_all(), 2)
 
     offline = SwarmRuntime(store, controller=AskThenFinishProvider())
-    await offline.submit_answer(mission.id, question_id, "Ada")
-    parked = store.get_mission(mission.id)
-    assert parked.pending_question is None
-    assert parked.answers[0].answer == "Ada"
-    assert parked.status == MissionStatus.WAITING
-
-    restored = SwarmRuntime(store, controller=AskThenFinishProvider())
-    await restored.resume_incomplete()
-    await asyncio.wait_for(asyncio.gather(*restored.runs.values()), 2)
+    record = await offline.submit_answer(mission.id, question_id, "Ada")
+    assert record["resume"] == "requested"
+    await asyncio.wait_for(asyncio.gather(*offline.runs.values()), 2)
     saved = store.get_mission(mission.id)
     assert saved.status == "completed"
     assert saved.result["summary"] == "User said: Ada"
+    assert saved.answers[0].consumed_at is not None
+    events = store.events(mission.id)
+    kinds = [event.event_type for event in events]
+    assert kinds.index("user.answered") < kinds.index("mission.resume_requested")
+    assert kinds.index("mission.resume_requested") < kinds.index("mission.resumed")
+    assert kinds.index("mission.resumed") < kinds.index("user.answer_consumed")
+    assert kinds.count("user.answered") == 1
+    assert kinds.count("user.answer_consumed") == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_answers_accept_exactly_one_while_paused(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(store, controller=AskThenFinishProvider())
+    mission = Mission(
+        goal="Need one name",
+        status=MissionStatus.PAUSED,
+        pending_question=PendingQuestion(question_id="q1", question="Name?"),
+    )
+    store.save_mission(mission)
+
+    results = await asyncio.gather(
+        runtime.submit_answer(mission.id, "q1", "Ada"),
+        runtime.submit_answer(mission.id, "q1", "Grace"),
+        return_exceptions=True,
+    )
+
+    accepted = [item for item in results if isinstance(item, dict)]
+    rejected = [item for item in results if isinstance(item, PolicyError)]
+    assert len(accepted) == 1
+    assert accepted[0]["resume"] == "paused"
+    assert len(rejected) == 1
+    saved = store.get_mission(mission.id)
+    assert saved.status == MissionStatus.PAUSED
+    assert len(saved.answers) == 1
+    assert len([e for e in store.events(mission.id) if e.event_type == "user.answered"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_answer_on_second_runtime_wakes_durable_lease_owner(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    owner = SwarmRuntime(store, controller=AskThenFinishProvider())
+    mission = Mission(goal="Answer can arrive on another process")
+    store.save_mission(mission)
+    await owner.start(mission)
+    waiting = await wait_until_question(store, mission.id)
+    question_id = waiting.pending_question.question_id
+
+    submitter = SwarmRuntime(store, controller=AskThenFinishProvider())
+    record = await submitter.submit_answer(mission.id, question_id, "Ada")
+    assert record["resume"] == "requested"
+    await asyncio.wait_for(asyncio.gather(*owner.runs.values()), 2)
+
+    saved = store.get_mission(mission.id)
+    assert saved.status == MissionStatus.COMPLETED
+    assert saved.result["summary"] == "User said: Ada"
+    assert saved.answers[0].consumed_at is not None
+    events = store.events(mission.id)
+    assert len([e for e in events if e.event_type == "user.answered"]) == 1
+    assert len([e for e in events if e.event_type == "user.answer_consumed"]) == 1
+    assert any(e.event_type == "mission.running" for e in events)
+    assert not any(e.event_type == "mission.failed" for e in events)
 
 
 @pytest.mark.asyncio
@@ -361,7 +419,9 @@ async def test_worker_ask_waits_consumes_matching_answer_and_continues(tmp_path)
     assert saved.result["summary"] == "User said: Ada"
     assert saved.pending_question is None
     assert saved.answers[0].answer == "Ada"
+    assert saved.answers[0].consumed_at is not None
     assert any(e.event_type == "user.answered" for e in store.events(mission.id))
+    assert any(e.event_type == "user.answer_consumed" for e in store.events(mission.id))
     assert not any(e.event_type == "mission.failed" for e in store.events(mission.id))
     completed = store.load_tasks(mission.id)[0]
     assert completed.status == "completed"
