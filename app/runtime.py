@@ -16,6 +16,7 @@ from .llm import (
     ProviderError, RETRYABLE_FAILURE_CLASSES, retry_delay_seconds,
 )
 from .verifier import public_verification, verification_accepted
+from .payments import PaymentError, PaymentProvider, resolve_payment_provider
 
 TERMINAL = {MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.STOPPED, MissionStatus.BLOCKED}
 RESUMABLE = {MissionStatus.PENDING, MissionStatus.RUNNING, MissionStatus.WAITING}
@@ -32,12 +33,17 @@ def failure_payload(error: str, failure_class: FailureClass) -> dict[str, Any]:
 
 
 class WalletAdapter:
+    """Runtime-facing payment facade. Delegates to PaymentProvider; live stays fail-closed."""
+
+    def __init__(self, provider: PaymentProvider | None = None):
+        self.provider = provider
+
     async def pay(self, intent: PaymentIntent, mission: Mission) -> PaymentIntent:
-        if not mission.live_payments:
-            intent.status = "simulated"
-            intent.transaction_hash = None
-            return intent
-        raise PolicyError("Live wallet provider is not configured", FailureClass.AUTHORIZATION_REQUIRED)
+        try:
+            provider = resolve_payment_provider(mission, override=self.provider)
+            return await provider.pay(intent, mission)
+        except PaymentError as exc:
+            raise PolicyError(str(exc), exc.failure_class) from exc
 
 
 EventSink = Callable[[MissionEvent], Awaitable[None]]
