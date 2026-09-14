@@ -282,6 +282,7 @@ class ModelRouter:
         self.providers = list(providers)
         self.last_decision: RouteDecision | None = None
         self._history: dict[str, ProviderHistory] = {}
+        self._last_catalog: list[tuple[ModelProvider, ModelDescriptor, str]] = []
 
     @classmethod
     def wrap(cls, provider: ModelProvider) -> "ModelRouter":
@@ -333,7 +334,27 @@ class ModelRouter:
                 models = [synthetic] if synthetic else []
             for descriptor in models:
                 catalog.append((provider, descriptor, health.status))
+        self._last_catalog = catalog
         return catalog
+
+    def descriptor_for(self, provider_id: str | None, model: str | None) -> ModelDescriptor | None:
+        """Listed catalog row for a completed call. No provider-name branching."""
+        if not provider_id or not model:
+            return None
+        for provider, descriptor, _health in self._last_catalog:
+            if descriptor.model != model:
+                continue
+            if provider.provider_id == provider_id or descriptor.provider == provider_id:
+                return descriptor
+        return None
+
+    def listed_token_prices(
+        self, provider_id: str | None, model: str | None,
+    ) -> tuple[float | None, float | None] | None:
+        descriptor = self.descriptor_for(provider_id, model)
+        if descriptor is None:
+            return None
+        return descriptor.price_input_per_million, descriptor.price_output_per_million
 
     async def select(self, request: CapabilityRequest) -> RouteDecision:
         if not self.configured():

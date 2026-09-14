@@ -11,6 +11,12 @@ const bot = color => '<span class="bot" style="--agent-color:'+color+'" aria-hid
 function colorFor(a) {if(!a.parent_id)return colors[0];let n=0;for(const c of a.role)n=(n*31+c.charCodeAt(0))>>>0;return colors[1+n%(colors.length-1)];}
 function showNotice(message) {$("notice").textContent=message;$("notice").hidden=!message;}
 function connection(text,cls="") {$("connection").className="connection "+cls;$("connection").innerHTML="<i></i>"+esc(text);}
+function formatUsd(value){
+  if(!Number.isFinite(value))return "—";
+  if(value===0)return "$0";
+  if(value<0.01)return "$"+value.toFixed(4);
+  return "$"+value.toFixed(2);
+}
 function formatElapsed(ms){
   if(!Number.isFinite(ms)||ms<0)ms=0;
   const s=Math.floor(ms/1000), m=Math.floor(s/60), h=Math.floor(m/60);
@@ -32,6 +38,9 @@ function renderHud(){
   if($("hudAgents"))$("hudAgents").textContent=state.agents.size;
   if($("hudTasks"))$("hudTasks").textContent=[...state.tasks.values()].filter(t=>t.status==="completed").length;
   if($("hudTokens"))$("hudTokens").textContent=(state.usage.input+state.usage.output).toLocaleString();
+  if($("hudSpend")){
+    $("hudSpend").textContent=state.usage.known?formatUsd(state.usage.cost):"—";
+  }
   if($("hudElapsed")){
     const start=mission?.created_at?new Date(mission.created_at).getTime():NaN;
     $("hudElapsed").textContent=Number.isFinite(start)?formatElapsed(Date.now()-start):"—";
@@ -191,6 +200,8 @@ function describe(e){
     case "user.answered":return "<b>Answer received</b> · "+esc(p.question||p.question_id||"question");
     case "llm.started":return "<b>"+esc(name)+"</b> is "+(p.kind==="decision"?"deciding the next move":p.kind==="verification"?"verifying the claimed result":"working");
     case "llm.completed":return "<b>"+esc(name)+"</b> · "+((p.input_tokens||0)+(p.output_tokens||0)).toLocaleString()+" tokens";
+    case "budget.updated":return p.known?"<b>Spend</b> · est. "+esc(String(p.token_spent))+" / "+esc(String(p.token_budget))+" USD":"<b>Spend</b> · estimate unavailable";
+    case "budget.warning":return "<b>Budget warning</b> · est. "+esc(String(p.token_spent))+" / "+esc(String(p.token_budget))+" USD";
     case "verification.started":return "<b>Verifier</b> is checking the claimed result";
     case "verification.passed":return "<b>Verifier</b> accepted the claimed result";
     case "verification.failed":return "<b>Verifier</b> rejected the claim"+(p.failure_class?" · "+esc(p.failure_class):"")+(p.rationale?" · "+esc(p.rationale):"");

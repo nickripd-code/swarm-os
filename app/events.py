@@ -55,6 +55,9 @@ class EventType(StrEnum):
     PAYMENT_CREATED = "payment.created"
     USER_ANSWERED = "user.answered"
 
+    BUDGET_UPDATED = "budget.updated"
+    BUDGET_WARNING = "budget.warning"
+
     LEASE_CLAIMED = "lease.claimed"
     LEASE_EXPIRED = "lease.expired"
     LEASE_RELEASED = "lease.released"

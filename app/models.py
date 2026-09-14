@@ -67,6 +67,7 @@ class MissionLimits(BaseModel):
     max_tool_calls: int = Field(default=200, ge=1, le=10000)
     max_runtime_seconds: int = Field(default=300, ge=1, le=86400)
     max_payment_amount: float = Field(default=0, ge=0)
+    max_token_cost: float | None = Field(default=None, ge=0)
 
 
 class MissionCreate(BaseModel):
@@ -96,6 +97,7 @@ class Mission(BaseModel):
     status: MissionStatus = MissionStatus.PENDING
     budget: float = 0
     spent: float = 0
+    token_spent: float = Field(default=0, ge=0)
     live_payments: bool = False
     privacy: Literal["cloud_allowed", "local_only"] = "cloud_allowed"
     limits: MissionLimits = Field(default_factory=MissionLimits)

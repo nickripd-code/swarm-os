@@ -97,6 +97,14 @@ class PolicyGate:
         if used >= mission.limits.max_tool_calls:
             raise PolicyError("Tool call limit reached", FailureClass.RESOURCE_EXHAUSTED)
 
+    def check_token_budget(self, mission: Mission, spent: float, additional: float, budget: float) -> None:
+        """Token USD budget is independent of WalletAdapter payment `spent`."""
+        del mission
+        if additional < 0:
+            raise PolicyError("Token cost adjustment is invalid", FailureClass.INVALID_OUTPUT)
+        if round(spent + additional, 8) > round(budget, 8):
+            raise PolicyError("Token cost would exceed mission token budget", FailureClass.RESOURCE_EXHAUSTED)
+
     def _authorize_spawn(self, request: PolicyRequest) -> None:
         if not request.parent_ok:
             raise PolicyError("Parent must belong to this mission")
