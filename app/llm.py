@@ -10,13 +10,15 @@ from .models import FailureClass
 from .providers import (
     ContextLimits, CostEstimate, FailoverModelProvider, ModelCapabilities, ModelDescriptor,
     ModelProvider, ModelRequest, ModelResponse, ModelUsage, ProviderError, ProviderHealth,
+    provider_configured,
 )
-from .router import CapabilityRequest, ModelRouter, capability_request_for
+from .router import CapabilityRequest, ModelRouter, capability_request_for, registered_providers
 
 DEFAULT_MODEL = "gpt-6-astra"
 DEFAULT_REASONING = "high"
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-4o"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
 
 
 # Bounded retry is applied by SwarmRuntime.model_call (events + mission deadline).
@@ -69,6 +71,29 @@ def openrouter_http_error(status_code: int) -> ProviderError:
     return ProviderError(f"OpenRouter service error (HTTP {status_code})", failure_class)
 
 
+_OLLAMA_HTTP_ERRORS = {
+    401: ("Ollama rejected the request credentials", FailureClass.AUTHORIZATION_REQUIRED),
+    403: ("Ollama denied model access", FailureClass.AUTHORIZATION_REQUIRED),
+    408: ("Ollama request timed out; no demo result was substituted", FailureClass.TIMEOUT),
+    429: ("Ollama rate limit reached", FailureClass.RATE_LIMIT),
+    400: ("Ollama rejected the model request", FailureClass.MODEL_FAILURE),
+    404: ("The configured Ollama model is unavailable", FailureClass.CAPABILITY_MISMATCH),
+}
+
+
+def ollama_http_error(status_code: int) -> ProviderError:
+    if status_code in _OLLAMA_HTTP_ERRORS:
+        message, failure_class = _OLLAMA_HTTP_ERRORS[status_code]
+        return ProviderError(message, failure_class)
+    failure_class = FailureClass.PROVIDER_OUTAGE if status_code >= 500 else FailureClass.MODEL_FAILURE
+    return ProviderError(f"Ollama service error (HTTP {status_code})", failure_class)
+
+
+def ollama_opted_in() -> bool:
+    """Local Ollama needs no cloud key; opt in with OLLAMA_MODEL and/or OLLAMA_BASE_URL."""
+    return bool(os.getenv("OLLAMA_MODEL") or os.getenv("OLLAMA_BASE_URL"))
+
+
 def chat_response_format(schema: dict | None) -> dict | None:
     """Accept Responses-style or Chat Completions-style json_schema formats."""
     if schema is None:
@@ -82,6 +107,38 @@ def chat_response_format(schema: dict | None) -> dict | None:
             "schema": schema.get("schema", {"type": "object"}),
         }}
     return schema
+
+
+def chat_completion_output(result: dict, *, label: str) -> tuple[dict, ModelUsage]:
+    """Parse an OpenAI-compatible chat.completions body into structured JSON + usage."""
+    choices = result.get("choices") or []
+    if not choices:
+        raise ValueError()
+    choice = choices[0]
+    finish = choice.get("finish_reason")
+    if finish == "length":
+        raise ProviderError(
+            f"{label} response was incomplete; increase the output limit or simplify the task",
+            FailureClass.CONTEXT_LIMIT)
+    if finish == "content_filter":
+        raise ProviderError("The model declined the request", FailureClass.POLICY_REFUSAL)
+    message = choice.get("message") or {}
+    if message.get("refusal"):
+        raise ProviderError("The model declined the request", FailureClass.POLICY_REFUSAL)
+    text = message.get("content")
+    if not isinstance(text, str) or not text:
+        raise ValueError()
+    output = json.loads(text)
+    if not isinstance(output, dict):
+        raise ValueError()
+    raw_usage = result.get("usage") or {}
+    details = raw_usage.get("completion_tokens_details") or raw_usage.get("output_tokens_details") or {}
+    usage = ModelUsage(
+        input_tokens=raw_usage.get("prompt_tokens", raw_usage.get("input_tokens", 0)) or 0,
+        output_tokens=raw_usage.get("completion_tokens", raw_usage.get("output_tokens", 0)) or 0,
+        reasoning_tokens=details.get("reasoning_tokens", raw_usage.get("reasoning_tokens", 0)) or 0,
+    )
+    return output, usage
 
 
 def response_format(name: str, properties: dict) -> dict:
@@ -335,38 +392,169 @@ class OpenRouterModelProvider(ModelProvider):
             raise openrouter_http_error(response.status_code)
         try:
             result = response.json()
-            choices = result.get("choices") or []
-            if not choices:
-                raise ValueError()
-            choice = choices[0]
-            finish = choice.get("finish_reason")
-            if finish == "length":
-                raise ProviderError(
-                    "OpenRouter response was incomplete; increase the output limit or simplify the task",
-                    FailureClass.CONTEXT_LIMIT)
-            if finish == "content_filter":
-                raise ProviderError("The model declined the request", FailureClass.POLICY_REFUSAL)
-            message = choice.get("message") or {}
-            if message.get("refusal"):
-                raise ProviderError("The model declined the request", FailureClass.POLICY_REFUSAL)
-            text = message.get("content")
-            if not isinstance(text, str) or not text:
-                raise ValueError()
-            output = json.loads(text)
-            if not isinstance(output, dict):
-                raise ValueError()
+            output, usage = chat_completion_output(result, label="OpenRouter")
         except ProviderError:
             raise
         except (ValueError, KeyError, TypeError):
             raise ProviderError("OpenRouter returned an invalid structured response",
                                 FailureClass.INVALID_OUTPUT) from None
-        raw_usage = result.get("usage") or {}
-        details = raw_usage.get("completion_tokens_details") or raw_usage.get("output_tokens_details") or {}
-        usage = ModelUsage(
-            input_tokens=raw_usage.get("prompt_tokens", raw_usage.get("input_tokens", 0)),
-            output_tokens=raw_usage.get("completion_tokens", raw_usage.get("output_tokens", 0)),
-            reasoning_tokens=details.get("reasoning_tokens", raw_usage.get("reasoning_tokens", 0)),
+        self._usage = self._usage.plus(usage)
+        return ModelResponse(
+            provider=self.provider_id,
+            model=result.get("model", request.model),
+            output=output,
+            response_id=result.get("id"),
+            usage=usage,
         )
+
+
+class OllamaModelProvider(ModelProvider):
+    """OpenAI-compatible Chat Completions adapter for a local Ollama daemon."""
+
+    provider_id = "ollama"
+
+    def __init__(self, model: str | None = None, transport=None, base_url: str | None = None):
+        self._model_arg = model
+        self._base_url_arg = base_url
+        self.model = model if model is not None else os.getenv("OLLAMA_MODEL")
+        self.transport = transport
+        self.base_url = (base_url or os.getenv("OLLAMA_BASE_URL") or DEFAULT_OLLAMA_BASE_URL).rstrip("/")
+        self.max_output_tokens = int(os.getenv("SWARM_MAX_OUTPUT_TOKENS", "8192"))
+        self._usage = ModelUsage()
+
+    def configured(self) -> bool:
+        if self._model_arg or self._base_url_arg:
+            return True
+        return ollama_opted_in()
+
+    def _descriptor(self, model: str) -> ModelDescriptor:
+        return ModelDescriptor(
+            provider=self.provider_id,
+            model=model,
+            local=True,
+            capabilities=self.capabilities(model),
+            context_limits=self.context_limits(model),
+            price_input_per_million=0,
+            price_output_per_million=0,
+        )
+
+    async def list_models(self) -> list[ModelDescriptor]:
+        if self.model:
+            return [self._descriptor(self.model)]
+        return [self._descriptor(model_id) for model_id in await self._remote_model_ids()]
+
+    async def _request(self, method: str, path: str, *, json_body: dict | None = None,
+                       timeout: httpx.Timeout) -> httpx.Response:
+        try:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False,
+                                         transport=self.transport) as client:
+                return await client.request(method, f"{self.base_url}{path}", json=json_body)
+        except httpx.TimeoutException:
+            raise ProviderError("Ollama request timed out; no demo result was substituted",
+                                FailureClass.TIMEOUT) from None
+        except httpx.RequestError:
+            raise ProviderError("Could not reach Ollama", FailureClass.PROVIDER_OUTAGE) from None
+
+    async def _remote_model_ids(self) -> list[str]:
+        try:
+            response = await self._request("GET", "/models", timeout=httpx.Timeout(5.0, connect=2.0))
+        except ProviderError:
+            return []
+        if response.is_error:
+            return []
+        try:
+            payload = response.json()
+            return [item["id"] for item in payload.get("data") or []
+                    if isinstance(item, dict) and item.get("id")]
+        except (ValueError, KeyError, TypeError):
+            return []
+
+    def capabilities(self, model: str) -> ModelCapabilities:
+        del model
+        return ModelCapabilities(
+            reasoning="unknown",
+            coding="unknown",
+            vision=None,
+            tool_use=True,
+            structured_outputs=True,
+            streaming=False,
+        )
+
+    def context_limits(self, model: str) -> ContextLimits:
+        del model
+        return ContextLimits(max_output_tokens=self.max_output_tokens)
+
+    async def health(self) -> ProviderHealth:
+        if not self.configured():
+            return ProviderHealth(
+                provider=self.provider_id,
+                status="unconfigured",
+                detail="Ollama is not configured",
+            )
+        try:
+            response = await self._request("GET", "/models", timeout=httpx.Timeout(5.0, connect=2.0))
+        except ProviderError as exc:
+            if exc.failure_class == FailureClass.TIMEOUT:
+                return ProviderHealth(
+                    provider=self.provider_id, status="unavailable",
+                    detail="Ollama health check timed out",
+                )
+            return ProviderHealth(
+                provider=self.provider_id, status="unavailable",
+                detail="Ollama daemon is not reachable",
+            )
+        if response.is_error:
+            return ProviderHealth(
+                provider=self.provider_id,
+                status="unavailable",
+                detail=f"Ollama daemon is not reachable (HTTP {response.status_code})",
+            )
+        return ProviderHealth(
+            provider=self.provider_id,
+            status="healthy",
+            detail="Ollama daemon reachable",
+        )
+
+    def estimate_cost(self, request: ModelRequest) -> CostEstimate:
+        return CostEstimate(
+            provider=self.provider_id,
+            model=request.model,
+            estimated_cost=0,
+            known=True,
+            reason="Local Ollama inference is not metered",
+        )
+
+    def usage(self) -> ModelUsage:
+        return self._usage.model_copy()
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        if not self.configured():
+            raise ProviderError("Ollama is not configured", FailureClass.AUTHORIZATION_REQUIRED)
+        payload = request.input if isinstance(request.input, str) else json.dumps(request.input, default=str)
+        body: dict[str, Any] = {
+            "model": request.model,
+            "messages": [
+                {"role": "system", "content": request.instructions},
+                {"role": "user", "content": payload},
+            ],
+            "max_tokens": request.max_output_tokens or self.max_output_tokens,
+        }
+        formatted = chat_response_format(request.response_format)
+        if formatted is not None:
+            body["response_format"] = formatted
+        response = await self._request(
+            "POST", "/chat/completions", json_body=body, timeout=httpx.Timeout(180, connect=10),
+        )
+        if response.is_error:
+            raise ollama_http_error(response.status_code)
+        try:
+            result = response.json()
+            output, usage = chat_completion_output(result, label="Ollama")
+        except ProviderError:
+            raise
+        except (ValueError, KeyError, TypeError):
+            raise ProviderError("Ollama returned an invalid structured response",
+                                FailureClass.INVALID_OUTPUT) from None
         self._usage = self._usage.plus(usage)
         return ModelResponse(
             provider=self.provider_id,
@@ -473,28 +661,45 @@ but sufficient to satisfy the delegated purpose. Never replace the work with a g
 
 def build_model_provider(primary: ModelProvider | None = None,
                          secondary: ModelProvider | None = None,
+                         local: ModelProvider | None = None,
                          openai_api_key: str | None = None,
                          openrouter_api_key: str | None = None,
                          transport=None) -> ModelProvider:
-    """Primary OpenAI + optional OpenRouter secondary. OpenAI-only when that is the only key."""
+    """Cloud OpenAI + optional OpenRouter, with Ollama as a local last resort when opted in.
+
+    OpenAI-only (or OpenRouter-only) is unchanged when Ollama is not opted in.
+    Two cloud keys still wrap as Failover(OpenAI, OpenRouter); the router registers Ollama
+    as a third catalog entry so the fallback chain can leave the cloud.
+    """
     primary = primary or OpenAIResponsesModelProvider(api_key=openai_api_key, transport=transport)
     secondary = secondary or OpenRouterModelProvider(api_key=openrouter_api_key, transport=transport)
+    local = local or OllamaModelProvider(transport=transport)
     if primary.configured() and secondary.configured():
         return FailoverModelProvider(primary, secondary)
-    if secondary.configured() and not primary.configured():
-        return secondary
-    return primary
+    cloud = secondary if secondary.configured() and not primary.configured() else primary
+    if local.configured() and provider_configured(cloud):
+        return FailoverModelProvider(cloud, local)
+    if local.configured() and not provider_configured(cloud):
+        return local
+    return cloud
 
 
-def build_router(model_provider: ModelProvider | None = None, **kwargs) -> ModelRouter:
+def build_router(model_provider: ModelProvider | None = None,
+                 local: ModelProvider | None = None, **kwargs) -> ModelRouter:
     """Register configured ModelProviders. OpenAI-only stays a one-entry catalog."""
-    provider = model_provider or build_model_provider(**kwargs)
-    return ModelRouter.wrap(provider)
+    provider = model_provider or build_model_provider(local=local, **kwargs)
+    providers = registered_providers(provider)
+    ollama = local or next((item for item in providers if item.provider_id == "ollama"), None)
+    if ollama is None:
+        ollama = OllamaModelProvider(transport=kwargs.get("transport"))
+    if ollama.configured() and all(item.provider_id != "ollama" for item in providers):
+        providers.append(ollama)
+    return ModelRouter(providers)
 
 
 def build_controller(model_provider: ModelProvider | None = None, **kwargs) -> OpenAIProvider:
     provider = model_provider or build_model_provider(**kwargs)
-    router = build_router(provider)
+    router = build_router(provider, **kwargs)
     if isinstance(provider, FailoverModelProvider):
         model = getattr(provider.primary, "model", None)
     else:

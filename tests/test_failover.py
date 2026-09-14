@@ -162,6 +162,8 @@ async def test_neither_provider_configured_fails_closed():
 def test_build_model_provider_openai_only_skips_failover(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     provider = build_model_provider()
     assert isinstance(provider, OpenAIResponsesModelProvider)
     assert not isinstance(provider, FailoverModelProvider)
@@ -170,6 +172,8 @@ def test_build_model_provider_openai_only_skips_failover(monkeypatch):
 def test_build_model_provider_openrouter_only(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-test")
+    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     # Ignore machine-local OpenAI credentials from Windows Credential Manager.
     monkeypatch.setattr("app.llm.get_api_key", lambda: None)
     primary = OpenAIResponsesModelProvider(api_key="unused")
