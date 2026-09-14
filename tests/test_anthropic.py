@@ -83,6 +83,9 @@ def no_extra_providers(monkeypatch):
     monkeypatch.delenv("TOGETHER_API_KEY", raising=False)
     monkeypatch.delenv("TOGETHER_MODEL", raising=False)
     monkeypatch.delenv("TOGETHER_BASE_URL", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_MODEL", raising=False)
+    monkeypatch.delenv("GROQ_BASE_URL", raising=False)
 
 
 @pytest.mark.asyncio
