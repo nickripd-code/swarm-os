@@ -18,7 +18,7 @@ DEFAULT_MCP_TIMEOUT = 15.0
 MAX_ARGUMENT_BYTES = 8192
 _SECRET_KEYS = frozenset({
     "api_key", "apikey", "authorization", "password", "secret", "token",
-    "access_token", "refresh_token", "private_key",
+    "access_token", "refresh_token", "private_key", "link_token",
 })
 
 
@@ -444,11 +444,12 @@ class CompositeToolProvider(ToolProvider):
 def build_tool_provider(
     local: LocalToolProvider | None = None,
     mcp: McpToolProvider | None = None,
+    composio: ToolProvider | None | object = _UNSET,
     browser: ToolProvider | None | object = _UNSET,
     selfmod: ToolProvider | None | object = _UNSET,
     transport=None,
 ) -> ToolProvider | None:
-    """Compose opted-in local, MCP, browser, and selfmod tools. Unconfigured returns None."""
+    """Compose opted-in local, MCP, Composio, browser, and selfmod tools."""
     providers: list[ToolProvider] = []
     local = local if local is not None else LocalToolProvider()
     if local.list_tools():
@@ -456,6 +457,11 @@ def build_tool_provider(
     mcp = mcp if mcp is not None else McpToolProvider(transport=transport)
     if mcp.configured():
         providers.append(mcp)
+    if composio is _UNSET:
+        from .composio import ComposioToolProvider
+        composio = ComposioToolProvider(transport=transport)
+    if composio is not None and getattr(composio, "configured", lambda: True)():
+        providers.append(composio)
     if browser is _UNSET:
         from .browser import BrowserToolProvider
         browser = BrowserToolProvider()
