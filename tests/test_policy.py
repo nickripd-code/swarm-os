@@ -67,6 +67,54 @@ def test_finish_requires_summary_and_idle_tasks():
         gate.authorize(_request(action="finish", mission=mission, summary="  "))
     assert empty.value.failure_class == FailureClass.INVALID_OUTPUT
     gate.authorize(_request(action="finish", mission=mission, summary="Answer ready"))
+    assert gate.approval_required(_request(action="finish", mission=mission, summary="Answer ready")) is None
+
+
+def test_finish_approval_is_optional_and_off_by_default():
+    from app.policy import interpret_approval, parse_approval_answer
+
+    gate = PolicyGate()
+    plain = Mission(goal="finish")
+    gated = Mission(goal="finish", limits={"require_finish_approval": True})
+    assert gate.approval_required(_request(action="finish", mission=plain, summary="done")) is None
+    needed = gate.approval_required(_request(action="finish", mission=gated, summary="done"))
+    assert needed is not None and needed.action == "finish"
+    assert "approve" in needed.question.lower() and "deny" in needed.question.lower()
+    gate.authorize(_request(action="finish", mission=gated, summary="done"))
+
+    assert parse_approval_answer("Approve") == "approve"
+    assert parse_approval_answer("yes.") == "approve"
+    assert parse_approval_answer("DENY") == "deny"
+    assert parse_approval_answer("ok") is None
+    interpret_approval("allow")
+    with pytest.raises(PolicyError) as denied:
+        interpret_approval("refuse")
+    assert denied.value.failure_class == FailureClass.POLICY_REFUSAL
+    with pytest.raises(PolicyError) as ambiguous:
+        interpret_approval("maybe later")
+    assert ambiguous.value.failure_class == FailureClass.AUTHORIZATION_REQUIRED
+
+
+def test_irreversible_org_and_live_payment_require_approval():
+    gate = PolicyGate()
+    mission = Mission(goal="org")
+    live = Mission(goal="pay", live_payments=True)
+    assert gate.approval_required(_request(action="spawn", mission=mission,
+                                           capabilities=("reason",))) is None
+    assert gate.approval_required(_request(action="org_change", mission=mission,
+                                           org_op="spawn")) is None
+    for op in ("replace", "reparent", "retire"):
+        needed = gate.approval_required(_request(action="org_change", mission=mission, org_op=op))
+        assert needed is not None and needed.action == "org_change" and needed.org_op == op
+    with pytest.raises(PolicyError) as unknown_op:
+        gate.authorize(_request(action="org_change", mission=mission, org_op="merge"))
+    assert unknown_op.value.failure_class == FailureClass.INVALID_OUTPUT
+    with pytest.raises(PolicyError) as disabled:
+        gate.authorize(_request(action="live_payment", mission=mission))
+    assert disabled.value.failure_class == FailureClass.POLICY_REFUSAL
+    gate.authorize(_request(action="live_payment", mission=live))
+    pay = gate.approval_required(_request(action="live_payment", mission=live))
+    assert pay is not None and pay.action == "live_payment"
 
 
 def test_dangerous_tools_are_denied_by_default():
