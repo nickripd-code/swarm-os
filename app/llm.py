@@ -30,8 +30,10 @@ from .router import (
     CapabilityRequest, ModelRouter, capability_request_for, registered_providers,
     selection_rationale,
 )
+from .evidence import EvidenceRunner
 from .verifier import (
-    VERIFIER_INSTRUCTIONS, local_evidence_check, validate_verification, verification_accepted,
+    VERIFIER_INSTRUCTIONS, check_claim_with_evidence,
+    validate_verification, verification_accepted,
 )
 
 DEFAULT_MODEL = "gpt-6-astra"
@@ -789,6 +791,7 @@ DECISION_FORMAT = response_format("mission_decision", {
     "question": {"type": ["string", "null"]},
     "tool": {"type": ["string", "null"]},
     "arguments_json": {"type": ["string", "null"]},
+    "evidence_steps": {"type": ["array", "null"], "items": {"type": "object"}},
 })
 WORK_FORMAT = response_format("worker_result", {
     "status": {"type": "string", "enum": ["completed", "blocked", "use_tool", "ask"]},
@@ -797,6 +800,7 @@ WORK_FORMAT = response_format("worker_result", {
     "question": {"type": ["string", "null"]},
     "tool": {"type": ["string", "null"]},
     "arguments_json": {"type": ["string", "null"]},
+    "evidence_steps": {"type": ["array", "null"], "items": {"type": "object"}},
 })
 VERIFICATION_FORMAT = response_format("verification_result", {
     "verdict": {"type": "string", "enum": ["pass", "fail", "inconclusive"]},
@@ -3337,7 +3341,8 @@ class OpenAIProvider(LLMProvider):
     def __init__(self, model: str | None = None, api_key: str | None = None,
                  reasoning: str | None = None, transport=None,
                  model_provider: ModelProvider | None = None,
-                 router: ModelRouter | None = None):
+                 router: ModelRouter | None = None,
+                 evidence: EvidenceRunner | None = None):
         self.model = model or os.getenv("SWARM_MODEL", DEFAULT_MODEL)
         self.reasoning = reasoning or os.getenv("SWARM_REASONING_EFFORT", DEFAULT_REASONING)
         self.max_output_tokens = int(os.getenv("SWARM_MAX_OUTPUT_TOKENS", "8192"))
@@ -3345,6 +3350,7 @@ class OpenAIProvider(LLMProvider):
             model=self.model, api_key=api_key, reasoning=self.reasoning, transport=transport,
         )
         self.router = router
+        self.evidence = evidence
         self.last_planning: dict[str, Any] | None = None
 
     def configured(self) -> bool:
@@ -3487,7 +3493,7 @@ Never replace the work with a generic success statement.""",
 
     async def verify(self, state: dict[str, Any], claim: dict[str, Any]) -> dict[str, Any]:
         """Independent ModelRouter check. OpenAI-only still calls a model — never auto-passes."""
-        pretest = local_evidence_check(state, claim)
+        pretest = await check_claim_with_evidence(state, claim, runner=self.evidence)
         if not verification_accepted(pretest):
             return pretest
         capability = capability_request_for(kind="verification", privacy=privacy_from_state(state))
@@ -3500,7 +3506,10 @@ Never replace the work with a generic success statement.""",
             VERIFIER_INSTRUCTIONS, {"mission": state, "claim": claim},
             VERIFICATION_FORMAT, capability, target=target,
         )
-        return validate_verification(output)
+        result = validate_verification(output)
+        if pretest.get("evidence_runs"):
+            result["evidence_runs"] = pretest["evidence_runs"]
+        return result
 
 
 def _first_configured_local(*providers: ModelProvider) -> ModelProvider | None:
@@ -3753,4 +3762,4 @@ class FallbackController(LLMProvider):
 
     async def verify(self, state: dict[str, Any], claim: dict[str, Any]) -> dict[str, Any]:
         """Demo-only evidence check. Never a silent production pass."""
-        return local_evidence_check(state, claim)
+        return await check_claim_with_evidence(state, claim)

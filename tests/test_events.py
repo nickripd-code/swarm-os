@@ -63,6 +63,9 @@ UI_EVENT_TYPES = {
     "verification.started",
     "verification.passed",
     "verification.failed",
+    "verification.evidence.started",
+    "verification.evidence.passed",
+    "verification.evidence.failed",
     "payment.created",
     "user.answered",
     "user.answer_consumed",
@@ -86,6 +89,9 @@ def test_event_type_values_match_historical_ui_strings():
     assert EventType.VERIFICATION_STARTED == "verification.started"
     assert EventType.VERIFICATION_PASSED == "verification.passed"
     assert EventType.VERIFICATION_FAILED == "verification.failed"
+    assert EventType.VERIFICATION_EVIDENCE_STARTED == "verification.evidence.started"
+    assert EventType.VERIFICATION_EVIDENCE_PASSED == "verification.evidence.passed"
+    assert EventType.VERIFICATION_EVIDENCE_FAILED == "verification.evidence.failed"
     assert EventType.MISSION_QUESTION == "mission.question"
     assert EventType.MISSION_PAUSED == "mission.paused"
     assert EventType.MISSION_RESUME_REQUESTED == "mission.resume_requested"
