@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Literal
 
@@ -30,6 +31,11 @@ CLOUD_EXFIL_TOOLS = frozenset({
     "browser", "playwright", "computer_use", "network", "http", "fetch",
     "web.search", "payment", "wallet", "stripe", "live_payment",
 })
+# Operator-opted Playwright tools. Still denied unless SWARM_BROWSER is set.
+OPTED_IN_BROWSER_TOOLS = frozenset({
+    "browser.navigate", "browser.snapshot", "browser.click",
+})
+TRUE_ENV = frozenset({"1", "true", "yes", "on"})
 
 
 class PolicyError(Exception):
@@ -76,6 +82,14 @@ def tool_exfiltrates(name: str) -> bool:
     if lowered in CLOUD_EXFIL_TOOLS:
         return True
     return any(lowered.startswith(prefix) for prefix in ("browser.", "http.", "net.", "pay.", "wallet."))
+
+
+def browser_capability_enabled() -> bool:
+    return os.getenv("SWARM_BROWSER", "").strip().lower() in TRUE_ENV
+
+
+def tool_is_opted_in_browser(name: str) -> bool:
+    return name.strip().lower() in OPTED_IN_BROWSER_TOOLS and browser_capability_enabled()
 
 
 class PolicyGate:
@@ -131,5 +145,5 @@ class PolicyGate:
             raise PolicyError("Tool use omitted a tool name", FailureClass.POLICY_REFUSAL)
         if mission_privacy(request.mission) == "local_only" and tool_exfiltrates(name):
             raise PolicyError("local_only policy forbids cloud or network tools", FailureClass.POLICY_REFUSAL)
-        if tool_is_dangerous(name):
+        if tool_is_dangerous(name) and not tool_is_opted_in_browser(name):
             raise PolicyError(f"Tool '{name}' is denied by default", FailureClass.POLICY_REFUSAL)

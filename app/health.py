@@ -131,3 +131,17 @@ def llamacpp_status() -> dict:
 async def llamacpp_health_status() -> dict:
     health = await LlamaCppModelProvider().health()
     return {**llamacpp_status(), "status": health.status, "detail": health.detail}
+
+
+async def browser_health_status() -> dict:
+    from .browser import BrowserToolProvider
+    provider = BrowserToolProvider()
+    health = await provider.health()
+    return {
+        "configured": provider.configured(),
+        "provider": "playwright",
+        "status": health.status,
+        "detail": health.detail,
+        "tools": health.tools,
+        "fallback": False,
+    }

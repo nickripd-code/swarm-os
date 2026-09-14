@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 
 from .models import FailureClass, utcnow
 
+_UNSET = object()
+
 DEFAULT_MCP_TIMEOUT = 15.0
 MAX_ARGUMENT_BYTES = 8192
 _SECRET_KEYS = frozenset({
@@ -442,9 +444,10 @@ class CompositeToolProvider(ToolProvider):
 def build_tool_provider(
     local: LocalToolProvider | None = None,
     mcp: McpToolProvider | None = None,
+    browser: ToolProvider | None | object = _UNSET,
     transport=None,
 ) -> ToolProvider | None:
-    """Compose opted-in local tools and an MCP stub. Unconfigured returns None."""
+    """Compose opted-in local, MCP, and browser tools. Unconfigured returns None."""
     providers: list[ToolProvider] = []
     local = local if local is not None else LocalToolProvider()
     if local.list_tools():
@@ -452,6 +455,11 @@ def build_tool_provider(
     mcp = mcp if mcp is not None else McpToolProvider(transport=transport)
     if mcp.configured():
         providers.append(mcp)
+    if browser is _UNSET:
+        from .browser import BrowserToolProvider
+        browser = BrowserToolProvider()
+    if browser is not None and getattr(browser, "configured", lambda: True)():
+        providers.append(browser)
     if not providers:
         return None
     if len(providers) == 1:

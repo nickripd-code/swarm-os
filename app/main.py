@@ -13,9 +13,9 @@ from .models import AnswerRequest, Mission, MissionCreate, PaymentIntent
 from .runtime import PolicyError, SwarmRuntime
 from .store import Store
 from .health import (
-    anthropic_status, cohere_status, deepseek_status, fireworks_status, gemini_status,
-    groq_status, llamacpp_health_status, mistral_status, ollama_health_status, openai_status,
-    openrouter_status, together_status, vllm_health_status, xai_status,
+    anthropic_status, browser_health_status, cohere_status, deepseek_status, fireworks_status,
+    gemini_status, groq_status, llamacpp_health_status, mistral_status, ollama_health_status,
+    openai_status, openrouter_status, together_status, vllm_health_status, xai_status,
 )
 from .tools import tools_status
 
@@ -58,6 +58,7 @@ async def health():
             "ollama": await ollama_health_status(), "vllm": await vllm_health_status(),
             "llamacpp": await llamacpp_health_status(),
             "tools": tools_status(runtime.tools),
+            "browser": await browser_health_status(),
             "active_missions": len(runtime.runs)}
 
 
