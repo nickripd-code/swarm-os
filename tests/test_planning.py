@@ -286,10 +286,8 @@ async def test_judge_failure_fails_closed(tmp_path):
     await runtime.run(mission)
     saved = store.get_mission(mission.id)
     assert saved.status == "failed"
-    assert saved.result == {
-        "error": "OpenAI quota or rate limit reached",
-        "failure_class": "RATE_LIMIT",
-    }
+    assert saved.result["error"] == "OpenAI quota or rate limit reached"
+    assert saved.result["failure_class"] == "RATE_LIMIT"
     events = store.events(mission.id)
     assert len([e for e in events if e.event_type == "planner.proposal"]) == 2
     assert not any(e.event_type == "judge.decision" for e in events)

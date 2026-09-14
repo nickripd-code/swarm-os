@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
+from .budget import MissionBudget
 from .events import EventType, event_type_for_mission, event_type_for_task
 from .leases import IdempotencyError, IdempotencyGuard, LeaseConflict, LeaseError, WorkerLeases
 from .models import (
@@ -52,7 +53,7 @@ _UNSET = object()
 class SwarmRuntime:
     def __init__(self, store: Store, sink: EventSink | None = None, controller: LLMProvider | None = None,
                  max_retries: int = DEFAULT_MAX_RETRIES, retry_base_seconds: float = DEFAULT_RETRY_BASE_SECONDS,
-                 tools: ToolProvider | None | object = _UNSET):
+                 tools: ToolProvider | None | object = _UNSET, budget: MissionBudget | None = None):
         self.store, self.sink = store, sink
         self.agents: dict[UUID, list[AgentSpec]] = defaultdict(list)
         self.tasks: dict[UUID, list[Task]] = defaultdict(list)
@@ -74,6 +75,7 @@ class SwarmRuntime:
         self.idempotency = IdempotencyGuard(store)
         self._held_leases: dict[tuple[str, str], str] = {}
         self.policy = PolicyGate()
+        self.budget = budget if budget is not None else MissionBudget.from_env()
 
     def _owner(self) -> str:
         return str(self.worker_id)
@@ -500,6 +502,10 @@ class SwarmRuntime:
         assert response is not None
         await self._emit_planning(mission.id, actor.id)
         metadata = response.pop("_meta", None)
+        recorded = self.budget.record(mission.id, kind, metadata)
+        if recorded is not None:
+            await self.emit(mission.id, EventType.BUDGET_RECORDED,
+                            self.budget.event_payload(mission.id, recorded), actor.id)
         if metadata:
             if metadata.get("failover_from"):
                 await self.emit(mission.id, EventType.LLM_FAILOVER, {
@@ -509,7 +515,11 @@ class SwarmRuntime:
                     "reason": metadata.get("failover_reason"),
                     "model": metadata.get("model", model),
                 }, actor.id)
-            await self.emit(mission.id, EventType.LLM_COMPLETED, {"kind": kind, **metadata}, actor.id)
+            completed = {"kind": kind, **metadata}
+            if recorded is not None:
+                completed["estimated_cost_usd"] = recorded.estimated_cost_usd
+                completed["cost_known"] = recorded.cost_known
+            await self.emit(mission.id, EventType.LLM_COMPLETED, completed, actor.id)
         return response
 
     async def run(self, mission: Mission):
@@ -718,7 +728,11 @@ class SwarmRuntime:
                             status = AgentStatus.STOPPED if mission.status == MissionStatus.STOPPED else AgentStatus.FAILED
                             await self.agent_status(agent, status)
                     mission.updated_at = utcnow()
+                    self.budget.attach_to_result(mission)
                     self.store.save_mission(mission)
+                    summary = self.budget.snapshot(mission.id)
+                    if summary is not None:
+                        await self.emit(mission.id, EventType.BUDGET_SUMMARY, summary)
                     await self.emit(mission.id, event_type_for_mission(mission.status), mission.result or {})
             finally:
                 await self.release_work(mission, "mission", str(mission.id))

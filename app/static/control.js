@@ -191,6 +191,8 @@ function describe(e){
     case "user.answered":return "<b>Answer received</b> · "+esc(p.question||p.question_id||"question");
     case "llm.started":return "<b>"+esc(name)+"</b> is "+(p.kind==="decision"?"deciding the next move":p.kind==="verification"?"verifying the claimed result":"working");
     case "llm.completed":return "<b>"+esc(name)+"</b> · "+((p.input_tokens||0)+(p.output_tokens||0)).toLocaleString()+" tokens";
+    case "budget.recorded":return "<b>Token meter</b> · "+esc(p.provider||"unknown")+(p.metered?" · "+((p.input_tokens||0)+(p.output_tokens||0)+(p.reasoning_tokens||0)).toLocaleString()+" tokens":" · unmetered");
+    case "budget.summary":return "<b>Token budget</b> · "+((p.total_tokens||0).toLocaleString())+" tokens"+(p.cost_known?" · estimate":" · cost unknown");
     case "verification.started":return "<b>Verifier</b> is checking the claimed result";
     case "verification.passed":return "<b>Verifier</b> accepted the claimed result";
     case "verification.failed":return "<b>Verifier</b> rejected the claim"+(p.failure_class?" · "+esc(p.failure_class):"")+(p.rationale?" · "+esc(p.rationale):"");

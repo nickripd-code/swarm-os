@@ -62,6 +62,8 @@ UI_EVENT_TYPES = {
     "lease.claimed",
     "lease.expired",
     "lease.released",
+    "budget.recorded",
+    "budget.summary",
 }
 
 
@@ -80,6 +82,8 @@ def test_event_type_values_match_historical_ui_strings():
     assert EventType.LEASE_CLAIMED == "lease.claimed"
     assert EventType.LEASE_EXPIRED == "lease.expired"
     assert EventType.LEASE_RELEASED == "lease.released"
+    assert EventType.BUDGET_RECORDED == "budget.recorded"
+    assert EventType.BUDGET_SUMMARY == "budget.summary"
     assert "controller.fallback" not in KNOWN_EVENT_TYPES
     assert FORBIDDEN_EVENT_TYPES == {"controller.fallback"}
 

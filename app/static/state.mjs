@@ -59,6 +59,8 @@ export function resultMetaText(mission) {
   if (mission.status) bits.push(String(mission.status).toUpperCase());
   if (result.mode) bits.push("mode " + result.mode);
   if (result.failure_class) bits.push(result.failure_class);
+  const tokens = result.token_budget?.total_tokens;
+  if (Number.isFinite(tokens) && tokens > 0) bits.push(tokens.toLocaleString() + " tokens");
   return bits.join(" · ");
 }
 export function alertFromEvent(e) {

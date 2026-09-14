@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from .budget import budget_status
 from .credentials import (
     get_api_key, get_anthropic_api_key, get_cohere_api_key, get_deepseek_api_key,
     get_fireworks_api_key, get_gemini_api_key, get_groq_api_key, get_mistral_api_key,
