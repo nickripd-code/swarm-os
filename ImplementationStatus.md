@@ -156,7 +156,11 @@ Nothing in the current test suite is known red. UI preview is synthetic by desig
 
 ## NEXT PRIORITY
 
+<<<<<<< HEAD
 **This slice:** wire the unused answers path. Controller `ask` emits `mission.question`, persists a pending question, and parks the mission in truthful `WAITING` until `POST /api/missions/{id}/answers/{question_id}` consumes the matching answer. Mismatched / empty / terminal / unasked answers fail closed (no `user.answered`). The decide loop then sees `state.answers` and can continue. Resume while unanswered stays waiting and does not fabricate a reply. Lane A (not Anthropic). Rebased onto main after PaymentProvider (`#18`) and llama.cpp (`#17`). No OrganizationDesigner. No React/Pixi rewrite.
+=======
+**This slice:** wire the unused answers path. Controller `ask` emits `mission.question`, persists a pending question, and parks the mission in truthful `WAITING` until `POST /api/missions/{id}/answers/{question_id}` consumes the matching answer. Mismatched / empty / terminal / unasked answers fail closed (no `user.answered`). The decide loop then sees `state.answers` and can continue. Resume while unanswered stays waiting and does not fabricate a reply. Lane A (not Anthropic). Rebased onto main after llama.cpp (`#17`). No OrganizationDesigner. No React/Pixi rewrite. Tests: `python3 -m pytest tests/ -q` → **192 passed**.
+>>>>>>> 8dcb571 (Record pytest results after rebasing the answers path.)
 
 **Landed on main (keep):** `PaymentProvider` seam behind `WalletAdapter` (`#18`) — simulated default, live unconfigured fail-closed, factory never enables spend. llama.cpp OpenAI-compatible adapter (`LlamaCppModelProvider`, `#17`).
 
