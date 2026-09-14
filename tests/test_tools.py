@@ -53,6 +53,19 @@ class ToolThenFinish(LLMProvider):
         return local_evidence_check(state, claim)
 
 
+class RepeatToolThenFinish(LLMProvider):
+    """Controller that requests echo until two completed results exist."""
+
+    async def decide(self, state):
+        used = len(state.get("tool_results") or [])
+        if used < 2:
+            return {"action": "use_tool", "tool": "echo", "arguments": {"text": str(used)}}
+        return {"action": "finish", "summary": "Used two echoes"}
+
+    async def verify(self, state, claim):
+        return local_evidence_check(state, claim)
+
+
 class SpawnWaitFinish(LLMProvider):
     """Controller that spawns one analyst, waits, then finishes from worker output."""
 
@@ -207,6 +220,51 @@ async def test_controller_use_tool_accepts_arguments_json(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_controller_use_tool_under_limit_succeeds(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(
+        store,
+        controller=RepeatToolThenFinish(),
+        tools=LocalToolProvider(allowlist=["echo"]),
+    )
+    mission = Mission(goal="Two allowed tool calls", limits={"max_tool_calls": 2})
+    store.save_mission(mission)
+    await runtime.run(mission)
+    saved = store.get_mission(mission.id)
+    assert saved.status == "completed"
+    assert runtime.tool_calls_used(mission.id) == 2
+    events = store.events(mission.id)
+    assert len([e for e in events if e.event_type == "tool.started"]) == 2
+    assert len([e for e in events if e.event_type == "tool.completed"]) == 2
+    assert not any(e.event_type == "tool.failed" for e in events)
+    assert any(e.event_type == "mission.completed" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_controller_use_tool_at_limit_fails_closed(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(
+        store,
+        controller=RepeatToolThenFinish(),
+        tools=LocalToolProvider(allowlist=["echo"]),
+    )
+    mission = Mission(goal="One tool only", limits={"max_tool_calls": 1})
+    store.save_mission(mission)
+    await runtime.run(mission)
+    saved = store.get_mission(mission.id)
+    assert saved.status == "failed"
+    assert saved.result["failure_class"] == "RESOURCE_EXHAUSTED"
+    assert runtime.tool_calls_used(mission.id) == 1
+    events = store.events(mission.id)
+    started = [e for e in events if e.event_type == "tool.started"]
+    completed = [e for e in events if e.event_type == "tool.completed"]
+    failed = [e for e in events if e.event_type == "tool.failed"]
+    assert len(started) == 1 and len(completed) == 1
+    assert failed and failed[-1].payload["failure_class"] == "RESOURCE_EXHAUSTED"
+    assert not any(e.event_type == "mission.completed" for e in events)
+
+
+@pytest.mark.asyncio
 async def test_worker_use_tool_then_complete(tmp_path):
     store = Store(str(tmp_path / "swarm.db"))
     runtime = SwarmRuntime(
@@ -294,6 +352,27 @@ async def test_worker_unknown_tool_is_missing_without_charge(tmp_path):
     assert failed and failed[-1].payload["failure_class"] == "TOOL_MISSING"
     assert not any(e.event_type == "tool.started" for e in events)
     assert not any(e.event_type == "tool.completed" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_worker_tool_budget_under_limit_succeeds(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(
+        store,
+        controller=WorkerRepeatingEcho(),
+        tools=LocalToolProvider(allowlist=["echo"]),
+    )
+    mission = Mission(goal="Two worker tools", limits={"max_tool_calls": 2})
+    store.save_mission(mission)
+    await runtime.run(mission)
+    saved = store.get_mission(mission.id)
+    assert saved.status == "completed"
+    assert runtime.tool_calls_used(mission.id) == 2
+    events = store.events(mission.id)
+    assert len([e for e in events if e.event_type == "tool.started"]) == 2
+    assert len([e for e in events if e.event_type == "tool.completed"]) == 2
+    assert not any(e.event_type == "tool.failed" for e in events)
+    assert any(e.event_type == "mission.completed" for e in events)
 
 
 @pytest.mark.asyncio
