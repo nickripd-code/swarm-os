@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -29,7 +30,12 @@ SCORE_TOOL_REQUIRED = 10.0
 SCORE_STRUCTURED = 5.0
 SCORE_HEALTHY = 5.0
 SCORE_DEGRADED = 1.0
+SCORE_HISTORY = 8.0
+SCORE_PRICE_PER_MILLION = 0.001
+SCORE_ESTIMATED_COST = 1.0
+SCORE_RELATIVE_COST = 2.0
 TIEBREAK_INDEX = 0.01
+HISTORY_WINDOW = 8
 
 
 class CapabilityRequest(BaseModel):
@@ -50,6 +56,10 @@ class RouteCandidate(BaseModel):
     score: float
     reasons: list[str] = Field(default_factory=list)
 
+    @property
+    def rationale(self) -> str:
+        return selection_rationale(self)
+
 
 class RouteDecision(BaseModel):
     selected: RouteCandidate
@@ -59,6 +69,52 @@ class RouteDecision(BaseModel):
     @property
     def chain(self) -> list[RouteCandidate]:
         return [self.selected, *self.fallbacks]
+
+    @property
+    def rationale(self) -> str:
+        return self.selected.rationale
+
+
+class ProviderHistory:
+    """Recent complete() outcomes for one provider. Empty is unknown, not success."""
+
+    def __init__(self, window: int = HISTORY_WINDOW):
+        self._outcomes: deque[bool] = deque(maxlen=window)
+
+    def record(self, success: bool) -> None:
+        self._outcomes.append(bool(success))
+
+    @property
+    def successes(self) -> int:
+        return sum(self._outcomes)
+
+    @property
+    def failures(self) -> int:
+        return len(self._outcomes) - self.successes
+
+    @property
+    def samples(self) -> int:
+        return len(self._outcomes)
+
+    def score_delta(self) -> float:
+        n = self.samples
+        if n == 0:
+            return 0.0
+        return SCORE_HISTORY * (self.successes - self.failures) / n
+
+    def reason(self) -> str:
+        n = self.samples
+        if n == 0:
+            return "no recent outcomes"
+        return f"recent success {self.successes}/{n}"
+
+
+def selection_rationale(candidate: RouteCandidate) -> str:
+    reasons = ", ".join(candidate.reasons) or "no reasons"
+    return (
+        f"selected {candidate.provider_id}/{candidate.model} "
+        f"(score {candidate.score:.2f}: {reasons})"
+    )
 
 
 def capability_request_for(*, kind: str, agent: dict[str, Any] | None = None,
@@ -119,9 +175,43 @@ def _hard_reject(descriptor: ModelDescriptor, request: CapabilityRequest,
     return None
 
 
+def _cost_signal(descriptor: ModelDescriptor,
+                 estimate: CostEstimate) -> tuple[float | None, str]:
+    """Comparable cost for ranking. Unknown stays None — never treated as cheap."""
+    if descriptor.price_output_per_million is not None:
+        return descriptor.price_output_per_million, "listed"
+    if estimate.known and estimate.estimated_cost is not None:
+        return estimate.estimated_cost, "estimated"
+    return None, "unknown"
+
+
+def _apply_relative_cost(ranked: list[RouteCandidate],
+                         costs: list[tuple[float | None, str]]) -> None:
+    """Penalize more expensive eligible models of the same cost kind. Scoring only."""
+    by_kind: dict[str, list[tuple[int, float]]] = {}
+    for index, (value, kind) in enumerate(costs):
+        if value is None or kind == "unknown":
+            continue
+        by_kind.setdefault(kind, []).append((index, value))
+    for group in by_kind.values():
+        if len(group) < 2:
+            continue
+        values = [value for _, value in group]
+        cheapest = min(values)
+        span = max(values) - cheapest
+        for index, value in group:
+            if span <= 0 or value == cheapest:
+                ranked[index].reasons.append("lowest known cost among eligible")
+                continue
+            relative = (value - cheapest) / span
+            ranked[index].score -= SCORE_RELATIVE_COST * relative
+            ranked[index].reasons.append(f"relative cost {relative:.2f}")
+
+
 def score_model(descriptor: ModelDescriptor, request: CapabilityRequest, *,
                 health: str = "healthy", index: int = 0,
-                estimate: CostEstimate | None = None) -> tuple[float, list[str]] | None:
+                estimate: CostEstimate | None = None,
+                history: ProviderHistory | None = None) -> tuple[float, list[str]] | None:
     """Return (score, reasons) or None when the model is ineligible."""
     estimate = estimate or CostEstimate(
         provider=descriptor.provider, model=descriptor.model, known=False,
@@ -161,12 +251,16 @@ def score_model(descriptor: ModelDescriptor, request: CapabilityRequest, *,
         score += SCORE_DEGRADED
         reasons.append("degraded")
 
+    history = history or ProviderHistory()
+    score += history.score_delta()
+    reasons.append(history.reason())
+
     if descriptor.price_output_per_million is not None:
-        score -= descriptor.price_output_per_million * 0.001
-        reasons.append("listed output price")
+        score -= descriptor.price_output_per_million * SCORE_PRICE_PER_MILLION
+        reasons.append(f"listed output price {descriptor.price_output_per_million:g}/M")
     elif estimate.known and estimate.estimated_cost is not None:
-        score -= estimate.estimated_cost
-        reasons.append("estimated cost")
+        score -= estimate.estimated_cost * SCORE_ESTIMATED_COST
+        reasons.append(f"estimated cost {estimate.estimated_cost:g}")
 
     score -= index * TIEBREAK_INDEX
     return score, reasons
@@ -187,6 +281,7 @@ class ModelRouter:
             raise ValueError("ModelRouter requires at least one ModelProvider")
         self.providers = list(providers)
         self.last_decision: RouteDecision | None = None
+        self._history: dict[str, ProviderHistory] = {}
 
     @classmethod
     def wrap(cls, provider: ModelProvider) -> "ModelRouter":
@@ -194,6 +289,13 @@ class ModelRouter:
 
     def configured(self) -> bool:
         return any(provider_configured(provider) for provider in self.providers)
+
+    def history_for(self, provider_id: str) -> ProviderHistory:
+        return self._history.setdefault(provider_id, ProviderHistory())
+
+    def record_outcome(self, provider_id: str, success: bool) -> None:
+        """Remember a real complete() result. Does not invent success or skip the chain."""
+        self.history_for(provider_id).record(success)
 
     def _provider(self, provider_id: str) -> ModelProvider | None:
         for provider in self.providers:
@@ -237,10 +339,14 @@ class ModelRouter:
         if not self.configured():
             raise ProviderError("No model provider is configured", FailureClass.AUTHORIZATION_REQUIRED)
         ranked: list[RouteCandidate] = []
+        costs: list[tuple[float | None, str]] = []
         for index, (provider, descriptor, health) in enumerate(await self.catalog()):
             probe = ModelRequest(model=descriptor.model, instructions="route", input="")
             estimate = provider.estimate_cost(probe)
-            scored = score_model(descriptor, request, health=health, index=index, estimate=estimate)
+            scored = score_model(
+                descriptor, request, health=health, index=index, estimate=estimate,
+                history=self.history_for(provider.provider_id),
+            )
             if scored is None:
                 continue
             score, reasons = scored
@@ -248,6 +354,8 @@ class ModelRouter:
                 provider_id=provider.provider_id, model=descriptor.model,
                 score=score, reasons=reasons,
             ))
+            costs.append(_cost_signal(descriptor, estimate))
+        _apply_relative_cost(ranked, costs)
         ranked.sort(key=lambda candidate: candidate.score, reverse=True)
         if not ranked:
             raise ProviderError(
@@ -286,11 +394,13 @@ class ModelRouter:
                 )
                 response = await provider.complete(targeted)
             except ProviderError as exc:
+                self.record_outcome(candidate.provider_id, False)
                 if exc.failure_class not in FAILOVER_FAILURE_CLASSES:
                     raise
                 last_error = exc
                 failover_reason = str(exc.failure_class)
                 continue
+            self.record_outcome(candidate.provider_id, True)
             if candidate.provider_id != primary.provider_id or candidate.model != primary.model:
                 return response.model_copy(update={
                     "failover_from": primary.provider_id,
@@ -323,4 +433,10 @@ class ModelRouter:
         targeted = request if request.model == candidate.model else request.model_copy(
             update={"model": candidate.model},
         )
-        return await provider.complete(targeted)
+        try:
+            response = await provider.complete(targeted)
+        except ProviderError:
+            self.record_outcome(candidate.provider_id, False)
+            raise
+        self.record_outcome(candidate.provider_id, True)
+        return response

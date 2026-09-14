@@ -17,7 +17,10 @@ from .planning import (
     run_independent_planners, should_use_multi_planner, unique_provider_ids,
 )
 from .policy import privacy_from_state
-from .router import CapabilityRequest, ModelRouter, capability_request_for, registered_providers
+from .router import (
+    CapabilityRequest, ModelRouter, capability_request_for, registered_providers,
+    selection_rationale,
+)
 from .verifier import (
     VERIFIER_INSTRUCTIONS, local_evidence_check, validate_verification, verification_accepted,
 )
@@ -1336,6 +1339,7 @@ class OpenAIProvider(LLMProvider):
                 "model": target.model,
                 "score": target.score,
                 "reasons": target.reasons,
+                "rationale": selection_rationale(target),
                 "fallbacks": [],
             }
         elif self.router is not None and self.router.last_decision is not None:
@@ -1345,6 +1349,7 @@ class OpenAIProvider(LLMProvider):
                 "model": decision.selected.model,
                 "score": decision.selected.score,
                 "reasons": decision.selected.reasons,
+                "rationale": decision.rationale,
                 "fallbacks": [
                     {"provider": item.provider_id, "model": item.model}
                     for item in decision.fallbacks
