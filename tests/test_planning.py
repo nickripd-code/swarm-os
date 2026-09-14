@@ -3,7 +3,8 @@ import pytest
 from app.llm import OpenAIProvider
 from app.models import FailureClass, Mission
 from app.planning import (
-    is_high_stakes_decide, is_trivial_goal, planner_count_from_env, should_use_multi_planner,
+    VALID_ACTIONS, is_high_stakes_decide, is_trivial_goal, planner_count_from_env,
+    should_use_multi_planner, validate_decision,
 )
 from app.providers import ModelCapabilities, ProviderError
 from app.router import ModelRouter, RouteCandidate
@@ -77,6 +78,14 @@ def scripted_ollama(**kwargs) -> ScriptedProvider:
         reasoning="unknown", coding="unknown", tool_use=True, structured_outputs=True, vision=False,
     ))
     return ScriptedProvider("ollama", "llama3.2", local=True, capabilities=caps, **kwargs)
+
+
+def test_ask_is_a_valid_controller_action():
+    assert "ask" in VALID_ACTIONS
+    assert validate_decision({"action": "ask", "question": "What is the target name?"})["action"] == "ask"
+    with pytest.raises(ProviderError) as exc:
+        validate_decision({"action": "invent"})
+    assert exc.value.failure_class == FailureClass.INVALID_OUTPUT
 
 
 def test_trivial_goals_are_cost_aware():

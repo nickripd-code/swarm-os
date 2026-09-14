@@ -203,13 +203,14 @@ def response_format(name: str, properties: dict) -> dict:
 
 
 DECISION_FORMAT = response_format("mission_decision", {
-    "action": {"type": "string", "enum": ["spawn", "finish", "wait", "blocked"]},
+    "action": {"type": "string", "enum": ["spawn", "finish", "wait", "ask", "blocked"]},
     "role": {"type": ["string", "null"]},
     "purpose": {"type": ["string", "null"]},
     "parent_id": {"type": ["string", "null"]},
     "capabilities": {"type": "array", "items": {"type": "string", "enum": ["reason", "write", "review"]}},
     "summary": {"type": ["string", "null"]},
     "reason": {"type": ["string", "null"]},
+    "question": {"type": ["string", "null"]},
 })
 WORK_FORMAT = response_format("worker_result", {
     "status": {"type": "string", "enum": ["completed", "blocked"]},
@@ -1065,8 +1066,12 @@ review (inspect other workers' results). No browser, network, shell, messaging, 
 are connected yet. Capabilities do not grant access to tools that do not exist.
 Use completed worker results; do not redo completed work. Spawned workers are assigned pending tasks;
 those tasks run when you wait. Do not finish while tasks are pending or running.
-Choose ordinary defaults without questions. If a required external tool or essential fact is unavailable,
-return blocked with a concrete reason. Never claim reservations, purchases, files or deployments happened.
+Choose ordinary defaults when a reasonable assumption is enough. If a required fact can only come from
+the user, return ask with a concrete question. Never invent a user answer. After the user answers, the
+reply appears in state.answers — use it and do not ask the same question again. Ask only when the
+mission cannot proceed without that fact, and never while tasks are pending or running. If a required
+external tool is unavailable, return blocked with a concrete reason. Never claim reservations, purchases,
+files or deployments happened.
 Finish with a substantive final answer only when the goal is satisfied by actual worker outputs, or your
 own answer for a simple text-only goal. The finish summary is the full user-facing deliverable.
 Use wait only if there is in-flight work. Unused fields must be null or an empty capabilities array.

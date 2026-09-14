@@ -118,8 +118,13 @@ async def stop_mission(mission_id: UUID):
 
 @app.post("/api/missions/{mission_id}/answers/{question_id}")
 async def answer_question(mission_id: UUID, question_id: str, request: AnswerRequest):
-    await runtime.emit(mission_id, "user.answered", {"question_id": question_id, "answer": request.answer})
-    return {"accepted": True}
+    if not store.get_mission(mission_id):
+        raise HTTPException(404, "Mission not found")
+    try:
+        record = await runtime.submit_answer(mission_id, question_id, request.answer)
+    except PolicyError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"accepted": True, **record}
 
 
 @app.websocket("/api/missions/{mission_id}/stream")

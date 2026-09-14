@@ -4,11 +4,11 @@ import asyncio
 from collections import defaultdict
 from datetime import datetime
 from typing import Any, Awaitable, Callable
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from .models import (
-    AgentSpec, AgentStatus, FailureClass, Mission, MissionEvent, MissionStatus,
-    PaymentIntent, Task, TaskStatus, utcnow,
+    AgentSpec, AgentStatus, FailureClass, Mission, MissionAnswer, MissionEvent,
+    MissionStatus, PaymentIntent, PendingQuestion, Task, TaskStatus, utcnow,
 )
 from .store import Store
 from .llm import (
@@ -65,6 +65,7 @@ class SwarmRuntime:
         self.max_retries = max_retries
         self.retry_base_seconds = retry_base_seconds
         self._tool_calls: dict[UUID, int] = {}
+        self._answer_waiters: dict[UUID, asyncio.Event] = {}
         self.external_tools: list[str] = []
 
     async def emit(self, mission_id: UUID, event_type: str, payload: dict[str, Any], actor_id: UUID | None = None):
@@ -201,6 +202,97 @@ class SwarmRuntime:
         mission.status, mission.updated_at = status, utcnow()
         self.store.save_mission(mission)
 
+    def _sync_answers(self, mission: Mission, saved: Mission | None) -> None:
+        if saved is None:
+            return
+        mission.pending_question = saved.pending_question
+        mission.answers = list(saved.answers)
+
+    def _answer_recorded(self, mission: Mission | None, question_id: str) -> bool:
+        if mission is None:
+            return False
+        return any(item.question_id == question_id for item in mission.answers)
+
+    async def _await_answer(self, mission: Mission, question_id: str) -> None:
+        """Block until the matching answer is persisted. Never fabricate one."""
+        event = self._answer_waiters.get(mission.id)
+        if event is None:
+            event = asyncio.Event()
+            self._answer_waiters[mission.id] = event
+        try:
+            saved = self.store.get_mission(mission.id)
+            if self._answer_recorded(saved, question_id):
+                self._sync_answers(mission, saved)
+                return
+            await event.wait()
+            saved = self.store.get_mission(mission.id)
+            self._sync_answers(mission, saved)
+            if not self._answer_recorded(saved, question_id):
+                raise PolicyError(
+                    "Cannot continue without a matching human answer",
+                    FailureClass.AUTHORIZATION_REQUIRED,
+                )
+        finally:
+            if self._answer_waiters.get(mission.id) is event:
+                self._answer_waiters.pop(mission.id, None)
+
+    async def _park_for_human_answer(self, mission: Mission, root: AgentSpec,
+                                     pending: PendingQuestion, *, asked_now: bool) -> None:
+        await self._persist_status(mission, MissionStatus.WAITING)
+        payload = pending.model_dump(mode="json")
+        if asked_now:
+            await self.emit(mission.id, "mission.question", payload, root.id)
+        await self.emit(mission.id, "mission.waiting", {
+            "reason": pending.reason or "Waiting for a human answer",
+            "question_id": pending.question_id,
+            "question": pending.question,
+        }, root.id)
+        await self._await_answer(mission, pending.question_id)
+        if mission.id in self.stopped or mission.id in self.suspending:
+            raise asyncio.CancelledError()
+        if mission.pending_question is not None:
+            raise PolicyError(
+                "Cannot continue without a matching human answer",
+                FailureClass.AUTHORIZATION_REQUIRED,
+            )
+        await self._persist_status(mission, MissionStatus.RUNNING)
+        await self.emit(mission.id, "mission.running", {
+            "reason": "Human answer received; controller will continue",
+            "question_id": pending.question_id,
+        }, root.id)
+
+    async def submit_answer(self, mission_id: UUID, question_id: str, answer: str) -> dict[str, Any]:
+        """Consume a human answer for the open question. Fail closed on mismatch."""
+        text = (answer or "").strip()
+        if not text:
+            raise PolicyError("Answer must not be empty", FailureClass.INVALID_OUTPUT)
+        question_id = (question_id or "").strip()
+        if not question_id:
+            raise PolicyError("Question id is required", FailureClass.INVALID_OUTPUT)
+        mission = self.store.get_mission(mission_id)
+        if mission is None:
+            raise PolicyError("Mission not found", FailureClass.INVALID_OUTPUT)
+        if mission.status in TERMINAL:
+            raise PolicyError("Mission is no longer accepting answers", FailureClass.INVALID_OUTPUT)
+        pending = mission.pending_question
+        if pending is None:
+            raise PolicyError("No question is awaiting an answer", FailureClass.AUTHORIZATION_REQUIRED)
+        if pending.question_id != question_id:
+            raise PolicyError("Answer does not match the open question", FailureClass.AUTHORIZATION_REQUIRED)
+        if self._answer_recorded(mission, question_id):
+            raise PolicyError("This question was already answered", FailureClass.INVALID_OUTPUT)
+        record = MissionAnswer(question_id=question_id, question=pending.question, answer=text)
+        mission.answers.append(record)
+        mission.pending_question = None
+        mission.updated_at = utcnow()
+        self.store.save_mission(mission)
+        payload = record.model_dump(mode="json")
+        await self.emit(mission_id, "user.answered", payload)
+        waiter = self._answer_waiters.get(mission_id)
+        if waiter:
+            waiter.set()
+        return payload
+
     async def _assign_unassigned_tasks(self, mission: Mission) -> list[Task]:
         assigned = {task.agent_id for task in self.tasks[mission.id]
                     if task.status not in {TaskStatus.STOPPED, TaskStatus.FAILED}}
@@ -275,6 +367,7 @@ class SwarmRuntime:
         try:
             self.check_stopped(mission.id)
             self.hydrate(mission.id)
+            self._sync_answers(mission, self.store.get_mission(mission.id))
             existing = list(self.agents[mission.id])
             history = self.store.events(mission.id)
             started = next((event.created_at for event in history
@@ -310,12 +403,15 @@ class SwarmRuntime:
                             await self.agent_status(agent, AgentStatus.CREATED)
                     if root.status in {AgentStatus.CREATED, AgentStatus.RUNNING, AgentStatus.BLOCKED}:
                         await self.agent_status(root, AgentStatus.RUNNING)
-                    await self._run_tasks(mission)
+                    if mission.pending_question is None:
+                        await self._run_tasks(mission)
                 else:
                     await self.emit(mission.id, "mission.started", {"goal": mission.goal, "mode": self.controller.mode})
                     root = await self.spawn(mission, "mission_controller", "Delegate work, inspect results and deliver the mission.",
                                             capabilities=["spawn", "coordinate", "reason"])
                     await self.agent_status(root, AgentStatus.RUNNING)
+                if mission.pending_question is not None:
+                    await self._park_for_human_answer(mission, root, mission.pending_question, asked_now=False)
                 for _ in range(mission.limits.max_agents * 2 + 2):
                     decision = await self.model_call(mission, root, "decision", lambda: self.controller.decide(self._state(mission)))
                     await self.emit(mission.id, "controller.decision", decision, root.id)
@@ -342,6 +438,9 @@ class SwarmRuntime:
                     elif action == "finish":
                         if self._in_flight_tasks(mission):
                             raise PolicyError("Cannot finish while tasks are active", FailureClass.INVALID_OUTPUT)
+                        if mission.pending_question is not None:
+                            raise PolicyError("Cannot finish while a question is unanswered",
+                                              FailureClass.INVALID_OUTPUT)
                         if not decision.get("summary"):
                             raise PolicyError("Model omitted the final deliverable", FailureClass.INVALID_OUTPUT)
                         claim = {"summary": decision["summary"], "mode": self.controller.mode,
@@ -354,7 +453,28 @@ class SwarmRuntime:
                         mission.status = MissionStatus.BLOCKED
                         mission.result = {"reason": decision.get("reason") or "Required capability or information is unavailable"}
                         break
+                    elif action == "ask":
+                        question = str(decision.get("question") or "").strip()
+                        if not question:
+                            raise PolicyError("Controller asked without a question",
+                                              FailureClass.INVALID_OUTPUT)
+                        if self._in_flight_tasks(mission):
+                            raise PolicyError("Cannot ask while tasks are active",
+                                              FailureClass.INVALID_OUTPUT)
+                        if mission.pending_question is not None:
+                            raise PolicyError("A question is already awaiting an answer",
+                                              FailureClass.INVALID_OUTPUT)
+                        pending = PendingQuestion(
+                            question_id=str(uuid4()),
+                            question=question,
+                            reason=decision.get("reason"),
+                        )
+                        mission.pending_question = pending
+                        await self._park_for_human_answer(mission, root, pending, asked_now=True)
                     elif action == "wait":
+                        if mission.pending_question is not None:
+                            raise PolicyError("Cannot wait for tasks while a question is unanswered",
+                                              FailureClass.INVALID_OUTPUT)
                         await self._assign_unassigned_tasks(mission)
                         inflight = self._in_flight_tasks(mission)
                         if not inflight:
@@ -397,7 +517,10 @@ class SwarmRuntime:
             mission.status = MissionStatus.FAILED
             mission.result = failure_payload("Unexpected runtime error", FailureClass.UNKNOWN_FAILURE)
         finally:
+            self._sync_answers(mission, self.store.get_mission(mission.id))
             if suspended:
+                if mission.pending_question is not None:
+                    mission.status = MissionStatus.WAITING
                 self.store.save_mission(mission)
                 await self.emit(mission.id, "mission.suspended", {
                     "reason": "Runtime is shutting down; unfinished work remains recoverable",
@@ -463,7 +586,10 @@ class SwarmRuntime:
                 "limits": mission.limits.model_dump(mode="json"),
                 "tool_calls": {"used": used, "max": mission.limits.max_tool_calls},
                 "available_capabilities": ["reason", "write", "review"],
-                "external_tools": self.available_tools(mission)}
+                "external_tools": self.available_tools(mission),
+                "pending_question": (mission.pending_question.model_dump(mode="json")
+                                     if mission.pending_question else None),
+                "answers": [item.model_dump(mode="json") for item in mission.answers]}
 
     async def _execute_task(self, mission: Mission, task: Task, agent: AgentSpec):
         self.check_stopped(mission.id)
