@@ -165,13 +165,13 @@ Nothing in the current test suite is known red. UI preview is synthetic by desig
 
 ## NEXT PRIORITY
 
-**This slice:** Test-only backfill of `max_tool_calls` coverage after `#47` was closed as superseded by `#45`. Runtime already charges real `tool.started` via `PolicyGate` + `invoke_tool`. Adds controller decide-loop under-limit success and at-limit `RESOURCE_EXHAUSTED`, plus worker `WORK_FORMAT` under-limit success. No runtime/llm/policy changes. Tests pending this revision.
+**This slice:** Test-only backfill of `max_tool_calls` coverage after `#47` was closed as superseded by `#45`. Runtime already charges real `tool.started` via `PolicyGate` + `invoke_tool`. Adds controller decide-loop under-limit success and at-limit `RESOURCE_EXHAUSTED`, plus worker `WORK_FORMAT` under-limit success. No runtime/llm/policy changes. Tests: `python3 -m pytest tests/ -q` → **727 passed**, 241 warnings in 22.01s.
 
 **Landed on main (keep):** ModelRouter hardening (`#52`); MissionStatus.WAITING (`#49`); Vertex AI Gemini (`#46`); GitHub Actions CI (`#48`); Worker-side `WORK_FORMAT` tools (`#45`); SambaNova Cloud (`#44`); Cerebras (`#43`); Hugging Face Inference (`#42`); AWS Bedrock Converse (`#41`); Self-modification sandbox (`#40`); Perplexity (`#39`); Azure OpenAI (`#38`); Playwright browser tool seam (`#36`); ResourceScheduler token-cost seed (`#35`); Fireworks (`#34`); Groq (`#33`); Together (`#32`); DeepSeek (`#30`); Cohere (`#31`); Gemini (`#28`); Mistral (`#29`); ModelRouter historical success + cost-aware ranking (`#26`); Anthropic Messages (`#27`); PolicyGate (`#23`); durable worker leases / idempotency (`#22`); versioned SQLite migrations (`#24`); xAI (`#25`); typed `EventType` catalog (`#20`); ToolProvider / MCP seam (`#21`); mission answers path (`#19`); `PaymentProvider` behind `WalletAdapter` (`#18`); llama.cpp (`#17`); vLLM (`#16`); verifier seed (`#15`).
 
 **Recommended next backend slice:** OrganizationDesigner remains reserved (`#50`). Isolated live wallet is later — do not enable spending. Still fail closed. Still no game-world UI rewrite.
 
-**Explicitly not next:** game-world UI, live payment settlement, OrganizationDesigner, production self-mod writes, provider adapters in this WAITING lane.
+**Explicitly not next:** game-world UI, live payment settlement, OrganizationDesigner, production self-mod writes.
 
 ---
 
