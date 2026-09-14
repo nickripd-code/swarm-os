@@ -1,11 +1,11 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine, delete, inspect, text
 
 from app.llm import FallbackController, LLMProvider
-from app.models import AgentSpec, AgentStatus, Mission, MissionStatus, Task, TaskStatus
+from app.models import AgentSpec, AgentStatus, Mission, MissionEvent, MissionStatus, Task, TaskStatus
 from app.runtime import SwarmRuntime
 from app.store import AgentRow, Store, TaskRow
 
@@ -105,9 +105,15 @@ async def test_resume_retries_interrupted_running_task(tmp_path):
     saved = store.get_mission(mission.id)
     assert saved.status == "completed"
     research_tasks = [t for t in store.load_tasks(mission.id) if t.agent_id == researcher.id]
-    assert len(research_tasks) == 1
-    assert research_tasks[0].status == "completed"
-    assert research_tasks[0].output and research_tasks[0].output.get("finding")
+    assert len(research_tasks) == 2
+    assert {task.status for task in research_tasks} == {TaskStatus.STOPPED, TaskStatus.COMPLETED}
+    completed = next(task for task in research_tasks if task.status == TaskStatus.COMPLETED)
+    assert completed.output and completed.output.get("finding")
+    stopped = next(task for task in research_tasks if task.status == TaskStatus.STOPPED)
+    assert any(
+        event.event_type == "task.stopped" and event.payload.get("id") == str(stopped.id)
+        for event in store.events(mission.id)
+    )
 
 
 @pytest.mark.asyncio
@@ -210,16 +216,105 @@ async def test_stop_all_still_cancels_inflight_and_persists(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_graceful_suspend_keeps_mission_and_attempt_recoverable(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+
+    class SlowProvider(LLMProvider):
+        def __init__(self):
+            self.entered = asyncio.Event()
+            self.cancelled = False
+
+        async def decide(self, state):
+            return {"action": "spawn", "role": "analyst", "purpose": "Analyze", "capabilities": ["reason"]}
+
+        async def work(self, state, agent):
+            self.entered.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+    provider = SlowProvider()
+    runtime = SwarmRuntime(store, controller=provider)
+    mission = Mission(goal="Continue after a graceful restart")
+    store.save_mission(mission)
+    await runtime.start(mission)
+    await asyncio.wait_for(provider.entered.wait(), 2)
+
+    suspended = await asyncio.wait_for(runtime.suspend_all(), 2)
+
+    assert suspended == [mission.id]
+    assert provider.cancelled
+    assert store.get_mission(mission.id).status == MissionStatus.RUNNING
+    assert any(task.status == TaskStatus.RUNNING for task in store.load_tasks(mission.id))
+    events = store.events(mission.id)
+    assert any(event.event_type == "mission.suspended" for event in events)
+    assert not any(event.event_type in {"mission.stopped", "mission.failed"} for event in events)
+
+
+@pytest.mark.asyncio
+async def test_resume_uses_original_deadline_not_recent_state_update(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+
+    class NeverCalledProvider(LLMProvider):
+        def __init__(self):
+            self.calls = 0
+
+        async def decide(self, state):
+            self.calls += 1
+            raise AssertionError("expired mission must not call a model")
+
+    provider = NeverCalledProvider()
+    mission, *_ = seed_partial_mission(store)
+    original_start = datetime.now(timezone.utc) - timedelta(seconds=10)
+    store.append(MissionEvent(
+        mission_id=mission.id,
+        event_type="mission.started",
+        payload={"goal": mission.goal, "mode": "test"},
+        created_at=original_start,
+    ))
+    mission.updated_at = datetime.now(timezone.utc)
+    store.save_mission(mission)
+    mission.limits.max_runtime_seconds = 1
+    store.save_mission(mission)
+
+    runtime = SwarmRuntime(store, controller=provider)
+    await runtime.resume_incomplete()
+    await wait_for_runs(runtime)
+
+    saved = store.get_mission(mission.id)
+    assert saved.status == MissionStatus.FAILED
+    assert saved.result["failure_class"] == "TIMEOUT"
+    assert provider.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_stop_all_also_stops_unscheduled_durable_missions(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    mission, *_ = seed_partial_mission(store)
+    runtime = SwarmRuntime(store, controller=FallbackController())
+
+    stopped = await runtime.stop_all()
+
+    assert stopped == [mission.id]
+    assert store.get_mission(mission.id).status == MissionStatus.STOPPED
+    assert all(agent.status not in {AgentStatus.CREATED, AgentStatus.RUNNING}
+               for agent in store.load_agents(mission.id))
+
+
+@pytest.mark.asyncio
 async def test_hydrate_backfills_from_events_when_rows_are_missing(tmp_path):
     store = Store(str(tmp_path / "swarm.db"))
     runtime = SwarmRuntime(store, controller=FallbackController())
     mission = Mission(goal="Launch a small project")
     store.save_mission(mission)
     await runtime.run(mission)
+    missing_agent = runtime.agents[mission.id][-1]
     with store.sessions.begin() as db:
-        db.execute(delete(AgentRow))
+        db.execute(delete(AgentRow).where(AgentRow.id == str(missing_agent.id)))
         db.execute(delete(TaskRow))
-    assert store.load_agents(mission.id) == []
+    assert missing_agent.id not in {agent.id for agent in store.load_agents(mission.id)}
     projected = store.project_events(mission.id)
     assert projected["agents"] and projected["tasks"]
 

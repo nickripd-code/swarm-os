@@ -21,7 +21,7 @@ BASE = Path(__file__).parent
 async def lifespan(app):
     await runtime.resume_incomplete()
     yield
-    await runtime.stop_all()
+    await runtime.suspend_all()
 
 
 app = FastAPI(title="Agent Swarm", version="0.2.0", lifespan=lifespan)
