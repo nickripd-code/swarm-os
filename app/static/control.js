@@ -1,15 +1,35 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
 const statusName = status => ({created:"Ready",running:"Thinking",completed:"Done",blocked:"Blocked",failed:"Failed",stopped:"Stopped",pending:"Queued"}[status] || status);
 const symbol = status => ({created:"·",running:"",completed:"✓",blocked:"?",failed:"!",stopped:"■"}[status] || "·");
 const colors = ["#c6b4ef","#edbd9e","#aed8cf","#e6cd90","#b5cbe3","#dfb9ca"];
-let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null, hudTick=null, notifyArmed=false;
+let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null, hudTick=null, notifyArmed=false, killAvailable=false;
 const elements=new Map();
 const bot = color => '<span class="bot" style="--agent-color:'+color+'" aria-hidden="true"><span class="ear ear-left"></span><span class="ear ear-right"></span><span class="visor"><i></i><i></i><b class="mouth"></b></span></span>';
 function colorFor(a) {if(!a.parent_id)return colors[0];let n=0;for(const c of a.role)n=(n*31+c.charCodeAt(0))>>>0;return colors[1+n%(colors.length-1)];}
 function showNotice(message) {$("notice").textContent=message;$("notice").hidden=!message;}
+function setCommandStatus(message,kind){
+  const el=$("commandBarStatus");
+  if(!el)return;
+  el.textContent=message||"";
+  el.hidden=!message;
+  if(kind)el.dataset.kind=kind;else delete el.dataset.kind;
+  if(kind==="error"&&message)showNotice(message);
+  else if(kind==="ok")showNotice("");
+}
+function haltPreviewLocally(){
+  if(!state.preview)return;
+  clearTimeout(previewTimer);
+  for(const a of state.agents.values())a.status="stopped";
+  if(state.mission){
+    state.mission.status="stopped";
+    state.mission.result={reason:"Preview halted"};
+  }
+  pushAlert({level:"warning",title:"Execution stopped",detail:"Preview halted",event_type:"mission.stopped"});
+  schedule();
+}
 function connection(text,cls="") {$("connection").className="connection "+cls;$("connection").innerHTML="<i></i>"+esc(text);}
 function formatElapsed(ms){
   if(!Number.isFinite(ms)||ms<0)ms=0;
@@ -278,7 +298,7 @@ function reset(mission){
   $("resultPanel").hidden=true;if($("resultMeta")){$("resultMeta").hidden=true;$("resultMeta").textContent="";}
   if($("questionPanel"))$("questionPanel").hidden=!mission?.pending_question;
   if($("answerText"))$("answerText").value="";
-  showNotice("");zoom=1;$("zoomValue").textContent="100%";clearAlerts();
+  showNotice("");setCommandStatus("");zoom=1;$("zoomValue").textContent="100%";clearAlerts();
   if(hudTick){clearInterval(hudTick);hudTick=null;}
 }
 function connect(id,gen){
@@ -348,12 +368,7 @@ $("missionForm").addEventListener("submit",async e=>{
 $("stopAll").addEventListener("click",async()=>{
   $("stopAll").disabled=true;$("stopAll").innerHTML="<span>■</span> STOPPING…";
   try{
-    if(state.preview){
-      clearTimeout(previewTimer);for(const a of state.agents.values())a.status="stopped";state.mission.status="stopped";
-      state.mission.result={reason:"Preview halted"};
-      pushAlert({level:"warning",title:"Execution stopped",detail:"Preview halted",event_type:"mission.stopped"});
-      schedule();
-    }
+    haltPreviewLocally();
     const result=await request("/api/stop-all",{method:"POST"});
     $("announcement").textContent="All mission execution stopped";
     connection("All execution stopped");
@@ -385,6 +400,77 @@ async function killSelectedAgent(){
   }catch(error){showNotice("Could not kill that agent: "+error.message);}
   finally{schedule();}
 }
+function commandContext(){
+  return {
+    missionId:state.preview?null:state.mission?.id||null,
+    preview:!!state.preview,
+    pendingQuestionId:pendingQuestion()?.question_id||null,
+    selectedAgentId:selected||null,
+    killAvailable,
+  };
+}
+function commandSuccessMessage(resolved,result){
+  if(resolved.action==="stop"){
+    if(!result||typeof result.status!=="string")return null;
+    return "Mission "+result.status;
+  }
+  if(resolved.action==="stop-all"){
+    if(!result||result.status!=="stopped"||!Array.isArray(result.mission_ids))return null;
+    let message="Stopped "+result.mission_ids.length+" mission(s)";
+    if(result.active_missions)message+=" · some executions are still shutting down";
+    return message;
+  }
+  if(resolved.action==="answer"){
+    if(!result||result.accepted!==true)return null;
+    return "Answer accepted";
+  }
+  if(resolved.action==="kill"){
+    if(!result||typeof result.status!=="string"||!result.agent_id)return null;
+    return "Agent "+result.status;
+  }
+  return null;
+}
+async function runCommand(raw){
+  const parsed=parseCommand(raw);
+  if(!parsed.ok){setCommandStatus(parsed.error,"error");return;}
+  const resolved=resolveCommand(parsed,commandContext());
+  if(!resolved.ok){setCommandStatus(resolved.error,"error");return;}
+  const btn=$("commandSend");
+  if(btn)btn.disabled=true;
+  try{
+    if(resolved.action==="stop-all")haltPreviewLocally();
+    const options={method:resolved.method||"POST"};
+    if(resolved.body){
+      options.headers={"Content-Type":"application/json"};
+      options.body=JSON.stringify(resolved.body);
+    }
+    const result=await request(resolved.path,options);
+    const message=commandSuccessMessage(resolved,result);
+    if(!message){setCommandStatus("Command did not confirm success","error");return;}
+    if(resolved.action==="stop"||resolved.action==="stop-all"){
+      $("announcement").textContent=message;
+      if(state.mission&&!state.preview){
+        const mode=state.mission.mode;
+        const m=await request("/api/missions/"+state.mission.id);
+        state.mission=m;if(mode)state.mission.mode=mode;
+      }
+      if(resolved.action==="stop-all")connection("All execution stopped");
+    }
+    if(resolved.action==="answer"){
+      if($("answerText"))$("answerText").value="";
+      renderQuestion();
+    }
+    setCommandStatus(message,"ok");
+    if($("commandInput"))$("commandInput").value="";
+    refreshHistory();
+    schedule();
+  }catch(error){setCommandStatus(error.message,"error");}
+  finally{if(btn)btn.disabled=false;}
+}
+if($("commandForm"))$("commandForm").addEventListener("submit",e=>{
+  e.preventDefault();
+  runCommand($("commandInput")?$("commandInput").value:"");
+});
 $("history").addEventListener("change",()=>{if($("history").value)loadMission($("history").value);});
 $("answerForm").addEventListener("submit",async e=>{
   e.preventDefault();
@@ -449,6 +535,10 @@ function preview(){
 }
 $("preview").onclick=preview;$("emptyPreview").onclick=preview;
 async function initialize(){
+  try{
+    const spec=await request("/openapi.json");
+    killAvailable=killRoutePresent(spec);
+  }catch{killAvailable=false;}
   try{health=await request("/api/health");const o=health.openai;
     $("brain").innerHTML='<span class="brain-dot"></span><div><strong>'+esc(o.model)+'</strong><small>'+esc(o.reasoning_effort)+' reasoning · '+(o.configured?'connected':'key needed')+'</small></div>';
     connection(o.configured?"Ready to think":"API key needed",o.configured?"live":"disconnected");
