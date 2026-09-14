@@ -653,20 +653,8 @@ class SwarmRuntime:
                         mission.status = MissionStatus.COMPLETED
                         break
                     elif action == "use_tool":
-                        tool = decision.get("tool") or decision.get("name")
-                        if not tool:
-                            raise PolicyError("Model omitted the tool name", FailureClass.INVALID_OUTPUT)
-                        raw_args = decision.get("arguments")
-                        if raw_args is None and decision.get("arguments_json"):
-                            try:
-                                raw_args = json.loads(decision["arguments_json"])
-                            except (TypeError, ValueError):
-                                raise PolicyError("Tool arguments_json was not valid JSON",
-                                                  FailureClass.INVALID_OUTPUT) from None
-                        raw_args = raw_args or {}
-                        if not isinstance(raw_args, dict):
-                            raise PolicyError("Tool arguments must be an object", FailureClass.INVALID_OUTPUT)
-                        await self.invoke_tool(mission, str(tool), raw_args, root.id)
+                        tool, raw_args = self._tool_call_from_model(decision)
+                        await self.invoke_tool(mission, tool, raw_args, root.id)
                     elif action == "blocked":
                         mission.status = MissionStatus.BLOCKED
                         mission.result = {"reason": decision.get("reason") or "Required capability or information is unavailable"}
@@ -816,6 +804,42 @@ class SwarmRuntime:
                 "answers": [item.model_dump(mode="json") for item in mission.answers],
                 "privacy": mission.privacy}
 
+    def _tool_call_from_model(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        """Parse a controller or worker tool request. Never invent a name or arguments."""
+        tool = payload.get("tool") or payload.get("name")
+        if not tool:
+            raise PolicyError("Model omitted the tool name", FailureClass.INVALID_OUTPUT)
+        raw_args = payload.get("arguments")
+        if raw_args is None and payload.get("arguments_json"):
+            try:
+                raw_args = json.loads(payload["arguments_json"])
+            except (TypeError, ValueError):
+                raise PolicyError("Tool arguments_json was not valid JSON",
+                                  FailureClass.INVALID_OUTPUT) from None
+        raw_args = raw_args or {}
+        if not isinstance(raw_args, dict):
+            raise PolicyError("Tool arguments must be an object", FailureClass.INVALID_OUTPUT)
+        return str(tool), raw_args
+
+    async def _worker_result(self, mission: Mission, agent: AgentSpec) -> dict[str, Any]:
+        """Run WORK_FORMAT until the worker completes, blocks, or a tool request fails closed."""
+        max_rounds = max(mission.limits.max_tool_calls + 1, 1)
+        for _ in range(max_rounds):
+            self.check_stopped(mission.id)
+            result = await self.model_call(
+                mission, agent, "work",
+                lambda: self.controller.work(self._state(mission), agent.model_dump(mode="json")),
+            )
+            status = result.get("status")
+            if status == "use_tool":
+                tool, raw_args = self._tool_call_from_model(result)
+                await self.invoke_tool(mission, tool, raw_args, agent.id)
+                continue
+            if status not in {"completed", "blocked"} or not result.get("finding"):
+                raise PolicyError("Worker did not return a valid result", FailureClass.INVALID_OUTPUT)
+            return result
+        raise PolicyError("Worker tool request limit reached", FailureClass.RESOURCE_EXHAUSTED)
+
     async def _execute_task(self, mission: Mission, task: Task, agent: AgentSpec):
         self.check_stopped(mission.id)
         try:
@@ -829,10 +853,7 @@ class SwarmRuntime:
             self.store.save_task(task)
             await self.agent_status(agent, AgentStatus.RUNNING)
             await self.emit(mission.id, EventType.TASK_STARTED, task.model_dump(mode="json"), agent.id)
-            result = await self.model_call(mission, agent, "work",
-                       lambda: self.controller.work(self._state(mission), agent.model_dump(mode="json")))
-            if result.get("status") not in {"completed", "blocked"} or not result.get("finding"):
-                raise PolicyError("Worker did not return a valid result", FailureClass.INVALID_OUTPUT)
+            result = await self._worker_result(mission, agent)
             task.output = result
             task.status = TaskStatus.COMPLETED if result["status"] == "completed" else TaskStatus.BLOCKED
             agent.output = result
