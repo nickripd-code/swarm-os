@@ -29,6 +29,7 @@
         <div class="hud-chips">
           <span id="missionMode" class="hud-chip mode standby">STANDBY</span>
           <span id="missionStatus" class="hud-chip status idle">IDLE</span>
+          <span id="replayChip" class="hud-chip mode replay-live" hidden>LIVE</span>
         </div>
       </div>
       <dl class="hud-stats">
@@ -48,6 +49,25 @@
           <div><dt>Est. spend</dt><dd id="costHudSpend">estimate unavailable</dd></div>
           <div><dt>Token budget</dt><dd id="costHudBudget">estimate unavailable</dd></div>
         </dl>
+      </aside>
+      <aside class="replay-hud" id="replayHud" aria-label="Historical replay" hidden>
+        <div class="replay-hud-heading">
+          <span class="eyebrow">HISTORICAL REPLAY</span>
+          <span id="replayMode" class="hud-chip mode replay-live">LIVE</span>
+        </div>
+        <p id="replayCaption" class="replay-caption">Recorded events only · not a simulation</p>
+        <div class="replay-controls">
+          <button id="replayPlay" type="button">Play</button>
+          <button id="replayPrev" type="button" aria-label="Previous recorded event">Prev</button>
+          <label class="sr-only" for="replayScrub">Scrub recorded events</label>
+          <input id="replayScrub" type="range" min="0" max="0" value="0" step="1" disabled>
+          <button id="replayNext" type="button" aria-label="Next recorded event">Next</button>
+          <button id="replayLiveBtn" type="button">Live now</button>
+        </div>
+        <div class="replay-meta">
+          <span id="replayPosition">0 / 0</span>
+          <span id="replayEvent">—</span>
+        </div>
       </aside>
     </section>
     <section class="command-bar" id="commandBar" aria-label="Mission command bar">
