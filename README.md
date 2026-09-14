@@ -38,13 +38,13 @@ With only `OPENAI_API_KEY`, behavior matches the previous OpenAI-only wiring: th
 
 ## Safety defaults
 
-The runtime enforces mission-wide depth, agent, task, tool-call, runtime, and payment limits. Payments are simulated by default. Live mainnet settlement intentionally fails closed until a real wallet adapter is configured; private keys must remain outside the agent process. Transient `RATE_LIMIT` and `TIMEOUT` provider errors are retried with bounded exponential backoff (3 retries, 0.5s / 1s / 2s) against the same adapter. Classified `PROVIDER_OUTAGE` (or an unconfigured primary) may use the next model in the router fallback chain (OpenRouter when `OPENROUTER_API_KEY` is set; Ollama when `OLLAMA_MODEL` or `OLLAMA_BASE_URL` is set; vLLM when `VLLM_MODEL` or `VLLM_BASE_URL` is set; llama.cpp when `LLAMACPP_MODEL` or `LLAMACPP_BASE_URL` is set). Exhausted retries or a failed failover still fail closed with `{error, failure_class}`.
+The runtime enforces mission-wide depth, agent, task, tool-call, runtime, and payment limits. Payments go through `PaymentProvider` behind `WalletAdapter` and are simulated by default. Live settlement intentionally fails closed until an isolated wallet is configured; private keys must remain outside the agent process. This slice does not enable live spending. Transient `RATE_LIMIT` and `TIMEOUT` provider errors are retried with bounded exponential backoff (3 retries, 0.5s / 1s / 2s) against the same adapter. Classified `PROVIDER_OUTAGE` (or an unconfigured primary) may use the next model in the router fallback chain (OpenRouter when `OPENROUTER_API_KEY` is set; Ollama when `OLLAMA_MODEL` or `OLLAMA_BASE_URL` is set; vLLM when `VLLM_MODEL` or `VLLM_BASE_URL` is set; llama.cpp when `LLAMACPP_MODEL` or `LLAMACPP_BASE_URL` is set). Exhausted retries or a failed failover still fail closed with `{error, failure_class}`.
 
 Mission, agent, task, and event state is durable in SQLite. A graceful server shutdown suspends active execution without converting it into a user stop; the next configured runtime resumes it against the original mission deadline. An interrupted text-only task is retained as a stopped attempt and retried under a new task ID. External tools are not connected yet, so side-effect idempotency is not claimed.
 
 ## Next integration seams
 
 - Add concrete research, code, messaging, and HTTP tool adapters.
-- Implement an isolated EVM wallet service behind `WalletAdapter` with recipient/asset/amount policy checks.
+- Implement an isolated EVM wallet service behind `PaymentProvider` / `WalletAdapter` with recipient/asset/amount policy checks. Do not enable live spend from the agent process.
 
 See [ImplementationStatus.md](ImplementationStatus.md) for the recommended next slice.
