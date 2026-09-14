@@ -63,7 +63,7 @@ async def test_missing_config_fails_closed(tmp_path):
     runner = _runner(tmp_path, opted_in=False)
     result = await runner.run([{"kind": "pytest", "paths": ["tests/test_x.py"]}])
     assert result["ok"] is False
-    assert "not configured" in result["rationale"]
+    assert "SWARM_EVIDENCE is not enabled" in result["rationale"]
     assert result["runs"][0]["failure_class"] == FailureClass.VERIFICATION_FAILURE
     assert runner.run_tests.calls == []
 
