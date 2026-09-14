@@ -169,7 +169,7 @@ Nothing in the current test suite is known red. UI preview is synthetic by desig
 
 ## NEXT PRIORITY
 
-**This slice:** Observe-only MissionBudget token-cost accounting seed (`app/budget.py`). Records estimated token usage per mission/provider call; surfaces totals on `budget.recorded`, `budget.summary`, and `result.token_budget`; estimates USD only from `SWARM_TOKEN_PRICES` or local $0; fail-closed on missing meters only if `SWARM_REQUIRE_TOKEN_METERS`. Not ResourceScheduler. Did not rewrite OrganizationDesigner, ResourceScheduler, browser/Azure, React/Pixi, LangGraph, or provider adapters.
+**This slice:** Observe-only MissionBudget token-cost accounting seed (`app/budget.py`). Records estimated token usage per mission/provider call; surfaces totals on `budget.recorded`, `budget.summary`, and `result.token_budget`; estimates USD only from `SWARM_TOKEN_PRICES` or local $0; fail-closed on missing meters only if `SWARM_REQUIRE_TOKEN_METERS`. Not ResourceScheduler. Did not rewrite OrganizationDesigner, ResourceScheduler, browser/Azure, React/Pixi, LangGraph, or provider adapters. Tests: `python3 -m pytest tests/ -q` → **484 passed**.
 
 **Landed on main (keep):** Fireworks (`#34`); Groq (`#33`); Together (`#32`); DeepSeek (`#30`); Cohere (`#31`); Gemini (`#28`); Mistral (`#29`); ModelRouter historical success + cost-aware ranking (`#26`); Anthropic Messages (`#27`); PolicyGate (`#23`); durable worker leases / idempotency (`#22`); versioned SQLite migrations (`#24`); xAI (`#25`); typed `EventType` catalog (`#20`); ToolProvider / MCP seam (`#21`); mission answers path (`#19`); `PaymentProvider` behind `WalletAdapter` (`#18`); llama.cpp (`#17`); vLLM (`#16`); verifier seed (`#15`).
 
