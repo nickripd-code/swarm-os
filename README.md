@@ -12,7 +12,7 @@ py -m venv .venv
 .\.venv\Scripts\python -m uvicorn app.main:app --reload
 ```
 
-Open http://127.0.0.1:8000. The mission controller talks to models through the provider-independent contract in `app/providers.py`. There is no demo substitute: if no provider is configured or every configured provider fails, the mission fails closed.
+Open http://127.0.0.1:8000. The mission controller talks to models through the provider-independent contract in `app/providers.py`. Controller and workers request capabilities (reasoning, coding, tools, context, cost, privacy); `ModelRouter` selects from registered providers. There is no demo substitute: if no provider is configured or every configured provider fails, the mission fails closed.
 
 ## Model providers
 
@@ -28,17 +28,17 @@ Set keys in the environment only. Never commit them, log them, or return them ov
 | `OPENROUTER_BASE_URL` | Optional Chat Completions base URL (default `https://openrouter.ai/api/v1`). |
 | `OPENROUTER_SITE_URL` / `OPENROUTER_TITLE` | Optional OpenRouter attribution headers. |
 
-With only `OPENAI_API_KEY`, behavior matches the previous OpenAI-only wiring. `RATE_LIMIT` and `TIMEOUT` still retry on the same adapter; they do not fail over. Auth, policy, and invalid-output errors also stay on the provider that raised them. If both providers are down or neither is configured, the result is `{error, failure_class}` — never `FallbackController`.
+With only `OPENAI_API_KEY`, behavior matches the previous OpenAI-only wiring: the router has a one-model catalog. `RATE_LIMIT` and `TIMEOUT` still retry on the same adapter; they do not fail over. Auth, policy, and invalid-output errors also stay on the provider that raised them. If both providers are down or neither is configured, the result is `{error, failure_class}` — never `FallbackController`.
 
 ## Safety defaults
 
-The runtime enforces mission-wide depth, agent, task, tool-call, runtime, and payment limits. Payments are simulated by default. Live mainnet settlement intentionally fails closed until a real wallet adapter is configured; private keys must remain outside the agent process. Transient `RATE_LIMIT` and `TIMEOUT` provider errors are retried with bounded exponential backoff (3 retries, 0.5s / 1s / 2s) against the same adapter. Classified `PROVIDER_OUTAGE` (or an unconfigured primary) may use OpenRouter when `OPENROUTER_API_KEY` is set. Exhausted retries or a failed failover still fail closed with `{error, failure_class}`.
+The runtime enforces mission-wide depth, agent, task, tool-call, runtime, and payment limits. Payments are simulated by default. Live mainnet settlement intentionally fails closed until a real wallet adapter is configured; private keys must remain outside the agent process. Transient `RATE_LIMIT` and `TIMEOUT` provider errors are retried with bounded exponential backoff (3 retries, 0.5s / 1s / 2s) against the same adapter. Classified `PROVIDER_OUTAGE` (or an unconfigured primary) may use the next model in the router fallback chain (OpenRouter when `OPENROUTER_API_KEY` is set). Exhausted retries or a failed failover still fail closed with `{error, failure_class}`.
 
 Mission, agent, task, and event state is durable in SQLite. A graceful server shutdown suspends active execution without converting it into a user stop; the next configured runtime resumes it against the original mission deadline. An interrupted text-only task is retained as a stopped attempt and retried under a new task ID. External tools are not connected yet, so side-effect idempotency is not claimed.
 
 ## Next integration seams
 
-- Add a fuller provider registry and capability-based routing beyond outage failover.
+- Add a local ModelProvider (Ollama / vLLM) so the router fallback chain can leave the cloud.
 - Add concrete research, code, messaging, and HTTP tool adapters.
 - Implement an isolated EVM wallet service behind `WalletAdapter` with recipient/asset/amount policy checks.
 
