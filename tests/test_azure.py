@@ -123,6 +123,9 @@ def no_extra_providers(monkeypatch):
     monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
     monkeypatch.delenv("CEREBRAS_MODEL", raising=False)
     monkeypatch.delenv("CEREBRAS_BASE_URL", raising=False)
+    monkeypatch.delenv("SAMBANOVA_API_KEY", raising=False)
+    monkeypatch.delenv("SAMBANOVA_MODEL", raising=False)
+    monkeypatch.delenv("SAMBANOVA_BASE_URL", raising=False)
 
 
 @pytest.mark.asyncio

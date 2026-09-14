@@ -6,7 +6,7 @@ from .credentials import (
     get_deepseek_api_key,
     get_fireworks_api_key, get_gemini_api_key, get_groq_api_key, get_huggingface_api_key,
     get_mistral_api_key, get_openrouter_api_key, get_perplexity_api_key,
-    get_together_api_key, get_xai_api_key,
+    get_sambanova_api_key, get_together_api_key, get_xai_api_key,
 )
 from .llm import (
     DEFAULT_ANTHROPIC_BASE_URL, DEFAULT_ANTHROPIC_MODEL, DEFAULT_AZURE_OPENAI_API_VERSION,
@@ -19,6 +19,7 @@ from .llm import (
     DEFAULT_MISTRAL_BASE_URL, DEFAULT_MISTRAL_MODEL, DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_HUGGINGFACE_BASE_URL, DEFAULT_HUGGINGFACE_MODEL,
     DEFAULT_OPENROUTER_MODEL, DEFAULT_PERPLEXITY_BASE_URL, DEFAULT_PERPLEXITY_MODEL,
+    DEFAULT_SAMBANOVA_BASE_URL, DEFAULT_SAMBANOVA_MODEL,
     DEFAULT_REASONING, DEFAULT_TOGETHER_BASE_URL,
     DEFAULT_TOGETHER_MODEL, DEFAULT_VLLM_BASE_URL,
     DEFAULT_XAI_MODEL, DEFAULT_XAI_BASE_URL,
@@ -143,6 +144,14 @@ def cerebras_status() -> dict:
             "model": os.getenv("CEREBRAS_MODEL", DEFAULT_CEREBRAS_MODEL),
             "base_url": os.getenv("CEREBRAS_BASE_URL", DEFAULT_CEREBRAS_BASE_URL),
             "provider": "cerebras", "fallback": False}
+
+
+def sambanova_status() -> dict:
+    return {"configured": bool(get_sambanova_api_key()),
+            "model": os.getenv("SAMBANOVA_MODEL", DEFAULT_SAMBANOVA_MODEL),
+            "base_url": os.getenv("SAMBANOVA_BASE_URL", DEFAULT_SAMBANOVA_BASE_URL),
+            "provider": "sambanova", "fallback": False}
+
 
 
 def ollama_status() -> dict:

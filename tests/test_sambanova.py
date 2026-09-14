@@ -3,9 +3,9 @@ import json
 import httpx
 import pytest
 
-from app.health import huggingface_status
+from app.health import sambanova_status
 from app.llm import (
-    HuggingFaceModelProvider, OllamaModelProvider, OpenAIResponsesModelProvider,
+    OllamaModelProvider, OpenAIResponsesModelProvider, SambaNovaModelProvider,
     build_controller, build_model_provider, build_router,
 )
 from app.models import FailureClass
@@ -13,7 +13,7 @@ from app.providers import FailoverModelProvider, ModelProvider, ModelRequest, Pr
 from app.router import CapabilityRequest, ModelRouter
 
 
-DEFAULT_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
+DEFAULT_MODEL = "Meta-Llama-3.3-70B-Instruct"
 REQUEST = ModelRequest(
     model=DEFAULT_MODEL,
     instructions="Return JSON",
@@ -27,7 +27,7 @@ REQUEST = ModelRequest(
 
 def completed_chat(output=None, model=DEFAULT_MODEL):
     return httpx.Response(200, json={
-        "id": "huggingface_contract",
+        "id": "sambanova_contract",
         "model": model,
         "choices": [{"finish_reason": "stop", "message": {
             "role": "assistant",
@@ -41,7 +41,7 @@ def completed_chat(output=None, model=DEFAULT_MODEL):
     })
 
 
-def huggingface_transport(handler):
+def sambanova_transport(handler):
     return httpx.MockTransport(handler)
 
 
@@ -97,16 +97,16 @@ def no_extra_providers(monkeypatch):
     monkeypatch.delenv("HUGGINGFACE_API_KEY", raising=False)
     monkeypatch.delenv("HUGGINGFACE_MODEL", raising=False)
     monkeypatch.delenv("HUGGINGFACE_BASE_URL", raising=False)
-    monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
-    monkeypatch.delenv("CEREBRAS_MODEL", raising=False)
-    monkeypatch.delenv("CEREBRAS_BASE_URL", raising=False)
     monkeypatch.delenv("SAMBANOVA_API_KEY", raising=False)
     monkeypatch.delenv("SAMBANOVA_MODEL", raising=False)
     monkeypatch.delenv("SAMBANOVA_BASE_URL", raising=False)
+    monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
+    monkeypatch.delenv("CEREBRAS_MODEL", raising=False)
+    monkeypatch.delenv("CEREBRAS_BASE_URL", raising=False)
 
 
 @pytest.mark.asyncio
-async def test_huggingface_adapter_implements_provider_contract_and_tracks_usage(no_extra_providers):
+async def test_sambanova_adapter_implements_provider_contract_and_tracks_usage(no_extra_providers):
     captured = {}
 
     def handler(request):
@@ -116,36 +116,36 @@ async def test_huggingface_adapter_implements_provider_contract_and_tracks_usage
         captured["authorization"] = request.headers["Authorization"]
         return completed_chat()
 
-    provider = HuggingFaceModelProvider(api_key="huggingface-secret", transport=huggingface_transport(handler))
+    provider = SambaNovaModelProvider(api_key="sambanova-secret", transport=sambanova_transport(handler))
     assert isinstance(provider, ModelProvider)
     models = await provider.list_models()
-    assert models[0].provider == "huggingface"
+    assert models[0].provider == "sambanova"
     assert models[0].model == DEFAULT_MODEL
     assert models[0].local is False
     assert models[0].capabilities.structured_outputs is True
 
     response = await provider.complete(REQUEST)
     assert response.output == {"answer": "ok"}
-    assert response.provider == "huggingface"
+    assert response.provider == "sambanova"
     assert response.usage.model_dump() == {
         "input_tokens": 11,
         "output_tokens": 7,
         "reasoning_tokens": 3,
     }
-    assert captured["url"] == "https://router.huggingface.co/v1/chat/completions"
-    assert captured["authorization"] == "Bearer huggingface-secret"
+    assert captured["url"] == "https://api.sambanova.ai/v1/chat/completions"
+    assert captured["authorization"] == "Bearer sambanova-secret"
     assert captured["body"]["model"] == DEFAULT_MODEL
     assert captured["body"]["response_format"]["type"] == "json_schema"
     assert "json_schema" in captured["body"]["response_format"]
     assert "provider" not in captured["body"]
-    assert "huggingface-secret" not in json.dumps(response.model_dump())
+    assert "sambanova-secret" not in json.dumps(response.model_dump())
     assert (await provider.health()).status == "healthy"
     assert provider.estimate_cost(REQUEST).known is False
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("response,expected,failure_class", [
-    (httpx.Response(401, json={"error": {"message": "huggingface-secret"}}),
+    (httpx.Response(401, json={"error": {"message": "sambanova-secret"}}),
      "rejected the API key", FailureClass.AUTHORIZATION_REQUIRED),
     (httpx.Response(402, json={"error": {}}), "credits are exhausted", FailureClass.RESOURCE_EXHAUSTED),
     (httpx.Response(429, json={"error": {}}), "quota or rate limit", FailureClass.RATE_LIMIT),
@@ -159,36 +159,36 @@ async def test_huggingface_adapter_implements_provider_contract_and_tracks_usage
     (httpx.Response(200, json={"choices": [{"finish_reason": "content_filter", "message": {"content": ""}}]}),
      "declined", FailureClass.POLICY_REFUSAL),
 ])
-async def test_huggingface_errors_are_classified_and_do_not_leak(
+async def test_sambanova_errors_are_classified_and_do_not_leak(
         no_extra_providers, response, expected, failure_class):
-    provider = HuggingFaceModelProvider(
-        api_key="huggingface-secret", transport=huggingface_transport(lambda _: response))
+    provider = SambaNovaModelProvider(
+        api_key="sambanova-secret", transport=sambanova_transport(lambda _: response))
     with pytest.raises(ProviderError, match=expected) as error:
         await provider.complete(REQUEST)
-    assert "huggingface-secret" not in str(error.value)
+    assert "sambanova-secret" not in str(error.value)
     assert error.value.failure_class == failure_class
 
 
 @pytest.mark.asyncio
-async def test_huggingface_timeout_and_outage_are_classified(no_extra_providers):
-    timeout_provider = HuggingFaceModelProvider(
-        api_key="huggingface-secret",
-        transport=huggingface_transport(lambda _: (_ for _ in ()).throw(httpx.ReadTimeout("timed out"))))
+async def test_sambanova_timeout_and_outage_are_classified(no_extra_providers):
+    timeout_provider = SambaNovaModelProvider(
+        api_key="sambanova-secret",
+        transport=sambanova_transport(lambda _: (_ for _ in ()).throw(httpx.ReadTimeout("timed out"))))
     with pytest.raises(ProviderError, match="timed out") as timeout_error:
         await timeout_provider.complete(REQUEST)
     assert timeout_error.value.failure_class == FailureClass.TIMEOUT
 
-    outage_provider = HuggingFaceModelProvider(
-        api_key="huggingface-secret",
-        transport=huggingface_transport(lambda _: (_ for _ in ()).throw(httpx.ConnectError("offline"))))
-    with pytest.raises(ProviderError, match="Could not reach Hugging Face") as outage_error:
+    outage_provider = SambaNovaModelProvider(
+        api_key="sambanova-secret",
+        transport=sambanova_transport(lambda _: (_ for _ in ()).throw(httpx.ConnectError("offline"))))
+    with pytest.raises(ProviderError, match="Could not reach SambaNova") as outage_error:
         await outage_provider.complete(REQUEST)
     assert outage_error.value.failure_class == FailureClass.PROVIDER_OUTAGE
 
 
 @pytest.mark.asyncio
 async def test_health_unconfigured_when_key_missing(no_extra_providers):
-    provider = HuggingFaceModelProvider()
+    provider = SambaNovaModelProvider()
     assert provider.configured() is False
     health = await provider.health()
     assert health.status == "unconfigured"
@@ -198,11 +198,11 @@ async def test_health_unconfigured_when_key_missing(no_extra_providers):
 
 
 @pytest.mark.asyncio
-async def test_huggingface_model_env_does_not_opt_in(monkeypatch, no_extra_providers):
-    monkeypatch.setenv("HUGGINGFACE_MODEL", "Qwen/Qwen2.5-7B-Instruct")
-    provider = HuggingFaceModelProvider()
+async def test_sambanova_model_env_does_not_opt_in(monkeypatch, no_extra_providers):
+    monkeypatch.setenv("SAMBANOVA_MODEL", "Llama-4-Maverick-17B-128E-Instruct")
+    provider = SambaNovaModelProvider()
     assert provider.configured() is False
-    assert provider.model == "Qwen/Qwen2.5-7B-Instruct"
+    assert provider.model == "Llama-4-Maverick-17B-128E-Instruct"
     health = await provider.health()
     assert health.status == "unconfigured"
     with pytest.raises(ProviderError, match="not configured") as error:
@@ -216,37 +216,37 @@ async def test_custom_base_url_is_used(no_extra_providers):
 
     def handler(request):
         captured["url"] = str(request.url)
-        return completed_chat(model="Qwen/Qwen2.5-7B-Instruct")
+        return completed_chat(model="Llama-4-Maverick-17B-128E-Instruct")
 
-    provider = HuggingFaceModelProvider(
-        model="Qwen/Qwen2.5-7B-Instruct",
-        api_key="huggingface-secret",
-        base_url="https://huggingface.internal/v1",
-        transport=huggingface_transport(handler),
+    provider = SambaNovaModelProvider(
+        model="Llama-4-Maverick-17B-128E-Instruct",
+        api_key="sambanova-secret",
+        base_url="https://sambanova.internal/v1",
+        transport=sambanova_transport(handler),
     )
-    await provider.complete(REQUEST.model_copy(update={"model": "Qwen/Qwen2.5-7B-Instruct"}))
-    assert captured["url"] == "https://huggingface.internal/v1/chat/completions"
+    await provider.complete(REQUEST.model_copy(update={"model": "Llama-4-Maverick-17B-128E-Instruct"}))
+    assert captured["url"] == "https://sambanova.internal/v1/chat/completions"
 
 
-def test_huggingface_health_status_is_truthful_and_does_not_expose_key(monkeypatch, no_extra_providers):
-    status = huggingface_status()
+def test_sambanova_health_status_is_truthful_and_does_not_expose_key(monkeypatch, no_extra_providers):
+    status = sambanova_status()
     assert status == {
         "configured": False,
         "model": DEFAULT_MODEL,
-        "base_url": "https://router.huggingface.co/v1",
-        "provider": "huggingface",
+        "base_url": "https://api.sambanova.ai/v1",
+        "provider": "sambanova",
         "fallback": False,
     }
-    monkeypatch.setenv("HUGGINGFACE_API_KEY", "huggingface-secret")
-    monkeypatch.setenv("HUGGINGFACE_MODEL", "Qwen/Qwen2.5-7B-Instruct")
-    configured = huggingface_status()
+    monkeypatch.setenv("SAMBANOVA_API_KEY", "sambanova-secret")
+    monkeypatch.setenv("SAMBANOVA_MODEL", "Llama-4-Maverick-17B-128E-Instruct")
+    configured = sambanova_status()
     assert configured["configured"] is True
-    assert configured["model"] == "Qwen/Qwen2.5-7B-Instruct"
+    assert configured["model"] == "Llama-4-Maverick-17B-128E-Instruct"
     assert configured["fallback"] is False
-    assert "huggingface-secret" not in json.dumps(configured)
+    assert "sambanova-secret" not in json.dumps(configured)
 
 
-def test_build_model_provider_openai_only_ignores_unconfigured_huggingface(monkeypatch, no_extra_providers):
+def test_build_model_provider_openai_only_ignores_unconfigured_sambanova(monkeypatch, no_extra_providers):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     provider = build_model_provider()
     assert isinstance(provider, OpenAIResponsesModelProvider)
@@ -255,18 +255,18 @@ def test_build_model_provider_openai_only_ignores_unconfigured_huggingface(monke
     assert [item.provider_id for item in router.providers] == ["openai"]
 
 
-def test_build_router_registers_huggingface_when_key_set(monkeypatch, no_extra_providers):
+def test_build_router_registers_sambanova_when_key_set(monkeypatch, no_extra_providers):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("HUGGINGFACE_API_KEY", "huggingface-test")
+    monkeypatch.setenv("SAMBANOVA_API_KEY", "sambanova-test")
     stacked = build_model_provider()
     assert isinstance(stacked, FailoverModelProvider)
     assert stacked.primary.provider_id == "openai"
-    assert stacked.secondary.provider_id == "huggingface"
+    assert stacked.secondary.provider_id == "sambanova"
     router = build_router()
-    assert [item.provider_id for item in router.providers] == ["openai", "huggingface"]
+    assert [item.provider_id for item in router.providers] == ["openai", "sambanova"]
 
 
-def test_build_router_cloud_plus_huggingface_and_ollama(monkeypatch, no_extra_providers):
+def test_build_router_cloud_plus_sambanova_and_ollama(monkeypatch, no_extra_providers):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-test")
     monkeypatch.setenv("XAI_API_KEY", "xai-test")
@@ -284,6 +284,8 @@ def test_build_router_cloud_plus_huggingface_and_ollama(monkeypatch, no_extra_pr
     monkeypatch.setenv("PERPLEXITY_API_KEY", "perplexity-test")
     monkeypatch.setenv("BEDROCK_API_KEY", "bedrock-test")
     monkeypatch.setenv("HUGGINGFACE_API_KEY", "huggingface-test")
+    monkeypatch.setenv("CEREBRAS_API_KEY", "cerebras-test")
+    monkeypatch.setenv("SAMBANOVA_API_KEY", "sambanova-test")
     monkeypatch.setenv("OLLAMA_MODEL", "llama3.2")
     stacked = build_model_provider()
     assert isinstance(stacked, FailoverModelProvider)
@@ -292,83 +294,85 @@ def test_build_router_cloud_plus_huggingface_and_ollama(monkeypatch, no_extra_pr
     router = build_router()
     assert [item.provider_id for item in router.providers] == [
         "openai", "openrouter", "xai", "anthropic", "mistral", "gemini", "cohere", "deepseek",
-        "together", "groq", "fireworks", "azure", "perplexity", "bedrock", "huggingface", "ollama",
+        "together", "groq", "fireworks", "azure", "perplexity", "bedrock", "huggingface",
+        "cerebras", "sambanova", "ollama",
     ]
     controller = build_controller()
     assert [item.provider_id for item in controller.router.providers] == [
         "openai", "openrouter", "xai", "anthropic", "mistral", "gemini", "cohere", "deepseek",
-        "together", "groq", "fireworks", "azure", "perplexity", "bedrock", "huggingface", "ollama",
+        "together", "groq", "fireworks", "azure", "perplexity", "bedrock", "huggingface",
+        "cerebras", "sambanova", "ollama",
     ]
 
 
-def test_build_model_provider_huggingface_only(monkeypatch, no_extra_providers):
-    monkeypatch.setenv("HUGGINGFACE_API_KEY", "huggingface-test")
+def test_build_model_provider_sambanova_only(monkeypatch, no_extra_providers):
+    monkeypatch.setenv("SAMBANOVA_API_KEY", "sambanova-test")
     monkeypatch.setattr("app.llm.get_api_key", lambda: None)
     primary = OpenAIResponsesModelProvider(api_key="unused")
     monkeypatch.setattr(primary, "configured", lambda: False)
     provider = build_model_provider(primary=primary)
-    assert isinstance(provider, HuggingFaceModelProvider)
+    assert isinstance(provider, SambaNovaModelProvider)
     router = build_router(model_provider=provider)
-    assert [item.provider_id for item in router.providers] == ["huggingface"]
+    assert [item.provider_id for item in router.providers] == ["sambanova"]
 
 
-def test_openai_plus_openrouter_still_failover_when_huggingface_set(monkeypatch, no_extra_providers):
+def test_openai_plus_openrouter_still_failover_when_sambanova_set(monkeypatch, no_extra_providers):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-test")
-    monkeypatch.setenv("HUGGINGFACE_API_KEY", "huggingface-test")
+    monkeypatch.setenv("SAMBANOVA_API_KEY", "sambanova-test")
     stacked = build_model_provider()
     assert isinstance(stacked, FailoverModelProvider)
     assert stacked.primary.provider_id == "openai"
     assert stacked.secondary.provider_id == "openrouter"
     router = build_router()
-    assert [item.provider_id for item in router.providers] == ["openai", "openrouter", "huggingface"]
+    assert [item.provider_id for item in router.providers] == ["openai", "openrouter", "sambanova"]
 
 
 @pytest.mark.asyncio
-async def test_router_outage_walks_to_huggingface(no_extra_providers):
+async def test_router_outage_walks_to_sambanova(no_extra_providers):
     from tests.test_router import openai_like, openrouter_like
 
     def handler(_request):
-        return completed_chat(output={"answer": "from huggingface"})
+        return completed_chat(output={"answer": "from sambanova"})
 
     openai = openai_like(error=ProviderError("Could not reach OpenAI", FailureClass.PROVIDER_OUTAGE))
     openrouter = openrouter_like(
         error=ProviderError("Could not reach OpenRouter", FailureClass.PROVIDER_OUTAGE),
     )
-    huggingface = HuggingFaceModelProvider(
-        api_key="huggingface-secret", transport=huggingface_transport(handler))
-    router = ModelRouter([openai, openrouter, huggingface])
+    sambanova = SambaNovaModelProvider(
+        api_key="sambanova-secret", transport=sambanova_transport(handler))
+    router = ModelRouter([openai, openrouter, sambanova])
     response = await router.complete(CapabilityRequest(reasoning="high"), REQUEST)
     assert openai.calls == 1
     assert openrouter.calls == 1
-    assert response.provider == "huggingface"
-    assert response.output == {"answer": "from huggingface"}
+    assert response.provider == "sambanova"
+    assert response.output == {"answer": "from sambanova"}
     assert response.failover_from == "openai"
     assert response.failover_reason == "PROVIDER_OUTAGE"
 
 
 @pytest.mark.asyncio
-async def test_local_only_does_not_select_huggingface(no_extra_providers):
+async def test_local_only_does_not_select_sambanova(no_extra_providers):
     from tests.test_router import openai_like, openrouter_like
 
-    huggingface = HuggingFaceModelProvider(
-        api_key="huggingface-secret", transport=huggingface_transport(lambda _: completed_chat()))
-    ollama = OllamaModelProvider(model="llama3.2", transport=huggingface_transport(lambda _: completed_chat()))
-    router = ModelRouter([openai_like(), openrouter_like(), huggingface, ollama])
+    sambanova = SambaNovaModelProvider(
+        api_key="sambanova-secret", transport=sambanova_transport(lambda _: completed_chat()))
+    ollama = OllamaModelProvider(model="llama3.2", transport=sambanova_transport(lambda _: completed_chat()))
+    router = ModelRouter([openai_like(), openrouter_like(), sambanova, ollama])
     decision = await router.select(CapabilityRequest(privacy="local_only"))
     assert decision.selected.provider_id == "ollama"
-    assert all(candidate.provider_id != "huggingface" for candidate in decision.chain)
+    assert all(candidate.provider_id != "sambanova" for candidate in decision.chain)
 
 
 @pytest.mark.asyncio
-async def test_unconfigured_huggingface_is_skipped_and_cloud_still_serves(no_extra_providers):
+async def test_unconfigured_sambanova_is_skipped_and_cloud_still_serves(no_extra_providers):
     from tests.test_router import openai_like
 
-    huggingface = HuggingFaceModelProvider()
+    sambanova = SambaNovaModelProvider()
     openai = openai_like(output={"answer": "cloud"})
-    router = ModelRouter([openai, huggingface])
+    router = ModelRouter([openai, sambanova])
     response = await router.complete(CapabilityRequest(reasoning="high"), REQUEST)
     assert response.provider == "openai"
     assert openai.calls == 1
     with pytest.raises(ProviderError, match="not configured"):
-        await huggingface.complete(REQUEST)
+        await sambanova.complete(REQUEST)
