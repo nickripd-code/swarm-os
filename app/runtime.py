@@ -57,6 +57,8 @@ class SwarmRuntime:
         self.lock = asyncio.Lock()
         self.max_retries = max_retries
         self.retry_base_seconds = retry_base_seconds
+        self._tool_calls: dict[UUID, int] = {}
+        self.external_tools: list[str] = []
 
     async def emit(self, mission_id: UUID, event_type: str, payload: dict[str, Any], actor_id: UUID | None = None):
         event = self.store.append(MissionEvent(mission_id=mission_id, event_type=event_type, actor_id=actor_id, payload=payload))
@@ -138,6 +140,78 @@ class SwarmRuntime:
     def remaining_runtime(self, mission: Mission) -> float:
         started = self.started_at.get(mission.id, mission.updated_at)
         return mission.limits.max_runtime_seconds - (utcnow() - started).total_seconds()
+
+    def available_tools(self, mission: Mission | None = None) -> list[str]:
+        _ = mission
+        return list(self.external_tools)
+
+    def tool_calls_used(self, mission_id: UUID) -> int:
+        if mission_id not in self._tool_calls:
+            self._tool_calls[mission_id] = sum(
+                1 for event in self.store.events(mission_id) if event.event_type == "tool.started"
+            )
+        return self._tool_calls[mission_id]
+
+    def consume_tool_call(self, mission: Mission) -> int:
+        """Charge one tool-call against the mission budget. Fail closed when exhausted."""
+        used = self.tool_calls_used(mission.id)
+        limit = mission.limits.max_tool_calls
+        if used >= limit:
+            raise PolicyError("Tool call limit reached", FailureClass.RESOURCE_EXHAUSTED)
+        used += 1
+        self._tool_calls[mission.id] = used
+        return used
+
+    async def invoke_tool(self, mission: Mission, name: str, actor_id: UUID | None = None) -> int:
+        """Enforce max_tool_calls before any tool use. No ToolProvider exists yet."""
+        used = self.tool_calls_used(mission.id)
+        limit = mission.limits.max_tool_calls
+        available = self.available_tools(mission)
+        if used >= limit:
+            await self.emit(mission.id, "tool.failed", {
+                "tool": name, "failure_class": str(FailureClass.RESOURCE_EXHAUSTED),
+                "error": "Tool call limit reached", "used": used, "max": limit,
+            }, actor_id)
+            raise PolicyError("Tool call limit reached", FailureClass.RESOURCE_EXHAUSTED)
+        if name not in available:
+            error = "No tool provider is connected" if not available else f"Unknown tool: {name}"
+            await self.emit(mission.id, "tool.failed", {
+                "tool": name, "failure_class": str(FailureClass.TOOL_MISSING),
+                "error": error, "used": used, "max": limit,
+            }, actor_id)
+            raise PolicyError(error, FailureClass.TOOL_MISSING)
+        charged = self.consume_tool_call(mission)
+        await self.emit(mission.id, "tool.started", {
+            "tool": name, "used": charged, "max": limit,
+        }, actor_id)
+        return charged
+
+    def _in_flight_tasks(self, mission: Mission) -> list[Task]:
+        return [task for task in self.tasks[mission.id]
+                if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}]
+
+    async def _persist_status(self, mission: Mission, status: MissionStatus):
+        mission.status, mission.updated_at = status, utcnow()
+        self.store.save_mission(mission)
+
+    async def _assign_unassigned_tasks(self, mission: Mission) -> list[Task]:
+        assigned = {task.agent_id for task in self.tasks[mission.id]
+                    if task.status not in {TaskStatus.STOPPED, TaskStatus.FAILED}}
+        created: list[Task] = []
+        for agent in list(self.agents[mission.id]):
+            if agent.parent_id is None or agent.id in assigned:
+                continue
+            self.check_stopped(mission.id)
+            if len(self.tasks[mission.id]) >= mission.limits.max_tasks:
+                raise PolicyError("Task limit reached", FailureClass.RESOURCE_EXHAUSTED)
+            task = Task(mission_id=mission.id, agent_id=agent.id, title=agent.role.replace("_", " ").title(),
+                        description=agent.purpose, status=TaskStatus.PENDING)
+            self.tasks[mission.id].append(task)
+            self.store.save_task(task)
+            await self.emit(mission.id, "task.pending", task.model_dump(mode="json"), agent.id)
+            assigned.add(agent.id)
+            created.append(task)
+        return created
 
     async def _sleep(self, seconds: float):
         if seconds > 0:
@@ -257,9 +331,9 @@ class SwarmRuntime:
                         await self.emit(mission.id, "agent.message", {
                             "from_id": str(root.id), "to_id": str(child.id), "kind": "assignment",
                             "text": decision["purpose"]}, root.id)
-                        await self._run_tasks(mission)
+                        await self._assign_unassigned_tasks(mission)
                     elif action == "finish":
-                        if any(t.status in {TaskStatus.PENDING, TaskStatus.RUNNING} for t in self.tasks[mission.id]):
+                        if self._in_flight_tasks(mission):
                             raise PolicyError("Cannot finish while tasks are active", FailureClass.INVALID_OUTPUT)
                         if not decision.get("summary"):
                             raise PolicyError("Model omitted the final deliverable", FailureClass.INVALID_OUTPUT)
@@ -272,8 +346,23 @@ class SwarmRuntime:
                         mission.result = {"reason": decision.get("reason") or "Required capability or information is unavailable"}
                         break
                     elif action == "wait":
-                        raise PolicyError("Controller requested a wait with no work in flight",
-                                          FailureClass.INVALID_OUTPUT)
+                        await self._assign_unassigned_tasks(mission)
+                        inflight = self._in_flight_tasks(mission)
+                        if not inflight:
+                            raise PolicyError("Controller requested a wait with no work in flight",
+                                              FailureClass.INVALID_OUTPUT)
+                        await self._persist_status(mission, MissionStatus.WAITING)
+                        await self.emit(mission.id, "mission.waiting", {
+                            "reason": decision.get("reason") or "Waiting for in-flight work",
+                            "pending_tasks": [str(task.id) for task in inflight],
+                        }, root.id)
+                        await self._run_tasks(mission)
+                        if mission.id in self.stopped or mission.id in self.suspending:
+                            raise asyncio.CancelledError()
+                        await self._persist_status(mission, MissionStatus.RUNNING)
+                        await self.emit(mission.id, "mission.running", {
+                            "reason": "In-flight work finished; controller will continue",
+                        }, root.id)
                     else:
                         raise PolicyError("Model returned an unsupported controller action",
                                           FailureClass.INVALID_OUTPUT)
@@ -321,11 +410,14 @@ class SwarmRuntime:
                 await self.emit(mission.id, "mission." + mission.status, mission.result or {})
 
     def _state(self, mission: Mission) -> dict[str, Any]:
+        used = self.tool_calls_used(mission.id)
         return {"goal": mission.goal, "status": mission.status,
                 "agents": [a.model_dump(mode="json") for a in self.agents[mission.id]],
                 "tasks": [t.model_dump(mode="json") for t in self.tasks[mission.id]],
                 "limits": mission.limits.model_dump(mode="json"),
-                "available_capabilities": ["reason", "write", "review"], "external_tools": []}
+                "tool_calls": {"used": used, "max": mission.limits.max_tool_calls},
+                "available_capabilities": ["reason", "write", "review"],
+                "external_tools": self.available_tools(mission)}
 
     async def _execute_task(self, mission: Mission, task: Task, agent: AgentSpec):
         self.check_stopped(mission.id)
@@ -349,6 +441,7 @@ class SwarmRuntime:
             "text": result["finding"][:500]}, agent.id)
 
     async def _run_tasks(self, mission: Mission):
+        await self._assign_unassigned_tasks(mission)
         by_id = {a.id: a for a in self.agents[mission.id]}
         for task in list(self.tasks[mission.id]):
             if task.status not in {TaskStatus.PENDING, TaskStatus.RUNNING}:
@@ -356,18 +449,6 @@ class SwarmRuntime:
             agent = by_id.get(task.agent_id)
             if agent is None:
                 raise PolicyError("Persisted task references an unknown agent", FailureClass.INVALID_OUTPUT)
-            await self._execute_task(mission, task, agent)
-        assigned = {t.agent_id for t in self.tasks[mission.id]
-                    if t.status not in {TaskStatus.STOPPED, TaskStatus.FAILED}}
-        for agent in list(self.agents[mission.id]):
-            if agent.parent_id is None or agent.id in assigned:
-                continue
-            self.check_stopped(mission.id)
-            if len(self.tasks[mission.id]) >= mission.limits.max_tasks:
-                raise PolicyError("Task limit reached", FailureClass.RESOURCE_EXHAUSTED)
-            task = Task(mission_id=mission.id, agent_id=agent.id, title=agent.role.replace("_", " ").title(),
-                        description=agent.purpose, status=TaskStatus.RUNNING)
-            self.tasks[mission.id].append(task)
             await self._execute_task(mission, task, agent)
 
     async def stop(self, mission_id: UUID):

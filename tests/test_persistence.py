@@ -196,6 +196,8 @@ async def test_stop_all_still_cancels_inflight_and_persists(tmp_path):
             self.entered = asyncio.Event()
 
         async def decide(self, state):
+            if any(task.get("status") in {"pending", "running"} for task in state.get("tasks", [])):
+                return {"action": "wait", "reason": "worker running"}
             return {"action": "spawn", "role": "analyst", "purpose": "Analyze", "capabilities": ["reason"]}
 
         async def work(self, state, agent):
@@ -225,6 +227,8 @@ async def test_graceful_suspend_keeps_mission_and_attempt_recoverable(tmp_path):
             self.cancelled = False
 
         async def decide(self, state):
+            if any(task.get("status") in {"pending", "running"} for task in state.get("tasks", [])):
+                return {"action": "wait", "reason": "worker running"}
             return {"action": "spawn", "role": "analyst", "purpose": "Analyze", "capabilities": ["reason"]}
 
         async def work(self, state, agent):
