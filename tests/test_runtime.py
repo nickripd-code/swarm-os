@@ -1,7 +1,7 @@
 import pytest
 import asyncio
 
-from app.models import Mission
+from app.models import Mission, FailureClass
 from app.runtime import SwarmRuntime, PolicyError
 from app.llm import FallbackController
 from app.llm import LLMProvider, ProviderError
@@ -48,7 +48,7 @@ async def test_payment_defaults_to_simulation_and_enforces_cap(tmp_path):
 
 class BrokenProvider(LLMProvider):
     async def decide(self, state):
-        raise ProviderError("OpenAI quota or rate limit reached")
+        raise ProviderError("OpenAI quota or rate limit reached", FailureClass.RATE_LIMIT)
 
 
 @pytest.mark.asyncio
@@ -58,8 +58,16 @@ async def test_failure_never_becomes_fake_success(tmp_path):
     mission = Mission(goal="Test provider failure")
     store.save_mission(mission)
     await runtime.run(mission)
-    assert store.get_mission(mission.id).status == "failed"
-    assert not any(e.event_type in {"controller.fallback", "mission.completed"} for e in store.events(mission.id))
+    saved = store.get_mission(mission.id)
+    assert saved.status == "failed"
+    assert saved.result["error"] == "OpenAI quota or rate limit reached"
+    assert saved.result["failure_class"] == "RATE_LIMIT"
+    events = store.events(mission.id)
+    assert not any(e.event_type in {"controller.fallback", "mission.completed"} for e in events)
+    failed = [e for e in events if e.event_type == "mission.failed"]
+    assert failed and failed[-1].payload["failure_class"] == "RATE_LIMIT"
+    llm_failed = [e for e in events if e.event_type == "llm.failed"]
+    assert llm_failed and llm_failed[-1].payload["failure_class"] == "RATE_LIMIT"
 
 
 class SlowProvider(LLMProvider):
@@ -108,4 +116,8 @@ async def test_runtime_deadline_cancels_worker(tmp_path):
     store.save_mission(mission)
     await runtime.run(mission)
     assert provider.cancelled
-    assert store.get_mission(mission.id).status == "failed"
+    saved = store.get_mission(mission.id)
+    assert saved.status == "failed"
+    assert saved.result["failure_class"] == "TIMEOUT"
+    assert any(e.event_type == "mission.failed" and e.payload.get("failure_class") == "TIMEOUT"
+               for e in store.events(mission.id))
