@@ -8,9 +8,9 @@ from .credentials import (
     get_together_api_key, get_xai_api_key,
 )
 from .llm import (
-    DEFAULT_ANTHROPIC_BASE_URL, DEFAULT_ANTHROPIC_MODEL, DEFAULT_COHERE_BASE_URL,
-    DEFAULT_COHERE_MODEL, DEFAULT_DEEPSEEK_BASE_URL, DEFAULT_DEEPSEEK_MODEL,
-    DEFAULT_FIREWORKS_BASE_URL, DEFAULT_FIREWORKS_MODEL,
+    DEFAULT_ANTHROPIC_BASE_URL, DEFAULT_ANTHROPIC_MODEL, DEFAULT_AZURE_OPENAI_API_VERSION,
+    DEFAULT_COHERE_BASE_URL, DEFAULT_COHERE_MODEL, DEFAULT_DEEPSEEK_BASE_URL,
+    DEFAULT_DEEPSEEK_MODEL, DEFAULT_FIREWORKS_BASE_URL, DEFAULT_FIREWORKS_MODEL,
     DEFAULT_GEMINI_BASE_URL, DEFAULT_GEMINI_MODEL, DEFAULT_GROQ_BASE_URL,
     DEFAULT_GROQ_MODEL, DEFAULT_LLAMACPP_BASE_URL, DEFAULT_MODEL,
     DEFAULT_MISTRAL_BASE_URL, DEFAULT_MISTRAL_MODEL, DEFAULT_OLLAMA_BASE_URL,
@@ -18,7 +18,7 @@ from .llm import (
     DEFAULT_TOGETHER_MODEL, DEFAULT_VLLM_BASE_URL,
     DEFAULT_XAI_MODEL, DEFAULT_XAI_BASE_URL,
     LlamaCppModelProvider, OllamaModelProvider, VllmModelProvider,
-    llamacpp_opted_in, ollama_opted_in, vllm_opted_in,
+    azure_openai_opted_in, llamacpp_opted_in, ollama_opted_in, vllm_opted_in,
 )
 
 
@@ -95,6 +95,17 @@ def fireworks_status() -> dict:
             "model": os.getenv("FIREWORKS_MODEL", DEFAULT_FIREWORKS_MODEL),
             "base_url": os.getenv("FIREWORKS_BASE_URL", DEFAULT_FIREWORKS_BASE_URL),
             "provider": "fireworks", "fallback": False}
+
+
+def azure_status() -> dict:
+    endpoint = (os.getenv("AZURE_OPENAI_ENDPOINT") or "").strip().rstrip("/") or None
+    deployment = (os.getenv("AZURE_OPENAI_DEPLOYMENT") or "").strip() or None
+    return {"configured": azure_openai_opted_in(),
+            "model": deployment,
+            "endpoint": endpoint,
+            "deployment": deployment,
+            "api_version": os.getenv("AZURE_OPENAI_API_VERSION", DEFAULT_AZURE_OPENAI_API_VERSION),
+            "provider": "azure", "fallback": False}
 
 
 def ollama_status() -> dict:
