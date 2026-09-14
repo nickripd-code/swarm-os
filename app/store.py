@@ -161,6 +161,20 @@ class Store:
             p = event.payload
             if event.event_type in {EventType.AGENT_SPAWNED, EventType.AGENT_UPDATED}:
                 agents[p["id"]] = {**agents.get(p["id"], {}), **p}
+            elif event.event_type == EventType.AGENT_REPARENTED:
+                key = p.get("id") or p.get("agent_id")
+                if key:
+                    update = {**agents.get(key, {}), "id": key}
+                    if "parent_id" in p:
+                        update["parent_id"] = p["parent_id"]
+                    if "depth" in p:
+                        update["depth"] = p["depth"]
+                    agents[key] = update
+            elif event.event_type == EventType.AGENT_RETIRED:
+                key = p.get("id") or p.get("agent_id")
+                if key:
+                    agents[key] = {**agents.get(key, {}), "id": key,
+                                   "status": p.get("status") or "stopped"}
             elif is_task_event(event.event_type):
                 tid = p.get("id") or p.get("task_id")
                 if tid:

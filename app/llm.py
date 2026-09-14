@@ -778,10 +778,11 @@ def response_format(name: str, properties: dict) -> dict:
 
 
 DECISION_FORMAT = response_format("mission_decision", {
-    "action": {"type": "string", "enum": ["spawn", "finish", "wait", "ask", "blocked", "use_tool"]},
+    "action": {"type": "string", "enum": ["spawn", "replace", "reparent", "retire", "finish", "wait", "ask", "blocked", "use_tool"]},
     "role": {"type": ["string", "null"]},
     "purpose": {"type": ["string", "null"]},
     "parent_id": {"type": ["string", "null"]},
+    "agent_id": {"type": ["string", "null"]},
     "capabilities": {"type": "array", "items": {"type": "string", "enum": ["reason", "write", "review"]}},
     "summary": {"type": ["string", "null"]},
     "reason": {"type": ["string", "null"]},
@@ -3442,6 +3443,10 @@ class OpenAIProvider(LLMProvider):
         return await self._request("""You coordinate a user's mission. Decide the next action from the supplied state.
 Spawn only useful specialists, with a concrete purpose; prefer a small team. Any existing agent can be
 the parent of a new specialist: provide its exact parent_id or null for the mission controller.
+Organization topology is mutable. You may replace a specialist (agent_id plus new role/purpose), reparent
+one (agent_id plus new parent_id, or null for the controller), or retire a leaf specialist (agent_id).
+Never retire, replace, or reparent the mission_controller. Retire fails if work is in flight or live
+descendants remain — reparent children first. Do not invent agent ids.
 Available capabilities: reason (analyze supplied information), write (compose text/code in the result),
 review (inspect other workers' results). If external_tools is non-empty you may use_tool with an exact
 name and arguments_json as a JSON object string; results appear in tool_results. If external_tools is
