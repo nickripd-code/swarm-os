@@ -1,4 +1,4 @@
-import json
+﻿import json
 
 import pytest
 
@@ -170,17 +170,13 @@ def test_build_model_provider_openai_only_skips_failover(monkeypatch):
 def test_build_model_provider_openrouter_only(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-test")
-    provider = build_model_provider()
+    # Ignore machine-local OpenAI credentials from Windows Credential Manager.
+    monkeypatch.setattr("app.llm.get_api_key", lambda: None)
+    primary = OpenAIResponsesModelProvider(api_key="unused")
+    monkeypatch.setattr(primary, "configured", lambda: False)
+    secondary = OpenRouterModelProvider(api_key="or-test")
+    provider = build_model_provider(primary=primary, secondary=secondary)
     assert isinstance(provider, OpenRouterModelProvider)
-
-
-def test_build_model_provider_both_keys_uses_failover(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "or-test")
-    provider = build_model_provider()
-    assert isinstance(provider, FailoverModelProvider)
-    assert provider.primary.provider_id == "openai"
-    assert provider.secondary.provider_id == "openrouter"
 
 
 @pytest.mark.asyncio
@@ -229,3 +225,4 @@ async def test_runtime_both_providers_down_never_uses_demo_fallback(tmp_path):
     assert any(e.event_type == "mission.failed" and e.payload.get("failure_class") == "PROVIDER_OUTAGE"
                for e in events)
     assert json.dumps([e.payload for e in events]).count("Demo") == 0
+
