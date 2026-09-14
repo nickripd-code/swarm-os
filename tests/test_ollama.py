@@ -92,6 +92,9 @@ def no_ollama_env(monkeypatch):
     monkeypatch.delenv("BEDROCK_MODEL", raising=False)
     monkeypatch.delenv("BEDROCK_REGION", raising=False)
     monkeypatch.delenv("BEDROCK_BASE_URL", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_API_KEY", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_MODEL", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_BASE_URL", raising=False)
 
 
 @pytest.mark.asyncio
