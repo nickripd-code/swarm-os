@@ -24,6 +24,7 @@ from .llm import (
 from .tools import ToolCall, ToolError, ToolProvider, build_tool_provider, public_tool_data
 from .verifier import public_verification, verification_accepted
 from .payments import PaymentError, PaymentProvider, resolve_payment_provider
+from .workspace import WorkspaceError, WorkspaceProvider, build_workspace_provider
 
 TERMINAL = {MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.STOPPED, MissionStatus.BLOCKED}
 RESUMABLE = {MissionStatus.PENDING, MissionStatus.RUNNING, MissionStatus.WAITING}
@@ -55,7 +56,8 @@ class SwarmRuntime:
     def __init__(self, store: Store, sink: EventSink | None = None, controller: LLMProvider | None = None,
                  max_retries: int = DEFAULT_MAX_RETRIES, retry_base_seconds: float = DEFAULT_RETRY_BASE_SECONDS,
                  tools: ToolProvider | None | object = _UNSET,
-                 resources: ResourceScheduler | None = None):
+                 resources: ResourceScheduler | None = None,
+                 workspaces: WorkspaceProvider | None | object = _UNSET):
         self.store, self.sink = store, sink
         self.agents: dict[UUID, list[AgentSpec]] = defaultdict(list)
         self.tasks: dict[UUID, list[Task]] = defaultdict(list)
@@ -79,9 +81,33 @@ class SwarmRuntime:
         self.policy = PolicyGate()
         self.resources = resources or ResourceScheduler(policy=self.policy)
         self.org = OrganizationDesigner()
+        self.workspaces = build_workspace_provider() if workspaces is _UNSET else workspaces
 
     def _owner(self) -> str:
         return str(self.worker_id)
+
+    def _require_workspaces(self) -> WorkspaceProvider:
+        if self.workspaces is None:
+            raise PolicyError("Workspace provider is not configured", FailureClass.TOOL_MISSING)
+        return self.workspaces
+
+    async def create_workspace(self, mission: Mission, agent_id: UUID | None = None):
+        try:
+            return await self._require_workspaces().create(mission_id=mission.id, agent_id=agent_id)
+        except WorkspaceError as exc:
+            raise PolicyError(str(exc), exc.failure_class) from exc
+
+    async def write_workspace_file(self, workspace_id: UUID, relative: str, content: str) -> None:
+        try:
+            await self._require_workspaces().write_file(workspace_id, relative, content)
+        except WorkspaceError as exc:
+            raise PolicyError(str(exc), exc.failure_class) from exc
+
+    async def read_workspace_file(self, workspace_id: UUID, relative: str) -> str:
+        try:
+            return await self._require_workspaces().read_file(workspace_id, relative)
+        except WorkspaceError as exc:
+            raise PolicyError(str(exc), exc.failure_class) from exc
 
     async def emit(self, mission_id: UUID, event_type: EventType | str, payload: dict[str, Any], actor_id: UUID | None = None):
         event = self.store.append(MissionEvent(mission_id=mission_id, event_type=event_type, actor_id=actor_id, payload=payload))

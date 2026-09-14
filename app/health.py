@@ -228,3 +228,19 @@ async def selfmod_health_status() -> dict:
         "production_write": selfmod_production_write_opted_in(),
         "fallback": False,
     }
+
+
+async def workspace_health_status() -> dict:
+    from .workspace import build_workspace_provider
+    provider = build_workspace_provider()
+    health = await provider.health()
+    return {
+        "configured": True,
+        "provider": health.provider,
+        "backend": health.backend,
+        "status": health.status,
+        "detail": health.detail,
+        "root": health.root,
+        "docker": False,
+        "fallback": False,
+    }
