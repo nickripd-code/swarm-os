@@ -12,7 +12,10 @@ from fastapi.staticfiles import StaticFiles
 from .models import AnswerRequest, Mission, MissionCreate, PaymentIntent
 from .runtime import PolicyError, SwarmRuntime
 from .store import Store
-from .health import ollama_health_status, openai_status, openrouter_status, vllm_health_status
+from .health import (
+    llamacpp_health_status, ollama_health_status, openai_status, openrouter_status,
+    vllm_health_status,
+)
 
 BASE = Path(__file__).parent
 
@@ -47,6 +50,7 @@ async def index(): return FileResponse(BASE / "static" / "index.html")
 async def health():
     return {"ok": True, "openai": openai_status(), "openrouter": openrouter_status(),
             "ollama": await ollama_health_status(), "vllm": await vllm_health_status(),
+            "llamacpp": await llamacpp_health_status(),
             "active_missions": len(runtime.runs)}
 
 
