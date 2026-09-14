@@ -55,6 +55,10 @@ class EventType(StrEnum):
     PAYMENT_CREATED = "payment.created"
     USER_ANSWERED = "user.answered"
 
+    LEASE_CLAIMED = "lease.claimed"
+    LEASE_EXPIRED = "lease.expired"
+    LEASE_RELEASED = "lease.released"
+
 
 # controller.fallback is a test sentinel and must never be writable.
 FORBIDDEN_EVENT_TYPES = frozenset({"controller.fallback"})

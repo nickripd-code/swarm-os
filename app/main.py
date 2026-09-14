@@ -107,7 +107,10 @@ async def create_payment(mission_id: UUID, intent: PaymentIntent):
     if not mission: raise HTTPException(404, "Mission not found")
     if intent.mission_id != mission_id: raise HTTPException(400, "mission_id does not match URL")
     try:
-        return await runtime.create_payment(mission, intent.recipient, intent.amount, intent.reason)
+        key = intent.idempotency_key or str(intent.id)
+        return await runtime.create_payment(
+            mission, intent.recipient, intent.amount, intent.reason, idempotency_key=key,
+        )
     except PolicyError as exc:
         raise HTTPException(409, str(exc)) from exc
 
