@@ -1,7 +1,7 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export function newState(mission = null) {
   return {mission, agents: new Map(), tasks: new Map(), seen: new Set(), events: [],
-    usage: {input: 0, output: 0, reasoning: 0}, decisions: 0, preview: false};
+    usage: {input: 0, output: 0, reasoning: 0, cost: null, budget: null, known: false}, decisions: 0, preview: false};
 }
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
@@ -30,6 +30,13 @@ export function applyEvent(state, e) {
     state.usage.reasoning += p.reasoning_tokens || 0;
     const a = state.agents.get(e.actor_id);
     if (a) {a.tokens = (a.tokens || 0) + (p.input_tokens || 0) + (p.output_tokens || 0); a.model = p.model;}
+  }
+  if (e.event_type === "budget.updated") {
+    if (typeof p.token_budget === "number") state.usage.budget = p.token_budget;
+    if (p.known === true && typeof p.token_spent === "number") {
+      state.usage.cost = p.token_spent;
+      state.usage.known = true;
+    }
   }
   if (e.event_type === "controller.decision") state.decisions++;
   if (e.event_type === "mission.started" && state.mission) {
@@ -106,6 +113,15 @@ export function alertFromEvent(e) {
         title: "Verification failed",
         detail: p.rationale || p.failure_class || "Claimed result was not accepted",
         failure_class: p.failure_class || "VERIFICATION_FAILURE",
+        event_type: e.event_type,
+      };
+    case "budget.warning":
+      return {
+        level: "warning",
+        title: "Budget warning",
+        detail: p.token_budget != null
+          ? "Estimated token spend " + (p.token_spent ?? "?") + " / " + p.token_budget + " USD"
+          : "Estimated token spend is approaching the mission budget",
         event_type: e.event_type,
       };
     default:

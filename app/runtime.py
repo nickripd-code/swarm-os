@@ -14,6 +14,7 @@ from .models import (
     MissionStatus, PaymentIntent, PendingQuestion, Task, TaskStatus, utcnow,
 )
 from .policy import PolicyError, PolicyGate, PolicyRequest
+from .resources import ResourceScheduler, listed_prices_from_meta, usage_from_meta
 from .store import Store
 from .llm import (
     DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BASE_SECONDS, LLMProvider, build_controller,
@@ -52,7 +53,8 @@ _UNSET = object()
 class SwarmRuntime:
     def __init__(self, store: Store, sink: EventSink | None = None, controller: LLMProvider | None = None,
                  max_retries: int = DEFAULT_MAX_RETRIES, retry_base_seconds: float = DEFAULT_RETRY_BASE_SECONDS,
-                 tools: ToolProvider | None | object = _UNSET):
+                 tools: ToolProvider | None | object = _UNSET,
+                 resources: ResourceScheduler | None = None):
         self.store, self.sink = store, sink
         self.agents: dict[UUID, list[AgentSpec]] = defaultdict(list)
         self.tasks: dict[UUID, list[Task]] = defaultdict(list)
@@ -74,6 +76,7 @@ class SwarmRuntime:
         self.idempotency = IdempotencyGuard(store)
         self._held_leases: dict[tuple[str, str], str] = {}
         self.policy = PolicyGate()
+        self.resources = resources or ResourceScheduler(policy=self.policy)
 
     def _owner(self) -> str:
         return str(self.worker_id)
@@ -469,6 +472,7 @@ class SwarmRuntime:
 
     async def model_call(self, mission: Mission, actor: AgentSpec, kind: str, call):
         self.check_stopped(mission.id)
+        self.resources.authorize_start(mission)
         model = getattr(self.controller, "model", "demo")
         await self.emit(mission.id, EventType.LLM_STARTED, {"kind": kind, "model": model,
                         "reasoning_effort": getattr(self.controller, "reasoning", None)}, actor.id)
@@ -510,7 +514,44 @@ class SwarmRuntime:
                     "model": metadata.get("model", model),
                 }, actor.id)
             await self.emit(mission.id, EventType.LLM_COMPLETED, {"kind": kind, **metadata}, actor.id)
+            await self._account_tokens(mission, actor, kind, metadata)
         return response
+
+    async def _account_tokens(self, mission: Mission, actor: AgentSpec, kind: str,
+                              metadata: dict[str, Any]) -> None:
+        usage = usage_from_meta(metadata)
+        if usage is None:
+            return
+        listed_input, listed_output = listed_prices_from_meta(metadata)
+        if listed_input is None and listed_output is None:
+            router = getattr(self.controller, "router", None)
+            lookup = getattr(router, "listed_token_prices", None)
+            if callable(lookup):
+                listed = lookup(metadata.get("provider"), metadata.get("model"))
+                if listed is not None:
+                    listed_input, listed_output = listed
+        outcome = self.resources.consume(mission, usage, listed_input, listed_output)
+        extra = {
+            "kind": kind,
+            "provider": metadata.get("provider"),
+            "model": metadata.get("model"),
+        }
+        payload = self.resources.snapshot(mission, outcome.estimate, **extra)
+        mission.updated_at = utcnow()
+        self.store.save_mission(mission)
+        await self.emit(mission.id, EventType.BUDGET_UPDATED, payload, actor.id)
+        if outcome.warning_crossed:
+            await self.emit(mission.id, EventType.BUDGET_WARNING, {
+                "kind": kind,
+                "token_spent": payload["token_spent"],
+                "token_budget": payload["token_budget"],
+                "remaining": payload["remaining"],
+                "fraction": self.resources.settings.warning_fraction,
+                "currency": "USD",
+                "estimate": True,
+            }, actor.id)
+        if outcome.error is not None:
+            raise outcome.error
 
     async def run(self, mission: Mission):
         root = None

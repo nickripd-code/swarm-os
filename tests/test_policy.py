@@ -108,6 +108,16 @@ def test_tool_budget_fails_closed_before_other_tool_rules():
     assert exc.value.failure_class == FailureClass.RESOURCE_EXHAUSTED
 
 
+def test_token_budget_is_independent_of_payment_spent():
+    gate = PolicyGate()
+    mission = Mission(goal="tokens", spent=9, budget=10, token_spent=0.4)
+    gate.check_token_budget(mission, spent=0.4, additional=0.1, budget=1.0)
+    with pytest.raises(PolicyError) as exc:
+        gate.check_token_budget(mission, spent=0.4, additional=0.7, budget=1.0)
+    assert exc.value.failure_class == FailureClass.RESOURCE_EXHAUSTED
+    assert mission.spent == 9
+
+
 class ShellSpawnProvider(LLMProvider):
     async def decide(self, state):
         return {"action": "spawn", "role": "hacker", "purpose": "Run shell", "capabilities": ["shell"]}
