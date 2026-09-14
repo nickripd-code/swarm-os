@@ -266,6 +266,11 @@ class Store:
                 if key:
                     agents[key] = {**agents.get(key, {}), "id": key,
                                    "status": p.get("status") or "stopped"}
+            elif event.event_type == EventType.AGENT_KILLED:
+                key = str(p.get("id") or p.get("agent_id") or "")
+                if key:
+                    agents[key] = {**agents.get(key, {}), **p, "id": key,
+                                   "status": p.get("status") or "stopped"}
             elif is_task_event(event.event_type):
                 tid = p.get("id") or p.get("task_id")
                 if tid:

@@ -26,6 +26,7 @@ from app.store import Store
 UI_EVENT_TYPES = {
     "agent.spawned",
     "agent.updated",
+    "agent.killed",
     "agent.message",
     "agent.reparented",
     "agent.retired",
@@ -78,6 +79,7 @@ UI_EVENT_TYPES = {
 def test_event_type_values_match_historical_ui_strings():
     assert {member.value for member in EventType} == UI_EVENT_TYPES == KNOWN_EVENT_TYPES
     assert EventType.AGENT_SPAWNED == "agent.spawned"
+    assert EventType.AGENT_KILLED == "agent.killed"
     assert EventType.MISSION_FAILED == "mission.failed"
     assert EventType.LLM_RETRY == "llm.retry"
     assert EventType.LLM_FAILOVER == "llm.failover"

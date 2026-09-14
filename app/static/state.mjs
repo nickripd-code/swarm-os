@@ -57,8 +57,14 @@ export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
   const p = e.payload || {};
-  if (e.event_type === "agent.spawned" || e.event_type === "agent.updated") {
+    if (e.event_type === "agent.spawned" || e.event_type === "agent.updated") {
     state.agents.set(p.id, {...state.agents.get(p.id), ...p});
+  }
+  if (e.event_type === "agent.killed") {
+    const id = p.id || p.agent_id;
+    if (id) {
+      state.agents.set(id, {...state.agents.get(id), ...p, id, status: p.status || "stopped"});
+    }
   }
   if (e.event_type.startsWith("task.")) {
     const id = p.id || p.task_id;
