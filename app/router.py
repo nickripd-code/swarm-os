@@ -299,3 +299,22 @@ class ModelRouter:
             "No registered model provider was available",
             FailureClass.PROVIDER_OUTAGE,
         )
+
+    async def complete_on(self, candidate: RouteCandidate, request: ModelRequest) -> ModelResponse:
+        """Call one ranked provider. Planners stay independent; no silent failover here."""
+        provider = self._provider(candidate.provider_id)
+        if provider is None:
+            raise ProviderError(
+                "No registered model provider was available",
+                FailureClass.PROVIDER_OUTAGE,
+            )
+        skip_reason = await self._skip_reason(provider)
+        if skip_reason is not None:
+            raise ProviderError(
+                "No registered model provider was available",
+                FailureClass.PROVIDER_OUTAGE,
+            )
+        targeted = request if request.model == candidate.model else request.model_copy(
+            update={"model": candidate.model},
+        )
+        return await provider.complete(targeted)

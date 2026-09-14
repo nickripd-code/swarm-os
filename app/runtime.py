@@ -63,6 +63,19 @@ class SwarmRuntime:
         if self.sink:
             await self.sink(event)
 
+    async def _emit_planning(self, mission_id: UUID, actor_id: UUID | None):
+        planning = getattr(self.controller, "last_planning", None)
+        if not isinstance(planning, dict) or planning.get("mode") != "multi":
+            return
+        if planning.get("emitted"):
+            return
+        planning["emitted"] = True
+        for proposal in planning.get("proposals") or []:
+            await self.emit(mission_id, "planner.proposal", proposal, actor_id)
+        judge = planning.get("judge")
+        if judge:
+            await self.emit(mission_id, "judge.decision", judge, actor_id)
+
     def check_stopped(self, mission_id: UUID):
         if mission_id in self.stopped:
             raise asyncio.CancelledError()
@@ -153,6 +166,7 @@ class SwarmRuntime:
                     }, actor.id)
                     await self._sleep(delay)
                     continue
+                await self._emit_planning(mission.id, actor.id)
                 await self.emit(mission.id, "llm.failed", {
                     "kind": kind, "model": model, "failure_class": str(exc.failure_class),
                     "error": str(exc), "attempt": attempt, "max_attempts": attempts,
@@ -160,6 +174,7 @@ class SwarmRuntime:
                 raise
         self.check_stopped(mission.id)
         assert response is not None
+        await self._emit_planning(mission.id, actor.id)
         metadata = response.pop("_meta", None)
         if metadata:
             if metadata.get("failover_from"):

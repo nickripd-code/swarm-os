@@ -45,7 +45,8 @@ This is an early FastAPI Mission Control MVP. Most of the north star is not buil
 - Human stop: per-mission stop and global STOP ALL; in-flight and unscheduled durable unfinished missions are cancelled/stopped.
 - Unfinished missions resume when a configured runtime restarts. Graceful shutdown emits `mission.suspended` without fabricating STOP; interrupted text-only attempts remain `stopped` and retry under a new task ID; the original runtime deadline remains in force.
 - Vanilla JS control room: live event stream, agent tree, inspector, activity, result panel, explicit **preview** mode labeled as non-running, **objective HUD** (`#objectiveHud`) with truthful mode/status chips, and a critical **alert stack** (`#alerts`) for real terminal events (`mission.failed` including `failure_class`, `mission.completed`, blocked, stop/stop-all). Optional Notification API only after a launch gesture, and only when the tab is hidden.
-- Tests: runtime completion/replay, spawn limits, simulated payments, provider failure stays failed with class, stop-all, runtime deadline/`TIMEOUT`, OpenAI usage + classified HTTP/timeout/outage errors, retry-then-success and retry-exhausted for `RATE_LIMIT`/`TIMEOUT`, non-retryable classes fail immediately, OpenRouter adapter contract + classified errors, Ollama adapter contract + daemon-down health/outage, outage failover to secondary, both-down fail closed, OpenAI-only factory path, durable graph migration/partial backfill, crash/graceful restart, attempt history, original deadline, ModelRouter capability ranking + fallback chain with fakes, local_only routing to Ollama.
+- High-stakes controller `decide` can run independent multi-planner proposals plus judge/synthesis (`app/planning.py`) through `ModelRouter` when two or more providers exist. Default N is 3 (`SWARM_PLANNER_COUNT`, clamped 2–4). OpenAI-only catalogs, trivial goals, mid-flight decides, and `SWARM_MULTI_PLANNER=0` stay single-planner. Emits real `planner.proposal` / `judge.decision` events. All-planner or judge failure stays fail-closed; no `FallbackController`. Durable recovery APIs unchanged.
+- Tests: runtime completion/replay, spawn limits, simulated payments, provider failure stays failed with class, stop-all, runtime deadline/`TIMEOUT`, OpenAI usage + classified HTTP/timeout/outage errors, retry-then-success and retry-exhausted for `RATE_LIMIT`/`TIMEOUT`, non-retryable classes fail immediately, OpenRouter adapter contract + classified errors, Ollama adapter contract + daemon-down health/outage, outage failover to secondary, both-down fail closed, OpenAI-only factory path, durable graph migration/partial backfill, crash/graceful restart, attempt history, original deadline, ModelRouter capability ranking + fallback chain with fakes, local_only routing to Ollama, multi-planner + judge with fakes (OpenAI-only single path, trivial skip, fail-closed).
 
 ---
 
@@ -53,11 +54,11 @@ This is an early FastAPI Mission Control MVP. Most of the north star is not buil
 
 | North-star idea | What exists | Gap |
 | --- | --- | --- |
-| Objective engine | `Mission` + `SwarmRuntime.run` loop | One controller LLM decides spawn/finish/blocked/wait. No independent planners, judge, or organization designer. |
+| Objective engine | `Mission` + `SwarmRuntime.run` loop; high-stakes `decide` may run N independent planners + one judge (`app/planning.py`) | Seed only: start-plan and finish-verification decides. No OrganizationDesigner, no multi-judge, no planner-bot spawn. Mid-flight and trivial goals stay single-planner. |
 | AgentSpec | Pydantic `AgentSpec` (id, parent, role, purpose, capabilities, depth, status) | No model selection, budgets, TTL, tools, workspace, permissions, fallback models, success criteria. |
 | Agent factory | `SwarmRuntime.spawn` | Controller may spawn specialists; no runtime factory API, no replace/clone/merge/kill-as-reorg. |
 | Model provider | `ModelProvider` contract + OpenAI Responses + OpenRouter Chat Completions + local Ollama + `ModelRouter` scored selection + outage failover | Not full north-star routing (no historical success, latency SLOs, or cached-context affinity). Streaming still explicit `CAPABILITY_MISMATCH`. vLLM / llama.cpp adapters are not in the catalog. |
-| Events | Typed-ish string events + WebSocket replay of history | Missing most north-star event types (verification, replan, org change, self-mod, budget warning). |
+| Events | Typed-ish string events + WebSocket replay of history; additive `planner.proposal` / `judge.decision` when multi-planner actually runs | Missing most north-star event types (verification, replan, org change, self-mod, budget warning). |
 | Observability | Events, token usage on `llm.completed`, `llm.retry` on transient provider errors, activity feed | No cost, verification traces, “why this agent”, burn rate. |
 | Persistence | Missions, agents, tasks, and events survive restart; unfinished text-only attempts are explicitly stopped/retried and graceful shutdown is resumable | Execution is still in-process `asyncio`; no durable queue/worker lease or idempotency keys for future external side effects. |
 | Policy | Limits + capability allowlist + fail-closed wallet | Not an external Policy Engine. LLM can still choose actions inside the allowlist; no human-approval gate for irreversible acts beyond payments. |
@@ -78,7 +79,6 @@ North-star systems with no implementation to extend yet:
 
 - Additional provider adapters (Anthropic, Gemini, xAI, Mistral, DeepSeek, Cohere, vLLM, llama.cpp) beyond OpenAI + OpenRouter + Ollama.
 - Historical / cost-aware ModelRouter features (success memory, latency, cached context).
-- Multi-planner + judge/synthesis.
 - OrganizationDesigner, authority/delegation graph, dynamic reorg (replace/clone/merge).
 - Verifier agents and mandatory external evidence.
 - ResourceScheduler, cost estimation UX, conservative dollar defaults as enforced policy.
@@ -155,19 +155,19 @@ Nothing in the current test suite is known red. UI preview is synthetic by desig
 
 ## NEXT PRIORITY
 
-**This slice:** local `OllamaModelProvider` (OpenAI-compatible `/v1/chat/completions`) registered into `ModelRouter` so the fallback chain can leave the cloud. Opt-in via `OLLAMA_MODEL` / `OLLAMA_BASE_URL`. OpenAI-only and OpenRouter-only catalogs stay unchanged when Ollama is not opted in. Daemon-down health is `unavailable`; completions fail closed. Durable recovery APIs stay unchanged. Do not edit `app/static/*`.
+**This slice:** multi-planner + judge/synthesis on the high-stakes controller `decide` path (mission start plan and finish verification). N independent `ModelRouter` proposals (default 3, `SWARM_PLANNER_COUNT`) when multiple providers exist; judge merges into the existing spawn/finish/blocked/wait schema. OpenAI-only and trivial goals stay single-planner. Fail closed if every planner or the judge fails. Observable `planner.proposal` / `judge.decision` only for real model calls. Do not edit `app/static/*`. Durable recovery APIs (`hydrate`, `resume_incomplete`, `suspend_all`) stay unchanged.
 
-**Recommended next backend slice:** independent multi-planner + judge/synthesis. Still fail closed. Still no game-world UI rewrite.
+**Recommended next backend slice:** OrganizationDesigner (mutable org topology from the judged plan) or an independent Verifier so `finish` is not “the model said done.” Still fail closed. Still no game-world UI rewrite.
 
-**Explicitly not next:** game-world UI, self-modification, PaymentProvider, Playwright, OrganizationDesigner.
+**Explicitly not next:** game-world UI, self-modification, PaymentProvider, Playwright.
 
 ---
 
 ## Audit notes (repo facts)
 
-- Tree: `app/` (runtime, llm, providers, router, store, models, main, health, credentials, static UI), `tests/`, `scripts/check_openai.py`, `NORTH_STAR.md`, this file. No CI, no Docker, no `.env.example`.
+- Tree: `app/` (runtime, llm, providers, router, planning, store, models, main, health, credentials, static UI), `tests/`, `scripts/check_openai.py`, `NORTH_STAR.md`, this file. No CI, no Docker, no `.env.example`.
 - Dependencies: FastAPI, uvicorn, SQLAlchemy, pydantic, httpx; pytest in `dev`; `pywin32` on Windows only.
 - Production providers: `OpenAIResponsesModelProvider` → `https://api.openai.com/v1/responses`; `OpenRouterModelProvider` → `{OPENROUTER_BASE_URL}/chat/completions`; `OllamaModelProvider` → `{OLLAMA_BASE_URL}/chat/completions` (default `http://127.0.0.1:11434/v1`). `build_model_provider()` wraps OpenAI+OpenRouter in `FailoverModelProvider` when both keys are set; a single cloud provider plus opted-in Ollama uses Failover(cloud, ollama). `build_router()` always appends configured Ollama as a third catalog entry when both cloud keys are present. `build_controller()` unwraps that into `ModelRouter` for capability-based selection. `FallbackController` is a test fixture (`mode = "demo"`). Retry/backoff for `RATE_LIMIT`/`TIMEOUT` lives in `SwarmRuntime.model_call`; outage failover lives in `ModelRouter` (and `FailoverModelProvider` when used directly).
 - Tests are extended in this slice rather than replaced.
 - No TODOs in application code.
-- Hypotheses checked: OpenAI + optional OpenRouter + optional local Ollama behind `ModelProvider`; `ModelRouter` scores capabilities and falls back on `PROVIDER_OUTAGE` including to Ollama; classified `RATE_LIMIT`/`TIMEOUT` retry then fail closed; SQLite mission/agent/task snapshots plus events; resumable in-process execution with truthful interrupted-attempt history; UI vanilla JS with objective HUD + critical alerts wired to existing events.
+- Hypotheses checked: OpenAI + optional OpenRouter + optional local Ollama behind `ModelProvider`; `ModelRouter` scores capabilities and falls back on `PROVIDER_OUTAGE` including to Ollama; high-stakes `decide` can run independent planners + judge when multiple providers exist; classified `RATE_LIMIT`/`TIMEOUT` retry then fail closed; SQLite mission/agent/task snapshots plus events; resumable in-process execution with truthful interrupted-attempt history; UI vanilla JS with objective HUD + critical alerts wired to existing events.
