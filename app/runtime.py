@@ -708,8 +708,9 @@ class SwarmRuntime:
         except asyncio.CancelledError:
             if mission.id in self.suspending:
                 suspended = True
-                mission.status = MissionStatus.RUNNING
                 mission.result = None
+                if mission.status != MissionStatus.WAITING:
+                    mission.status = MissionStatus.RUNNING
             else:
                 mission.status = MissionStatus.STOPPED
                 mission.result = {"reason": "Execution stopped"}

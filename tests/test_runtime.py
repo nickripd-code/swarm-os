@@ -252,8 +252,10 @@ async def test_runtime_deadline_cancels_worker(tmp_path):
 class SpawnWaitFinishProvider(LLMProvider):
     def __init__(self):
         self.seen_status = None
+        self.decide_statuses = []
 
     async def decide(self, state):
+        self.decide_statuses.append(state.get("status"))
         if not any(agent.get("role") == "analyst" for agent in state.get("agents", [])):
             return {"action": "spawn", "role": "analyst", "purpose": "Analyze", "capabilities": ["reason"]}
         if any(task.get("status") in {"pending", "running"} for task in state.get("tasks", [])):
@@ -296,7 +298,13 @@ async def test_wait_with_inflight_work_uses_waiting_status(tmp_path):
     waiting = [e for e in events if e.event_type == "mission.waiting"]
     assert waiting and waiting[0].payload["reason"] == "worker running"
     assert waiting[0].payload["pending_tasks"]
-    assert any(e.event_type == "mission.running" for e in events)
+    running = [e for e in events if e.event_type == "mission.running"]
+    assert running and running[0].payload["reason"] == "In-flight work finished; controller will continue"
+    waiting_at = events.index(waiting[0])
+    running_at = next(i for i, e in enumerate(events) if e.event_type == "mission.running")
+    assert waiting_at < running_at
+    assert provider.decide_statuses[-1] == "running"
+    assert "waiting" not in provider.decide_statuses
     assert any(e.event_type == "task.pending" for e in events)
     assert not any(e.event_type == "mission.failed" for e in events)
 
@@ -315,6 +323,71 @@ async def test_wait_without_inflight_work_is_policy_error(tmp_path):
     events = store.events(mission.id)
     assert not any(e.event_type == "mission.waiting" for e in events)
     assert not any(e.event_type == "mission.completed" for e in events)
+
+
+async def wait_until_status(store: Store, mission_id, status: str, timeout: float = 2):
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        saved = store.get_mission(mission_id)
+        if saved and saved.status == status:
+            return saved
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"mission {mission_id} did not reach status {status}")
+
+
+@pytest.mark.asyncio
+async def test_stop_during_waiting_is_stopped_not_success(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    provider = SlowProvider()
+    runtime = SwarmRuntime(store, controller=provider)
+    mission = Mission(goal="Stop while waiting")
+    store.save_mission(mission)
+    await runtime.start(mission)
+    await asyncio.wait_for(provider.entered.wait(), 2)
+    waiting = await wait_until_status(store, mission.id, "waiting")
+    assert waiting.status == "waiting"
+    assert any(e.event_type == "mission.waiting" for e in store.events(mission.id))
+    await asyncio.wait_for(runtime.stop(mission.id), 2)
+    saved = store.get_mission(mission.id)
+    assert saved.status == "stopped"
+    assert saved.result == {"reason": "Execution stopped"}
+    events = store.events(mission.id)
+    assert any(e.event_type == "mission.stopped" for e in events)
+    assert not any(e.event_type == "mission.completed" for e in events)
+    assert not any(e.event_type == "mission.failed" for e in events)
+    assert provider.cancelled
+
+
+@pytest.mark.asyncio
+async def test_suspend_during_waiting_keeps_waiting_status(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    provider = SlowProvider()
+    runtime = SwarmRuntime(store, controller=provider)
+    mission = Mission(goal="Suspend while waiting")
+    store.save_mission(mission)
+    await runtime.start(mission)
+    await asyncio.wait_for(provider.entered.wait(), 2)
+    await wait_until_status(store, mission.id, "waiting")
+    await asyncio.wait_for(runtime.suspend_all(), 2)
+    saved = store.get_mission(mission.id)
+    assert saved.status == "waiting"
+    assert saved.result is None
+    events = store.events(mission.id)
+    assert any(e.event_type == "mission.waiting" for e in events)
+    assert any(e.event_type == "mission.suspended" for e in events)
+    assert not any(e.event_type == "mission.stopped" for e in events)
+    assert not any(e.event_type == "mission.completed" for e in events)
+
+    restored = SwarmRuntime(store, controller=SpawnWaitFinishProvider())
+    resumed = await restored.resume_incomplete()
+    assert resumed == [mission.id]
+    await asyncio.wait_for(asyncio.gather(*restored.runs.values()), 2)
+    finished = store.get_mission(mission.id)
+    assert finished.status == "completed"
+    assert finished.result["summary"] == "Analyst finished"
+    assert any(e.event_type == "mission.resumed" for e in store.events(mission.id))
+    assert any(e.event_type == "mission.waiting" for e in store.events(mission.id))
+    assert not any(e.event_type == "mission.failed" for e in store.events(mission.id))
 
 
 @pytest.mark.asyncio

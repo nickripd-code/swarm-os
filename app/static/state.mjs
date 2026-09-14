@@ -42,6 +42,12 @@ export function applyEvent(state, e) {
   if (e.event_type === "mission.started" && state.mission) {
     state.mission.status = "running"; state.mission.mode = p.mode;
   }
+  if (e.event_type === "mission.waiting" && state.mission) {
+    state.mission.status = "waiting";
+  }
+  if (e.event_type === "mission.running" && state.mission) {
+    state.mission.status = "running";
+  }
   if (e.event_type.startsWith("mission.") && terminal.has(e.event_type.split(".")[1]) && state.mission) {
     state.mission.status = e.event_type.split(".")[1];
     state.mission.result = p;
