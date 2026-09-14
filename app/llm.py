@@ -6,8 +6,8 @@ from typing import Any
 
 import httpx
 from .credentials import (
-    get_api_key, get_anthropic_api_key, get_mistral_api_key, get_openrouter_api_key,
-    get_xai_api_key,
+    get_api_key, get_anthropic_api_key, get_gemini_api_key, get_mistral_api_key,
+    get_openrouter_api_key, get_xai_api_key,
 )
 from .models import FailureClass
 from .providers import (
@@ -39,6 +39,8 @@ DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
 ANTHROPIC_API_VERSION = "2023-06-01"
 DEFAULT_MISTRAL_MODEL = "mistral-small-latest"
 DEFAULT_MISTRAL_BASE_URL = "https://api.mistral.ai/v1"
+DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
+DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
 DEFAULT_VLLM_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_LLAMACPP_BASE_URL = "http://127.0.0.1:8080/v1"
@@ -152,6 +154,25 @@ def mistral_http_error(status_code: int) -> ProviderError:
         return ProviderError(message, failure_class)
     failure_class = FailureClass.PROVIDER_OUTAGE if status_code >= 500 else FailureClass.MODEL_FAILURE
     return ProviderError(f"Mistral service error (HTTP {status_code})", failure_class)
+
+
+_GEMINI_HTTP_ERRORS = {
+    401: ("Gemini rejected the API key", FailureClass.AUTHORIZATION_REQUIRED),
+    402: ("Gemini credits are exhausted", FailureClass.RESOURCE_EXHAUSTED),
+    403: ("Gemini denied model/project access", FailureClass.AUTHORIZATION_REQUIRED),
+    408: ("Gemini request timed out; no demo result was substituted", FailureClass.TIMEOUT),
+    429: ("Gemini quota or rate limit reached", FailureClass.RATE_LIMIT),
+    400: ("Gemini rejected the model request", FailureClass.MODEL_FAILURE),
+    404: ("The configured Gemini model is unavailable", FailureClass.CAPABILITY_MISMATCH),
+}
+
+
+def gemini_http_error(status_code: int) -> ProviderError:
+    if status_code in _GEMINI_HTTP_ERRORS:
+        message, failure_class = _GEMINI_HTTP_ERRORS[status_code]
+        return ProviderError(message, failure_class)
+    failure_class = FailureClass.PROVIDER_OUTAGE if status_code >= 500 else FailureClass.MODEL_FAILURE
+    return ProviderError(f"Gemini service error (HTTP {status_code})", failure_class)
 
 
 _OLLAMA_HTTP_ERRORS = {
@@ -938,6 +959,116 @@ class MistralModelProvider(ModelProvider):
         )
 
 
+class GeminiModelProvider(ModelProvider):
+    """OpenAI-compatible Chat Completions adapter for Google Gemini."""
+
+    provider_id = "gemini"
+
+    def __init__(self, model: str | None = None, api_key: str | None = None,
+                 transport=None, base_url: str | None = None):
+        self.model = model or os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+        self._api_key = api_key
+        self.transport = transport
+        self.base_url = (base_url or os.getenv("GEMINI_BASE_URL", DEFAULT_GEMINI_BASE_URL)).rstrip("/")
+        self.max_output_tokens = int(os.getenv("SWARM_MAX_OUTPUT_TOKENS", "8192"))
+        self._usage = ModelUsage()
+
+    def configured(self) -> bool:
+        return bool(self._api_key or get_gemini_api_key())
+
+    async def list_models(self) -> list[ModelDescriptor]:
+        return [ModelDescriptor(
+            provider=self.provider_id,
+            model=self.model,
+            capabilities=self.capabilities(self.model),
+            context_limits=self.context_limits(self.model),
+        )]
+
+    def capabilities(self, model: str) -> ModelCapabilities:
+        del model
+        return ModelCapabilities(
+            reasoning="unknown",
+            coding="unknown",
+            vision=None,
+            tool_use=True,
+            structured_outputs=True,
+            streaming=False,
+        )
+
+    def context_limits(self, model: str) -> ContextLimits:
+        del model
+        return ContextLimits(max_output_tokens=self.max_output_tokens)
+
+    async def health(self) -> ProviderHealth:
+        return ProviderHealth(
+            provider=self.provider_id,
+            status="healthy" if self.configured() else "unconfigured",
+            detail="credential available" if self.configured() else "API key is not configured",
+        )
+
+    def estimate_cost(self, request: ModelRequest) -> CostEstimate:
+        return CostEstimate(
+            provider=self.provider_id,
+            model=request.model,
+            estimated_cost=None,
+            known=False,
+            reason="Pricing metadata is not configured for this model",
+        )
+
+    def usage(self) -> ModelUsage:
+        return self._usage.model_copy()
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        key = self._api_key or get_gemini_api_key()
+        if not key:
+            raise ProviderError("Gemini API key is not configured", FailureClass.AUTHORIZATION_REQUIRED)
+        payload = request.input if isinstance(request.input, str) else json.dumps(request.input, default=str)
+        body: dict[str, Any] = {
+            "model": request.model,
+            "messages": [
+                {"role": "system", "content": request.instructions},
+                {"role": "user", "content": payload},
+            ],
+            "max_tokens": request.max_output_tokens or self.max_output_tokens,
+        }
+        formatted = chat_response_format(request.response_format)
+        if formatted is not None:
+            body["response_format"] = formatted
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=10),
+                                         trust_env=False, transport=self.transport) as client:
+                response = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json=body,
+                )
+        except httpx.TimeoutException:
+            raise ProviderError("Gemini request timed out; no demo result was substituted",
+                                FailureClass.TIMEOUT) from None
+        except httpx.RequestError:
+            raise ProviderError("Could not reach Gemini", FailureClass.PROVIDER_OUTAGE) from None
+        if response.is_error:
+            raise gemini_http_error(response.status_code)
+        try:
+            result = response.json()
+            output, usage = chat_completion_output(result, label="Gemini")
+        except ProviderError:
+            raise
+        except (ValueError, KeyError, TypeError):
+            raise ProviderError("Gemini returned an invalid structured response",
+                                FailureClass.INVALID_OUTPUT) from None
+        self._usage = self._usage.plus(usage)
+        return ModelResponse(
+            provider=self.provider_id,
+            model=result.get("model", request.model),
+            output=output,
+            response_id=result.get("id"),
+            usage=usage,
+        )
+
+
+
+
 class OllamaModelProvider(ModelProvider):
     """OpenAI-compatible Chat Completions adapter for a local Ollama daemon."""
 
@@ -1590,6 +1721,7 @@ def build_model_provider(primary: ModelProvider | None = None,
                          xai: ModelProvider | None = None,
                          anthropic: ModelProvider | None = None,
                          mistral: ModelProvider | None = None,
+                         gemini: ModelProvider | None = None,
                          local: ModelProvider | None = None,
                          vllm: ModelProvider | None = None,
                          llamacpp: ModelProvider | None = None,
@@ -1598,23 +1730,24 @@ def build_model_provider(primary: ModelProvider | None = None,
                          xai_api_key: str | None = None,
                          anthropic_api_key: str | None = None,
                          mistral_api_key: str | None = None,
+                         gemini_api_key: str | None = None,
                          transport=None) -> ModelProvider:
-    """Cloud OpenAI + optional OpenRouter/xAI/Anthropic/Mistral, with opted-in local adapters last.
+    """Cloud OpenAI + optional OpenRouter/xAI/Anthropic/Mistral/Gemini, locals last.
 
-    OpenAI-only (or OpenRouter-only / xAI-only / Anthropic-only / Mistral-only) is unchanged
-    when no extra adapter is opted in. Two cloud keys wrap as Failover(first, second); the
-    router registers remaining configured cloud and local adapters as extra catalog entries
-    so the fallback chain can leave the primary.
+    OpenAI-only (or a single opted-in cloud) is unchanged when no extra adapter is set.
+    Two cloud keys wrap as Failover(first, second); the router registers remaining
+    configured cloud and local adapters so the fallback chain can leave the primary.
     """
     primary = primary or OpenAIResponsesModelProvider(api_key=openai_api_key, transport=transport)
     secondary = secondary or OpenRouterModelProvider(api_key=openrouter_api_key, transport=transport)
     xai = xai or XAIModelProvider(api_key=xai_api_key, transport=transport)
     anthropic = anthropic or AnthropicModelProvider(api_key=anthropic_api_key, transport=transport)
     mistral = mistral or MistralModelProvider(api_key=mistral_api_key, transport=transport)
+    gemini = gemini or GeminiModelProvider(api_key=gemini_api_key, transport=transport)
     local = local or OllamaModelProvider(transport=transport)
     vllm = vllm or VllmModelProvider(transport=transport)
     llamacpp = llamacpp or LlamaCppModelProvider(transport=transport)
-    clouds = [item for item in (primary, secondary, xai, anthropic, mistral) if provider_configured(item)]
+    clouds = [item for item in (primary, secondary, xai, anthropic, mistral, gemini) if provider_configured(item)]
     first_local = _first_configured_local(local, vllm, llamacpp)
     if len(clouds) >= 2:
         return FailoverModelProvider(clouds[0], clouds[1])
@@ -1631,13 +1764,14 @@ def build_router(model_provider: ModelProvider | None = None,
                  xai: ModelProvider | None = None,
                  anthropic: ModelProvider | None = None,
                  mistral: ModelProvider | None = None,
+                 gemini: ModelProvider | None = None,
                  local: ModelProvider | None = None,
                  vllm: ModelProvider | None = None,
                  llamacpp: ModelProvider | None = None, **kwargs) -> ModelRouter:
     """Register configured ModelProviders. OpenAI-only stays a one-entry catalog."""
     provider = model_provider or build_model_provider(
-        xai=xai, anthropic=anthropic, mistral=mistral, local=local, vllm=vllm,
-        llamacpp=llamacpp, **kwargs)
+        xai=xai, anthropic=anthropic, mistral=mistral, gemini=gemini, local=local,
+        vllm=vllm, llamacpp=llamacpp, **kwargs)
     providers = registered_providers(provider)
     extra_xai = xai or next((item for item in providers if item.provider_id == "xai"), None)
     if extra_xai is None:
@@ -1651,6 +1785,10 @@ def build_router(model_provider: ModelProvider | None = None,
     if extra_mistral is None:
         extra_mistral = MistralModelProvider(
             api_key=kwargs.get("mistral_api_key"), transport=kwargs.get("transport"))
+    extra_gemini = gemini or next((item for item in providers if item.provider_id == "gemini"), None)
+    if extra_gemini is None:
+        extra_gemini = GeminiModelProvider(
+            api_key=kwargs.get("gemini_api_key"), transport=kwargs.get("transport"))
     ollama = local or next((item for item in providers if item.provider_id == "ollama"), None)
     if ollama is None:
         ollama = OllamaModelProvider(transport=kwargs.get("transport"))
@@ -1663,6 +1801,7 @@ def build_router(model_provider: ModelProvider | None = None,
     _register_if_configured(providers, extra_xai)
     _register_if_configured(providers, extra_anthropic)
     _register_if_configured(providers, extra_mistral)
+    _register_if_configured(providers, extra_gemini)
     _register_if_configured(providers, ollama)
     _register_if_configured(providers, extra_vllm)
     _register_if_configured(providers, extra_llamacpp)
