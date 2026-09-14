@@ -55,6 +55,11 @@ def get_groq_api_key() -> str | None:
     return key.strip() if key else None
 
 
+def get_fireworks_api_key() -> str | None:
+    key = os.getenv("FIREWORKS_API_KEY")
+    return key.strip() if key else None
+
+
 def get_api_key() -> str | None:
     if os.getenv("OPENAI_API_KEY"):
         return os.environ["OPENAI_API_KEY"].strip()
