@@ -12,7 +12,7 @@ py -m venv .venv
 .\.venv\Scripts\python -m uvicorn app.main:app --reload
 ```
 
-Open http://127.0.0.1:8000. The mission controller uses the OpenAI Responses API when `OPENAI_API_KEY` is configured and fails closed when it is not (no demo substitute). The default model is `gpt-6-astra`; override it with `SWARM_MODEL` when needed.
+Open http://127.0.0.1:8000. The mission controller uses the OpenAI Responses API through the provider-independent contract in `app/providers.py` when `OPENAI_API_KEY` is configured and fails closed when it is not (no demo substitute). The default model is `gpt-6-astra`; override it with `SWARM_MODEL` when needed.
 
 ## Safety defaults
 
@@ -20,7 +20,7 @@ The runtime enforces mission-wide depth, agent, task, tool-call, runtime, and pa
 
 ## Next integration seams
 
-- Add richer LLM decision schemas and provider routing for different agent roles.
+- Add a provider registry/router and a real second provider adapter behind the existing model contract.
 - Add concrete research, code, messaging, and HTTP tool adapters.
 - Implement an isolated EVM wallet service behind `WalletAdapter` with recipient/asset/amount policy checks.
 

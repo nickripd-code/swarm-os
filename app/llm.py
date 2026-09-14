@@ -7,17 +7,13 @@ from typing import Any
 import httpx
 from .credentials import get_api_key
 from .models import FailureClass
+from .providers import (
+    ContextLimits, CostEstimate, ModelCapabilities, ModelDescriptor, ModelProvider,
+    ModelRequest, ModelResponse, ModelUsage, ProviderError, ProviderHealth,
+)
 
 DEFAULT_MODEL = "gpt-6-astra"
 DEFAULT_REASONING = "high"
-
-
-class ProviderError(RuntimeError):
-    """A safe user-facing error; does not include response bodies or credentials."""
-
-    def __init__(self, message: str, failure_class: FailureClass = FailureClass.UNKNOWN_FAILURE):
-        super().__init__(message)
-        self.failure_class = failure_class
 
 
 # Bounded retry is applied by SwarmRuntime.model_call (events + mission deadline).
@@ -83,9 +79,10 @@ class LLMProvider:
         raise NotImplementedError
 
 
-class OpenAIProvider(LLMProvider):
-    """Controller and workers use the same configured reasoning model."""
-    mode = "openai"
+class OpenAIResponsesModelProvider(ModelProvider):
+    """Low-level OpenAI Responses adapter behind the Swarm OS provider contract."""
+
+    provider_id = "openai"
 
     def __init__(self, model: str | None = None, api_key: str | None = None,
                  reasoning: str | None = None, transport=None):
@@ -94,18 +91,64 @@ class OpenAIProvider(LLMProvider):
         self._api_key = api_key  # Read the credential afresh when making each request.
         self.transport = transport
         self.max_output_tokens = int(os.getenv("SWARM_MAX_OUTPUT_TOKENS", "8192"))
+        self._usage = ModelUsage()
 
     def configured(self) -> bool:
         return bool(self._api_key or get_api_key())
 
-    async def _request(self, instructions: str, data: dict, schema: dict) -> dict:
+    async def list_models(self) -> list[ModelDescriptor]:
+        return [ModelDescriptor(
+            provider=self.provider_id,
+            model=self.model,
+            capabilities=self.capabilities(self.model),
+            context_limits=self.context_limits(self.model),
+        )]
+
+    def capabilities(self, model: str) -> ModelCapabilities:
+        del model
+        return ModelCapabilities(
+            reasoning="high",
+            coding="high",
+            vision=None,
+            tool_use=True,
+            structured_outputs=True,
+            streaming=False,
+        )
+
+    def context_limits(self, model: str) -> ContextLimits:
+        del model
+        # Context size is intentionally unknown until model discovery is authoritative.
+        return ContextLimits(max_output_tokens=self.max_output_tokens)
+
+    async def health(self) -> ProviderHealth:
+        return ProviderHealth(
+            provider=self.provider_id,
+            status="healthy" if self.configured() else "unconfigured",
+            detail="credential available" if self.configured() else "API key is not configured",
+        )
+
+    def estimate_cost(self, request: ModelRequest) -> CostEstimate:
+        return CostEstimate(
+            provider=self.provider_id,
+            model=request.model,
+            estimated_cost=None,
+            known=False,
+            reason="Pricing metadata is not configured for this model",
+        )
+
+    def usage(self) -> ModelUsage:
+        return self._usage.model_copy()
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
         key = self._api_key or get_api_key()
         if not key:
             raise ProviderError("OpenAI API key is not configured", FailureClass.AUTHORIZATION_REQUIRED)
-        body = {"model": self.model, "instructions": instructions,
-                "input": json.dumps(data, default=str), "text": {"format": schema},
-                "reasoning": {"effort": self.reasoning},
-                "max_output_tokens": self.max_output_tokens, "store": False}
+        body = {"model": request.model, "instructions": request.instructions,
+                "input": request.input if isinstance(request.input, str) else json.dumps(request.input, default=str),
+                "reasoning": {"effort": request.reasoning_effort or self.reasoning},
+                "max_output_tokens": request.max_output_tokens or self.max_output_tokens, "store": False}
+        if request.response_format is not None:
+            body["text"] = {"format": request.response_format}
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=10),
                                          trust_env=False, transport=self.transport) as client:
@@ -136,12 +179,60 @@ class OpenAIProvider(LLMProvider):
         except (ValueError, KeyError, TypeError):
             raise ProviderError("OpenAI returned an invalid structured response",
                                 FailureClass.INVALID_OUTPUT) from None
-        usage = result.get("usage") or {}
-        output["_meta"] = {"provider": "openai", "model": result.get("model", self.model),
-                           "reasoning_effort": self.reasoning, "response_id": result.get("id"),
-                           "input_tokens": usage.get("input_tokens", 0),
-                           "output_tokens": usage.get("output_tokens", 0),
-                           "reasoning_tokens": (usage.get("output_tokens_details") or {}).get("reasoning_tokens", 0)}
+        raw_usage = result.get("usage") or {}
+        usage = ModelUsage(
+            input_tokens=raw_usage.get("input_tokens", 0),
+            output_tokens=raw_usage.get("output_tokens", 0),
+            reasoning_tokens=(raw_usage.get("output_tokens_details") or {}).get("reasoning_tokens", 0),
+        )
+        self._usage = self._usage.plus(usage)
+        return ModelResponse(
+            provider=self.provider_id,
+            model=result.get("model", request.model),
+            output=output,
+            response_id=result.get("id"),
+            usage=usage,
+        )
+
+
+class OpenAIProvider(LLMProvider):
+    """Mission controller/worker adapter backed by a provider-neutral model client."""
+    mode = "openai"
+
+    def __init__(self, model: str | None = None, api_key: str | None = None,
+                 reasoning: str | None = None, transport=None,
+                 model_provider: ModelProvider | None = None):
+        self.model = model or os.getenv("SWARM_MODEL", DEFAULT_MODEL)
+        self.reasoning = reasoning or os.getenv("SWARM_REASONING_EFFORT", DEFAULT_REASONING)
+        self.max_output_tokens = int(os.getenv("SWARM_MAX_OUTPUT_TOKENS", "8192"))
+        self.model_provider = model_provider or OpenAIResponsesModelProvider(
+            model=self.model, api_key=api_key, reasoning=self.reasoning, transport=transport,
+        )
+
+    def configured(self) -> bool:
+        configured = getattr(self.model_provider, "configured", None)
+        return bool(configured()) if callable(configured) else True
+
+    async def _request(self, instructions: str, data: dict, schema: dict) -> dict:
+        response = await self.model_provider.complete(ModelRequest(
+            model=self.model,
+            instructions=instructions,
+            input=data,
+            response_format=schema,
+            reasoning_effort=self.reasoning,
+            max_output_tokens=self.max_output_tokens,
+        ))
+        if not isinstance(response.output, dict):
+            raise ProviderError("Model provider returned an invalid structured response",
+                                FailureClass.INVALID_OUTPUT)
+        output = dict(response.output)
+        output["_meta"] = {
+            "provider": response.provider,
+            "model": response.model,
+            "reasoning_effort": self.reasoning,
+            "response_id": response.response_id,
+            **response.usage.model_dump(),
+        }
         return output
 
     async def decide(self, state: dict[str, Any]) -> dict[str, Any]:
