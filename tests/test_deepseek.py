@@ -5,7 +5,7 @@ import pytest
 
 from app.llm import (
     OllamaModelProvider, OpenAIResponsesModelProvider, OpenRouterModelProvider,
-    VllmModelProvider, build_controller, build_model_provider, build_router,
+    DeepSeekModelProvider, build_controller, build_model_provider, build_router,
 )
 from app.models import FailureClass
 from app.providers import FailoverModelProvider, ModelProvider, ModelRequest, ProviderError
@@ -13,7 +13,7 @@ from app.router import CapabilityRequest, ModelRouter
 
 
 REQUEST = ModelRequest(
-    model="meta-llama/Llama-3.1-8B-Instruct",
+    model="deepseek-chat",
     instructions="Return JSON",
     input={"question": "test"},
     response_format={"type": "json_schema", "name": "answer", "strict": True,
@@ -23,28 +23,28 @@ REQUEST = ModelRequest(
 )
 
 
-def completed_chat(output=None, model="meta-llama/Llama-3.1-8B-Instruct"):
+def completed_chat(output=None, model="deepseek-chat"):
     return httpx.Response(200, json={
-        "id": "vllm_contract",
+        "id": "deepseek_contract",
         "model": model,
         "choices": [{"finish_reason": "stop", "message": {
             "role": "assistant",
             "content": json.dumps(output or {"answer": "ok"}),
         }}],
-        "usage": {"prompt_tokens": 11, "completion_tokens": 7},
+        "usage": {
+            "prompt_tokens": 11,
+            "completion_tokens": 7,
+            "completion_tokens_details": {"reasoning_tokens": 3},
+        },
     })
 
 
-def models_list(*ids):
-    return httpx.Response(200, json={"object": "list", "data": [{"id": model_id} for model_id in ids]})
-
-
-def vllm_transport(handler):
+def deepseek_transport(handler):
     return httpx.MockTransport(handler)
 
 
 @pytest.fixture
-def no_local_env(monkeypatch):
+def no_extra_providers(monkeypatch):
     monkeypatch.delenv("OLLAMA_MODEL", raising=False)
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     monkeypatch.delenv("VLLM_MODEL", raising=False)
@@ -74,50 +74,52 @@ def no_local_env(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_vllm_adapter_implements_provider_contract_and_tracks_usage(no_local_env):
+async def test_deepseek_adapter_implements_provider_contract_and_tracks_usage(no_extra_providers):
     captured = {}
 
     def handler(request):
         captured["url"] = str(request.url)
         captured["method"] = request.method
         captured["body"] = json.loads(request.content)
-        assert "Authorization" not in request.headers
+        captured["authorization"] = request.headers["Authorization"]
         return completed_chat()
 
-    provider = VllmModelProvider(
-        model="meta-llama/Llama-3.1-8B-Instruct", transport=vllm_transport(handler),
-    )
+    provider = DeepSeekModelProvider(api_key="deepseek-secret", transport=deepseek_transport(handler))
     assert isinstance(provider, ModelProvider)
     models = await provider.list_models()
-    assert models[0].provider == "vllm"
-    assert models[0].model == "meta-llama/Llama-3.1-8B-Instruct"
-    assert models[0].local is True
-    assert models[0].price_output_per_million == 0
+    assert models[0].provider == "deepseek"
+    assert models[0].model == "deepseek-chat"
+    assert models[0].local is False
+    assert models[0].capabilities.structured_outputs is True
 
     response = await provider.complete(REQUEST)
     assert response.output == {"answer": "ok"}
-    assert response.provider == "vllm"
+    assert response.provider == "deepseek"
     assert response.usage.model_dump() == {
         "input_tokens": 11,
         "output_tokens": 7,
-        "reasoning_tokens": 0,
+        "reasoning_tokens": 3,
     }
-    assert captured["url"] == "http://127.0.0.1:8000/v1/chat/completions"
-    assert captured["body"]["model"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert captured["url"] == "https://api.deepseek.com/v1/chat/completions"
+    assert captured["authorization"] == "Bearer deepseek-secret"
+    assert captured["body"]["model"] == "deepseek-chat"
     assert captured["body"]["response_format"]["type"] == "json_schema"
     assert "json_schema" in captured["body"]["response_format"]
     assert "provider" not in captured["body"]
-    assert "reasoning" not in captured["body"]
-    assert provider.estimate_cost(REQUEST).known is True
-    assert provider.estimate_cost(REQUEST).estimated_cost == 0
+    assert "deepseek-secret" not in json.dumps(response.model_dump())
+    assert (await provider.health()).status == "healthy"
+    assert provider.estimate_cost(REQUEST).known is False
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("response,expected,failure_class", [
-    (httpx.Response(404, json={"error": "model not found"}),
-     "model is unavailable", FailureClass.CAPABILITY_MISMATCH),
-    (httpx.Response(429, json={"error": {}}), "rate limit", FailureClass.RATE_LIMIT),
+    (httpx.Response(401, json={"error": {"message": "deepseek-secret"}}),
+     "rejected the API key", FailureClass.AUTHORIZATION_REQUIRED),
+    (httpx.Response(402, json={"error": {}}), "credits are exhausted", FailureClass.RESOURCE_EXHAUSTED),
+    (httpx.Response(429, json={"error": {}}), "quota or rate limit", FailureClass.RATE_LIMIT),
     (httpx.Response(503, json={"error": {}}), "HTTP 503", FailureClass.PROVIDER_OUTAGE),
+    (httpx.Response(404, json={"error": {}}), "model is unavailable", FailureClass.CAPABILITY_MISMATCH),
+    (httpx.Response(422, json={"error": {}}), "rejected the model request", FailureClass.MODEL_FAILURE),
     (httpx.Response(200, json={"choices": [{"finish_reason": "length", "message": {"content": "{}"}}]}),
      "incomplete", FailureClass.CONTEXT_LIMIT),
     (httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": "not-json"}}]}),
@@ -125,36 +127,35 @@ async def test_vllm_adapter_implements_provider_contract_and_tracks_usage(no_loc
     (httpx.Response(200, json={"choices": [{"finish_reason": "content_filter", "message": {"content": ""}}]}),
      "declined", FailureClass.POLICY_REFUSAL),
 ])
-async def test_vllm_errors_are_classified_and_do_not_fake_success(no_local_env, response, expected, failure_class):
-    provider = VllmModelProvider(
-        model="meta-llama/Llama-3.1-8B-Instruct",
-        transport=vllm_transport(lambda _: response),
-    )
+async def test_deepseek_errors_are_classified_and_do_not_leak(
+        no_extra_providers, response, expected, failure_class):
+    provider = DeepSeekModelProvider(api_key="deepseek-secret", transport=deepseek_transport(lambda _: response))
     with pytest.raises(ProviderError, match=expected) as error:
         await provider.complete(REQUEST)
+    assert "deepseek-secret" not in str(error.value)
     assert error.value.failure_class == failure_class
 
 
 @pytest.mark.asyncio
-async def test_vllm_timeout_and_outage_are_classified(no_local_env):
-    timeout_provider = VllmModelProvider(
-        model="meta-llama/Llama-3.1-8B-Instruct",
-        transport=vllm_transport(lambda _: (_ for _ in ()).throw(httpx.ReadTimeout("timed out"))))
+async def test_deepseek_timeout_and_outage_are_classified(no_extra_providers):
+    timeout_provider = DeepSeekModelProvider(
+        api_key="deepseek-secret",
+        transport=deepseek_transport(lambda _: (_ for _ in ()).throw(httpx.ReadTimeout("timed out"))))
     with pytest.raises(ProviderError, match="timed out") as timeout_error:
         await timeout_provider.complete(REQUEST)
     assert timeout_error.value.failure_class == FailureClass.TIMEOUT
 
-    outage_provider = VllmModelProvider(
-        model="meta-llama/Llama-3.1-8B-Instruct",
-        transport=vllm_transport(lambda _: (_ for _ in ()).throw(httpx.ConnectError("offline"))))
-    with pytest.raises(ProviderError, match="Could not reach vLLM") as outage_error:
+    outage_provider = DeepSeekModelProvider(
+        api_key="deepseek-secret",
+        transport=deepseek_transport(lambda _: (_ for _ in ()).throw(httpx.ConnectError("offline"))))
+    with pytest.raises(ProviderError, match="Could not reach DeepSeek") as outage_error:
         await outage_provider.complete(REQUEST)
     assert outage_error.value.failure_class == FailureClass.PROVIDER_OUTAGE
 
 
 @pytest.mark.asyncio
-async def test_health_unconfigured_when_not_opted_in(no_local_env):
-    provider = VllmModelProvider()
+async def test_health_unconfigured_when_key_missing(no_extra_providers):
+    provider = DeepSeekModelProvider()
     assert provider.configured() is False
     health = await provider.health()
     assert health.status == "unconfigured"
@@ -164,44 +165,37 @@ async def test_health_unconfigured_when_not_opted_in(no_local_env):
 
 
 @pytest.mark.asyncio
-async def test_health_unavailable_when_daemon_down(no_local_env):
-    provider = VllmModelProvider(
-        model="meta-llama/Llama-3.1-8B-Instruct",
-        transport=vllm_transport(lambda _: (_ for _ in ()).throw(httpx.ConnectError("offline"))),
-    )
+async def test_deepseek_model_env_does_not_opt_in(monkeypatch, no_extra_providers):
+    monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-reasoner")
+    provider = DeepSeekModelProvider()
+    assert provider.configured() is False
+    assert provider.model == "deepseek-reasoner"
     health = await provider.health()
-    assert health.status == "unavailable"
-    assert health.detail == "vLLM daemon is not reachable"
+    assert health.status == "unconfigured"
+    with pytest.raises(ProviderError, match="not configured") as error:
+        await provider.complete(REQUEST)
+    assert error.value.failure_class == FailureClass.AUTHORIZATION_REQUIRED
 
 
 @pytest.mark.asyncio
-async def test_health_healthy_when_models_endpoint_ok(no_local_env):
-    provider = VllmModelProvider(
-        model="meta-llama/Llama-3.1-8B-Instruct",
-        transport=vllm_transport(lambda _: models_list("meta-llama/Llama-3.1-8B-Instruct")),
-    )
-    health = await provider.health()
-    assert health.status == "healthy"
-
-
-@pytest.mark.asyncio
-async def test_custom_base_url_is_used(no_local_env):
+async def test_custom_base_url_is_used(no_extra_providers):
     captured = {}
 
     def handler(request):
         captured["url"] = str(request.url)
-        return completed_chat(model="Qwen/Qwen2.5-7B-Instruct")
+        return completed_chat(model="deepseek-reasoner")
 
-    provider = VllmModelProvider(
-        model="Qwen/Qwen2.5-7B-Instruct",
-        base_url="http://vllm.internal:8001/v1",
-        transport=vllm_transport(handler),
+    provider = DeepSeekModelProvider(
+        model="deepseek-reasoner",
+        api_key="deepseek-secret",
+        base_url="https://deepseek.internal/v1",
+        transport=deepseek_transport(handler),
     )
-    await provider.complete(REQUEST.model_copy(update={"model": "Qwen/Qwen2.5-7B-Instruct"}))
-    assert captured["url"] == "http://vllm.internal:8001/v1/chat/completions"
+    await provider.complete(REQUEST.model_copy(update={"model": "deepseek-reasoner"}))
+    assert captured["url"] == "https://deepseek.internal/v1/chat/completions"
 
 
-def test_build_model_provider_openai_only_ignores_unconfigured_vllm(monkeypatch, no_local_env):
+def test_build_model_provider_openai_only_ignores_unconfigured_deepseek(monkeypatch, no_extra_providers):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     provider = build_model_provider()
     assert isinstance(provider, OpenAIResponsesModelProvider)
@@ -210,113 +204,108 @@ def test_build_model_provider_openai_only_ignores_unconfigured_vllm(monkeypatch,
     assert [item.provider_id for item in router.providers] == ["openai"]
 
 
-def test_build_router_registers_vllm_when_opted_in(monkeypatch, no_local_env):
+def test_build_router_registers_deepseek_when_key_set(monkeypatch, no_extra_providers):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test")
     stacked = build_model_provider()
     assert isinstance(stacked, FailoverModelProvider)
     assert stacked.primary.provider_id == "openai"
-    assert stacked.secondary.provider_id == "vllm"
+    assert stacked.secondary.provider_id == "deepseek"
     router = build_router()
-    assert [item.provider_id for item in router.providers] == ["openai", "vllm"]
+    assert [item.provider_id for item in router.providers] == ["openai", "deepseek"]
 
 
-def test_build_router_cloud_plus_ollama_and_vllm(monkeypatch, no_local_env):
+def test_build_router_cloud_plus_deepseek_and_ollama(monkeypatch, no_extra_providers):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-test")
+    monkeypatch.setenv("XAI_API_KEY", "xai-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("MISTRAL_API_KEY", "mistral-test")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test")
+    monkeypatch.setenv("COHERE_API_KEY", "cohere-test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test")
     monkeypatch.setenv("OLLAMA_MODEL", "llama3.2")
-    monkeypatch.setenv("VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
     stacked = build_model_provider()
     assert isinstance(stacked, FailoverModelProvider)
     assert stacked.primary.provider_id == "openai"
     assert stacked.secondary.provider_id == "openrouter"
     router = build_router()
-    assert [item.provider_id for item in router.providers] == ["openai", "openrouter", "ollama", "vllm"]
+    assert [item.provider_id for item in router.providers] == [
+        "openai", "openrouter", "xai", "anthropic", "mistral", "gemini", "cohere", "deepseek", "ollama",
+    ]
     controller = build_controller()
     assert [item.provider_id for item in controller.router.providers] == [
-        "openai", "openrouter", "ollama", "vllm",
+        "openai", "openrouter", "xai", "anthropic", "mistral", "gemini", "cohere", "deepseek", "ollama",
     ]
 
 
-def test_build_model_provider_vllm_only(monkeypatch, no_local_env):
-    monkeypatch.setenv("VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
+def test_build_model_provider_deepseek_only(monkeypatch, no_extra_providers):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test")
     monkeypatch.setattr("app.llm.get_api_key", lambda: None)
     primary = OpenAIResponsesModelProvider(api_key="unused")
     monkeypatch.setattr(primary, "configured", lambda: False)
     provider = build_model_provider(primary=primary)
-    assert isinstance(provider, VllmModelProvider)
+    assert isinstance(provider, DeepSeekModelProvider)
     router = build_router(model_provider=provider)
-    assert [item.provider_id for item in router.providers] == ["vllm"]
+    assert [item.provider_id for item in router.providers] == ["deepseek"]
 
 
-def test_build_router_local_only_registers_both_adapters(monkeypatch, no_local_env):
-    monkeypatch.setenv("OLLAMA_MODEL", "llama3.2")
-    monkeypatch.setenv("VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
-    monkeypatch.setattr("app.llm.get_api_key", lambda: None)
-    primary = OpenAIResponsesModelProvider(api_key="unused")
-    monkeypatch.setattr(primary, "configured", lambda: False)
-    stacked = build_model_provider(primary=primary)
-    assert isinstance(stacked, OllamaModelProvider)
-    router = build_router(model_provider=stacked)
-    assert [item.provider_id for item in router.providers] == ["ollama", "vllm"]
+def test_openai_plus_openrouter_still_failover_when_deepseek_set(monkeypatch, no_extra_providers):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test")
+    stacked = build_model_provider()
+    assert isinstance(stacked, FailoverModelProvider)
+    assert stacked.primary.provider_id == "openai"
+    assert stacked.secondary.provider_id == "openrouter"
+    router = build_router()
+    assert [item.provider_id for item in router.providers] == ["openai", "openrouter", "deepseek"]
 
 
 @pytest.mark.asyncio
-async def test_router_outage_walks_to_vllm(no_local_env):
+async def test_router_outage_walks_to_deepseek(no_extra_providers):
     from tests.test_router import openai_like, openrouter_like
 
-    def handler(request):
-        if request.method == "GET":
-            return models_list("meta-llama/Llama-3.1-8B-Instruct")
-        return completed_chat(output={"answer": "from vllm"})
+    def handler(_request):
+        return completed_chat(output={"answer": "from deepseek"})
 
     openai = openai_like(error=ProviderError("Could not reach OpenAI", FailureClass.PROVIDER_OUTAGE))
     openrouter = openrouter_like(
         error=ProviderError("Could not reach OpenRouter", FailureClass.PROVIDER_OUTAGE),
     )
-    vllm = VllmModelProvider(
-        model="meta-llama/Llama-3.1-8B-Instruct", transport=vllm_transport(handler),
-    )
-    router = ModelRouter([openai, openrouter, vllm])
+    deepseek = DeepSeekModelProvider(api_key="deepseek-secret", transport=deepseek_transport(handler))
+    router = ModelRouter([openai, openrouter, deepseek])
     response = await router.complete(CapabilityRequest(reasoning="high"), REQUEST)
     assert openai.calls == 1
     assert openrouter.calls == 1
-    assert response.provider == "vllm"
-    assert response.output == {"answer": "from vllm"}
+    assert response.provider == "deepseek"
+    assert response.output == {"answer": "from deepseek"}
     assert response.failover_from == "openai"
     assert response.failover_reason == "PROVIDER_OUTAGE"
 
 
 @pytest.mark.asyncio
-async def test_local_only_selects_vllm(no_local_env):
+async def test_local_only_does_not_select_deepseek(no_extra_providers):
     from tests.test_router import openai_like, openrouter_like
 
-    def handler(request):
-        if request.method == "GET":
-            return models_list("meta-llama/Llama-3.1-8B-Instruct")
-        return completed_chat()
-
-    vllm = VllmModelProvider(
-        model="meta-llama/Llama-3.1-8B-Instruct", transport=vllm_transport(handler),
-    )
-    router = ModelRouter([openai_like(), openrouter_like(), vllm])
+    deepseek = DeepSeekModelProvider(
+        api_key="deepseek-secret", transport=deepseek_transport(lambda _: completed_chat()))
+    ollama = OllamaModelProvider(model="llama3.2", transport=deepseek_transport(lambda _: completed_chat()))
+    router = ModelRouter([openai_like(), openrouter_like(), deepseek, ollama])
     decision = await router.select(CapabilityRequest(privacy="local_only"))
-    assert decision.selected.provider_id == "vllm"
-    assert decision.fallbacks == []
+    assert decision.selected.provider_id == "ollama"
+    assert all(candidate.provider_id != "deepseek" for candidate in decision.chain)
 
 
 @pytest.mark.asyncio
-async def test_unavailable_vllm_is_skipped_and_cloud_still_serves(no_local_env):
+async def test_unconfigured_deepseek_is_skipped_and_cloud_still_serves(no_extra_providers):
     from tests.test_router import openai_like
 
-    vllm = VllmModelProvider(
-        model="meta-llama/Llama-3.1-8B-Instruct",
-        transport=vllm_transport(lambda _: (_ for _ in ()).throw(httpx.ConnectError("offline"))),
-    )
+    deepseek = DeepSeekModelProvider()
     openai = openai_like(output={"answer": "cloud"})
-    router = ModelRouter([openai, vllm])
+    router = ModelRouter([openai, deepseek])
     response = await router.complete(CapabilityRequest(reasoning="high"), REQUEST)
     assert response.provider == "openai"
     assert openai.calls == 1
-    with pytest.raises(ProviderError, match="Could not reach vLLM"):
-        await vllm.complete(REQUEST)
+    with pytest.raises(ProviderError, match="not configured"):
+        await deepseek.complete(REQUEST)
