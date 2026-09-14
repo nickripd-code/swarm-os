@@ -16,6 +16,7 @@ class MissionStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     WAITING = "waiting"
+    PAUSED = "paused"
     BLOCKED = "blocked"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -45,6 +46,7 @@ class FailureClass(StrEnum):
 class AgentStatus(StrEnum):
     CREATED = "created"
     RUNNING = "running"
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     STOPPED = "stopped"
@@ -89,6 +91,7 @@ class MissionAnswer(BaseModel):
     question: str
     answer: str
     answered_at: datetime = Field(default_factory=utcnow)
+    consumed_at: datetime | None = None
 
 
 class Mission(BaseModel):
@@ -106,6 +109,8 @@ class Mission(BaseModel):
     result: dict[str, Any] | None = None
     pending_question: PendingQuestion | None = None
     answers: list[MissionAnswer] = Field(default_factory=list)
+    paused_at: datetime | None = None
+    paused_seconds: float = Field(default=0, ge=0)
 
 
 class AgentSpec(BaseModel):

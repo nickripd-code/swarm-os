@@ -33,7 +33,9 @@ class EventType(StrEnum):
 
     MISSION_STARTED = "mission.started"
     MISSION_RESUMED = "mission.resumed"
+    MISSION_RESUME_REQUESTED = "mission.resume_requested"
     MISSION_WAITING = "mission.waiting"
+    MISSION_PAUSED = "mission.paused"
     MISSION_RUNNING = "mission.running"
     MISSION_COMPLETED = "mission.completed"
     MISSION_FAILED = "mission.failed"
@@ -57,6 +59,7 @@ class EventType(StrEnum):
 
     PAYMENT_CREATED = "payment.created"
     USER_ANSWERED = "user.answered"
+    USER_ANSWER_CONSUMED = "user.answer_consumed"
 
     BUDGET_UPDATED = "budget.updated"
     BUDGET_WARNING = "budget.warning"
@@ -83,6 +86,7 @@ _TASK_STATUS_EVENTS = {
 _MISSION_STATUS_EVENTS = {
     MissionStatus.RUNNING: EventType.MISSION_RUNNING,
     MissionStatus.WAITING: EventType.MISSION_WAITING,
+    MissionStatus.PAUSED: EventType.MISSION_PAUSED,
     MissionStatus.BLOCKED: EventType.MISSION_BLOCKED,
     MissionStatus.COMPLETED: EventType.MISSION_COMPLETED,
     MissionStatus.FAILED: EventType.MISSION_FAILED,

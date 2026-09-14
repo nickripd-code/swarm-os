@@ -3,17 +3,27 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, create_engine, select
+from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, create_engine, select, update
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from .events import (
     EventType, coerce_event_type, is_task_event, parse_event_type, task_status_from_event,
 )
 from .migrations import apply_migrations
-from .models import AgentSpec, Mission, MissionEvent, Task, utcnow
+from .models import AgentSpec, Mission, MissionAnswer, MissionEvent, MissionStatus, Task, utcnow
+
+
+class AnswerStateError(RuntimeError):
+    """A durable mission cannot accept or consume the requested answer."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+_ANSWERABLE_STATUSES = frozenset({MissionStatus.WAITING, MissionStatus.PAUSED})
 
 
 class Base(DeclarativeBase):
@@ -106,6 +116,69 @@ class Store:
         with self.sessions() as db:
             rows = db.scalars(select(MissionRow).order_by(MissionRow.updated_at.desc())).all()
             return [Mission.model_validate_json(row.payload) for row in rows]
+
+    def accept_answer(self, mission_id: UUID, question_id: str, answer: str,
+                      *, attempts: int = 3) -> tuple[Mission, MissionAnswer]:
+        """Atomically consume the open question with compare-and-swap persistence."""
+        for _ in range(attempts):
+            with self.sessions.begin() as db:
+                row = db.get(MissionRow, str(mission_id))
+                if row is None:
+                    raise AnswerStateError("not_found", "Mission not found")
+                original = row.payload
+                mission = Mission.model_validate_json(original)
+                if any(item.question_id == question_id for item in mission.answers):
+                    raise AnswerStateError("duplicate", "This question was already answered")
+                if mission.status in {
+                    MissionStatus.BLOCKED, MissionStatus.COMPLETED,
+                    MissionStatus.FAILED, MissionStatus.STOPPED,
+                }:
+                    raise AnswerStateError("terminal", "Mission is no longer accepting answers")
+                pending = mission.pending_question
+                if pending is None:
+                    raise AnswerStateError("missing", "No question is awaiting an answer")
+                if mission.status not in _ANSWERABLE_STATUSES:
+                    raise AnswerStateError("status", "Mission is not accepting answers in its current state")
+                if pending.question_id != question_id:
+                    raise AnswerStateError("mismatch", "Answer does not match the open question")
+                record = MissionAnswer(question_id=question_id, question=pending.question, answer=answer)
+                mission.answers.append(record)
+                mission.pending_question = None
+                mission.updated_at = utcnow()
+                changed = db.execute(
+                    update(MissionRow)
+                    .where(MissionRow.id == str(mission_id), MissionRow.payload == original)
+                    .values(payload=mission.model_dump_json(), updated_at=mission.updated_at)
+                )
+                if getattr(changed, "rowcount", 0) == 1:
+                    return mission, record
+        raise AnswerStateError("conflict", "Mission changed while the answer was being accepted")
+
+    def mark_answer_consumed(self, mission_id: UUID, question_id: str,
+                             *, attempts: int = 3) -> tuple[Mission, MissionAnswer, bool]:
+        """Persist controller consumption before a truthful consumption event is emitted."""
+        for _ in range(attempts):
+            with self.sessions.begin() as db:
+                row = db.get(MissionRow, str(mission_id))
+                if row is None:
+                    raise AnswerStateError("not_found", "Mission not found")
+                original = row.payload
+                mission = Mission.model_validate_json(original)
+                record = next((item for item in mission.answers if item.question_id == question_id), None)
+                if record is None:
+                    raise AnswerStateError("missing", "The matching human answer is not persisted")
+                if record.consumed_at is not None:
+                    return mission, record, False
+                record.consumed_at = utcnow()
+                mission.updated_at = record.consumed_at
+                changed = db.execute(
+                    update(MissionRow)
+                    .where(MissionRow.id == str(mission_id), MissionRow.payload == original)
+                    .values(payload=mission.model_dump_json(), updated_at=mission.updated_at)
+                )
+                if getattr(changed, "rowcount", 0) == 1:
+                    return mission, record, True
+        raise AnswerStateError("conflict", "Mission changed while the answer was being consumed")
 
     def save_agent(self, agent: AgentSpec) -> None:
         with self.sessions.begin() as db:
