@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -73,6 +73,7 @@ class MissionCreate(BaseModel):
     goal: str = Field(min_length=3, max_length=4000)
     budget: float = Field(default=0, ge=0)
     live_payments: bool = False
+    privacy: Literal["cloud_allowed", "local_only"] = "cloud_allowed"
     limits: MissionLimits = Field(default_factory=MissionLimits)
 
 
@@ -96,6 +97,7 @@ class Mission(BaseModel):
     budget: float = 0
     spent: float = 0
     live_payments: bool = False
+    privacy: Literal["cloud_allowed", "local_only"] = "cloud_allowed"
     limits: MissionLimits = Field(default_factory=MissionLimits)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)

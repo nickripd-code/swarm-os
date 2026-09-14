@@ -72,7 +72,8 @@ async def stop_all():
 async def create_mission(request: MissionCreate):
     if not runtime.controller.configured():
         raise HTTPException(503, "No model provider is configured. Set OPENAI_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY, or OLLAMA_MODEL / OLLAMA_BASE_URL on the server before launching.")
-    mission = Mission(goal=request.goal, budget=request.budget, live_payments=request.live_payments, limits=request.limits)
+    mission = Mission(goal=request.goal, budget=request.budget, live_payments=request.live_payments,
+                      privacy=request.privacy, limits=request.limits)
     store.save_mission(mission)
     await runtime.start(mission)
     return mission

@@ -13,6 +13,7 @@ from .models import (
     AgentSpec, AgentStatus, FailureClass, Mission, MissionAnswer, MissionEvent,
     MissionStatus, PaymentIntent, PendingQuestion, Task, TaskStatus, utcnow,
 )
+from .policy import PolicyError, PolicyGate, PolicyRequest
 from .store import Store
 from .llm import (
     DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BASE_SECONDS, LLMProvider, build_controller,
@@ -24,12 +25,6 @@ from .payments import PaymentError, PaymentProvider, resolve_payment_provider
 
 TERMINAL = {MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.STOPPED, MissionStatus.BLOCKED}
 RESUMABLE = {MissionStatus.PENDING, MissionStatus.RUNNING, MissionStatus.WAITING}
-
-
-class PolicyError(Exception):
-    def __init__(self, message: str, failure_class: FailureClass = FailureClass.POLICY_REFUSAL):
-        super().__init__(message)
-        self.failure_class = failure_class
 
 
 def failure_payload(error: str, failure_class: FailureClass) -> dict[str, Any]:
@@ -78,6 +73,7 @@ class SwarmRuntime:
         self.leases = WorkerLeases(store)
         self.idempotency = IdempotencyGuard(store)
         self._held_leases: dict[tuple[str, str], str] = {}
+        self.policy = PolicyGate()
 
     def _owner(self) -> str:
         return str(self.worker_id)
@@ -153,10 +149,15 @@ class SwarmRuntime:
         self.check_stopped(mission.id)
         current = self.agents[mission.id]
         depth = parent.depth + 1 if parent else 0
-        if parent and parent.mission_id != mission.id:
-            raise PolicyError("Parent must belong to this mission")
-        if depth > mission.limits.max_depth or len(current) >= mission.limits.max_agents:
-            raise PolicyError("Agent spawning limit reached", FailureClass.RESOURCE_EXHAUSTED)
+        self.policy.authorize(PolicyRequest(
+            action="spawn",
+            mission=mission,
+            agent_count=len(current),
+            depth=depth,
+            capabilities=tuple(capabilities or []),
+            mode=getattr(self.controller, "mode", "openai"),
+            parent_ok=not parent or parent.mission_id == mission.id,
+        ))
         agent = AgentSpec(mission_id=mission.id, parent_id=parent.id if parent else None,
                           role=role, purpose=purpose, capabilities=capabilities or [], depth=depth)
         current.append(agent)
@@ -232,9 +233,7 @@ class SwarmRuntime:
     def consume_tool_call(self, mission: Mission) -> int:
         """Charge one tool-call against the mission budget. Fail closed when exhausted."""
         used = self.tool_calls_used(mission.id)
-        limit = mission.limits.max_tool_calls
-        if used >= limit:
-            raise PolicyError("Tool call limit reached", FailureClass.RESOURCE_EXHAUSTED)
+        self.policy.check_tool_budget(mission, used)
         used += 1
         self._tool_calls[mission.id] = used
         return used
@@ -280,15 +279,23 @@ class SwarmRuntime:
             except ToolError:
                 pass
         available = self.available_tools(mission)
-        if used >= limit:
+        try:
+            self.policy.authorize(PolicyRequest(
+                action="tool_use",
+                mission=mission,
+                tool_calls_used=used,
+                tool=name,
+                mode=getattr(self.controller, "mode", "openai"),
+            ))
+        except PolicyError as exc:
             self.idempotency.record(str(mission.id), key, "tool", {
-                "error": "Tool call limit reached", "failure_class": str(FailureClass.RESOURCE_EXHAUSTED),
+                "error": str(exc), "failure_class": str(exc.failure_class),
             })
             await self.emit(mission.id, EventType.TOOL_FAILED, {
-                "tool": name, "failure_class": str(FailureClass.RESOURCE_EXHAUSTED),
-                "error": "Tool call limit reached", "used": used, "max": limit,
+                "tool": name, "failure_class": str(exc.failure_class),
+                "error": str(exc), "used": used, "max": limit,
             }, actor_id)
-            raise PolicyError("Tool call limit reached", FailureClass.RESOURCE_EXHAUSTED)
+            raise
         if self.tools is None or name not in available:
             error = "No tool provider is connected" if not available else f"Unknown tool: {name}"
             self.idempotency.record(str(mission.id), key, "tool", {
@@ -582,22 +589,22 @@ class SwarmRuntime:
                                 raise PolicyError("Model selected an unknown parent agent",
                                                   FailureClass.INVALID_OUTPUT)
                         caps = decision.get("capabilities") or ["reason"]
-                        if self.controller.mode != "demo" and set(caps) - {"reason", "write", "review"}:
-                            raise PolicyError("Model requested an unavailable capability",
-                                              FailureClass.CAPABILITY_MISMATCH)
                         child = await self.spawn(mission, decision["role"], decision["purpose"], parent, caps)
                         await self.emit(mission.id, EventType.AGENT_MESSAGE, {
                             "from_id": str(root.id), "to_id": str(child.id), "kind": "assignment",
                             "text": decision["purpose"]}, root.id)
                         await self._assign_unassigned_tasks(mission)
                     elif action == "finish":
-                        if self._in_flight_tasks(mission):
-                            raise PolicyError("Cannot finish while tasks are active", FailureClass.INVALID_OUTPUT)
                         if mission.pending_question is not None:
                             raise PolicyError("Cannot finish while a question is unanswered",
                                               FailureClass.INVALID_OUTPUT)
-                        if not decision.get("summary"):
-                            raise PolicyError("Model omitted the final deliverable", FailureClass.INVALID_OUTPUT)
+                        self.policy.authorize(PolicyRequest(
+                            action="finish",
+                            mission=mission,
+                            in_flight_tasks=len(self._in_flight_tasks(mission)),
+                            summary=decision.get("summary"),
+                            mode=getattr(self.controller, "mode", "openai"),
+                        ))
                         claim = {"summary": decision["summary"], "mode": self.controller.mode,
                                  "outputs": [t.output for t in self.tasks[mission.id] if t.output]}
                         await self._verify_finish(mission, root, claim)
@@ -765,7 +772,8 @@ class SwarmRuntime:
                 "tool_results": self.tool_results(mission.id),
                 "pending_question": (mission.pending_question.model_dump(mode="json")
                                      if mission.pending_question else None),
-                "answers": [item.model_dump(mode="json") for item in mission.answers]}
+                "answers": [item.model_dump(mode="json") for item in mission.answers],
+                "privacy": mission.privacy}
 
     async def _execute_task(self, mission: Mission, task: Task, agent: AgentSpec):
         self.check_stopped(mission.id)
