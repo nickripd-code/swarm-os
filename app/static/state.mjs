@@ -48,6 +48,62 @@ export function applyEvent(state, e) {
   if (state.events.length > 120) state.events.length = 120;
   return true;
 }
+export function missionMode(state) {
+  if (state.preview) return "preview";
+  return state.mission?.mode || state.mission?.result?.mode || (state.mission ? "pending" : "standby");
+}
+export function resultMetaText(mission) {
+  const result = mission?.result;
+  if (!result) return "";
+  const bits = [];
+  if (mission.status) bits.push(String(mission.status).toUpperCase());
+  if (result.mode) bits.push("mode " + result.mode);
+  if (result.failure_class) bits.push(result.failure_class);
+  return bits.join(" · ");
+}
+export function alertFromEvent(e) {
+  const p = e.payload || {};
+  switch (e.event_type) {
+    case "mission.failed":
+      return {
+        level: "critical",
+        title: "Mission failed",
+        detail: p.error || p.failure_class || "",
+        failure_class: p.failure_class || null,
+        event_type: e.event_type,
+      };
+    case "mission.completed":
+      return {
+        level: "success",
+        title: "Mission complete",
+        detail: p.summary ? String(p.summary).slice(0, 180) : "Result ready",
+        event_type: e.event_type,
+      };
+    case "mission.blocked":
+      return {
+        level: "warning",
+        title: "Mission blocked",
+        detail: p.reason || p.error || "Required capability or information is unavailable",
+        event_type: e.event_type,
+      };
+    case "task.blocked":
+      return {
+        level: "warning",
+        title: "Task blocked",
+        detail: p.output?.finding || p.reason || p.description || "A task needs a missing capability",
+        event_type: e.event_type,
+      };
+    case "mission.stopped":
+      return {
+        level: "warning",
+        title: "Execution stopped",
+        detail: p.reason || "All execution stopped",
+        event_type: e.event_type,
+      };
+    default:
+      return null;
+  }
+}
 export function layoutTree(agents, minimumWidth = 700) {
   const list = [...agents.values()];
   const children = new Map();

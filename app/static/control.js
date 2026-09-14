@@ -1,19 +1,90 @@
-import {newState,applyEvent,layoutTree,terminal} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
 const statusName = status => ({created:"Ready",running:"Thinking",completed:"Done",blocked:"Blocked",failed:"Failed",stopped:"Stopped",pending:"Queued"}[status] || status);
 const symbol = status => ({created:"·",running:"",completed:"✓",blocked:"?",failed:"!",stopped:"■"}[status] || "·");
 const colors = ["#c6b4ef","#edbd9e","#aed8cf","#e6cd90","#b5cbe3","#dfb9ca"];
-let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null;
+let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null, hudTick=null, notifyArmed=false;
 const elements=new Map();
 const bot = color => '<span class="bot" style="--agent-color:'+color+'" aria-hidden="true"><span class="ear ear-left"></span><span class="ear ear-right"></span><span class="visor"><i></i><i></i><b class="mouth"></b></span></span>';
 function colorFor(a) {if(!a.parent_id)return colors[0];let n=0;for(const c of a.role)n=(n*31+c.charCodeAt(0))>>>0;return colors[1+n%(colors.length-1)];}
 function showNotice(message) {$("notice").textContent=message;$("notice").hidden=!message;}
 function connection(text,cls="") {$("connection").className="connection "+cls;$("connection").innerHTML="<i></i>"+esc(text);}
+function formatElapsed(ms){
+  if(!Number.isFinite(ms)||ms<0)ms=0;
+  const s=Math.floor(ms/1000), m=Math.floor(s/60), h=Math.floor(m/60);
+  if(h)return h+"h "+(m%60)+"m";
+  if(m)return m+"m "+(s%60)+"s";
+  return s+"s";
+}
+function renderHud(){
+  const mission=state.mission, status=mission?.status||"idle", mode=missionMode(state);
+  if($("objectiveText"))$("objectiveText").textContent=mission?.goal||"Awaiting a mission.";
+  if($("missionMode")){
+    $("missionMode").textContent=String(mode).replaceAll("_"," ").toUpperCase();
+    $("missionMode").className="hud-chip mode "+mode;
+  }
+  if($("missionStatus")){
+    $("missionStatus").textContent=status.toUpperCase();
+    $("missionStatus").className="hud-chip status "+status+(state.preview?" preview":"");
+  }
+  if($("hudAgents"))$("hudAgents").textContent=state.agents.size;
+  if($("hudTasks"))$("hudTasks").textContent=[...state.tasks.values()].filter(t=>t.status==="completed").length;
+  if($("hudTokens"))$("hudTokens").textContent=(state.usage.input+state.usage.output).toLocaleString();
+  if($("hudElapsed")){
+    const start=mission?.created_at?new Date(mission.created_at).getTime():NaN;
+    $("hudElapsed").textContent=Number.isFinite(start)?formatElapsed(Date.now()-start):"—";
+  }
+  const running=!!mission&&!terminal.has(status);
+  if(running&&!hudTick)hudTick=setInterval(renderHud,1000);
+  if(!running&&hudTick){clearInterval(hudTick);hudTick=null;}
+}
+function clearAlerts(){if($("alerts"))$("alerts").replaceChildren();}
+function pushAlert(alert){
+  if(!alert||!$("alerts"))return;
+  const stack=$("alerts");
+  for(const el of [...stack.children]){
+    if(el.dataset.type===alert.event_type&&el.dataset.detail===(alert.detail||""))el.remove();
+  }
+  const item=document.createElement("article");
+  item.className="alert-card "+(alert.level||"info");
+  item.dataset.type=alert.event_type||"";
+  item.dataset.detail=alert.detail||"";
+  const klass=alert.failure_class?'<span class="alert-class">'+esc(alert.failure_class)+"</span>":"";
+  item.innerHTML="<header><strong>"+esc(alert.title)+"</strong>"+klass+'<button type="button" class="alert-dismiss" aria-label="Dismiss">×</button></header>'+(alert.detail?"<p>"+esc(alert.detail)+"</p>":"");
+  item.querySelector(".alert-dismiss").onclick=ev=>{ev.stopPropagation();item.remove();};
+  item.onclick=()=>{const panel=$("resultPanel");if(panel&&!panel.hidden)panel.scrollIntoView({behavior:"smooth",block:"nearest"});};
+  stack.prepend(item);
+  while(stack.children.length>5)stack.lastElementChild.remove();
+  if(alert.level==="success")setTimeout(()=>item.remove(),8000);
+  maybeNotify(alert);
+}
+function considerAlert(e,liveFrom){
+  const alert=alertFromEvent(e);
+  if(!alert)return;
+  if(e.created_at){
+    const created=new Date(e.created_at).getTime();
+    if(Number.isFinite(created)&&created<liveFrom-2000)return;
+  }
+  pushAlert(alert);
+}
+function maybeNotify(alert){
+  if(!notifyArmed||typeof Notification==="undefined"||Notification.permission!=="granted"||!document.hidden)return;
+  try{
+    const body=[alert.failure_class,alert.detail].filter(Boolean).join(" · ").slice(0,140);
+    const n=new Notification(alert.title,{body,tag:"swarm-"+(alert.event_type||"alert")});
+    n.onclick=()=>{window.focus();n.close();};
+  }catch{}
+}
+function armNotifications(){
+  notifyArmed=true;
+  if(typeof Notification!=="undefined"&&Notification.permission==="default")Promise.resolve(Notification.requestPermission()).catch(()=>{});
+}
 function schedule(){if(!frame)frame=requestAnimationFrame(()=>{frame=0;render();});}
 function render(){
   const mission=state.mission, status=mission?.status||"idle";
+  renderHud();
   $("modeLabel").textContent=state.preview?"PREVIEW":status.toUpperCase();
   $("modeLabel").className="mode-tag "+status;
   $("agentCount").textContent=state.agents.size;
@@ -25,7 +96,7 @@ function render(){
   $("launch").innerHTML=$("launch").disabled?'Mission running <span>⌁</span>':'Launch mission <span>↗</span>';
   $("missionCaption").textContent=state.preview?"Interactive preview · no models or tools are running":mission?.goal||"One mission. As many minds as it needs.";
   if(state.preview)connection("Preview");
-  else if(terminal.has(status))connection("Mission "+status,"live");
+  else if(terminal.has(status))connection("Mission "+status,status==="completed"?"live":"disconnected");
   graph=layoutTree(state.agents,Math.max(650,$("mapViewport").clientWidth/zoom));
   $("world").style.width=graph.width+"px";$("world").style.height=graph.height+"px";
   $("world").style.transform="scale("+zoom+")";
@@ -80,6 +151,8 @@ function render(){
   if(mission?.result){
     $("resultTitle").textContent=status==="completed"?"Here’s what the crew delivered.":status==="blocked"?"The mission needs a missing capability.":status==="stopped"?"All execution stopped.":"The mission couldn’t finish.";
     $("resultText").textContent=mission.result.summary||mission.result.reason||mission.result.error||"";
+    const meta=resultMetaText(mission);
+    if($("resultMeta")){$("resultMeta").hidden=!meta;$("resultMeta").textContent=meta;}
   }
 }
 function selectAgent(id){
@@ -121,7 +194,7 @@ function describe(e){
     case "mission.started":return "The mission is underway";
     case "mission.completed":return "<b>Mission complete.</b> Result ready below";
     case "mission.stopped":return "<b>Execution stopped</b>";
-    case "mission.failed":return "<b>Mission failed</b> · "+esc(p.error||"");
+    case "mission.failed":return "<b>Mission failed</b>"+(p.failure_class?" · "+esc(p.failure_class):"")+(p.error?" · "+esc(p.error):"");
     case "mission.blocked":return "<b>Mission blocked</b> · "+esc(p.reason||"");
     default:return "";
   }
@@ -142,22 +215,32 @@ function disconnect(){
 }
 function reset(mission){
   state=newState(mission);selected=null;elements.clear();$("nodes").replaceChildren();$("activity").replaceChildren();
-  $("resultPanel").hidden=true;showNotice("");zoom=1;$("zoomValue").textContent="100%";
+  $("resultPanel").hidden=true;if($("resultMeta")){$("resultMeta").hidden=true;$("resultMeta").textContent="";}
+  showNotice("");zoom=1;$("zoomValue").textContent="100%";clearAlerts();
+  if(hudTick){clearInterval(hudTick);hudTick=null;}
 }
 function connect(id,gen){
   if(gen!==generation)return;
+  const liveFrom=Date.now();
   ws=new WebSocket((location.protocol==="https:"?"wss:":"ws:")+"//"+location.host+"/api/missions/"+id+"/stream");
-  ws.onopen=()=>{if(gen===generation)connection("Live connection","live");};
+  ws.onopen=()=>{if(gen===generation&&!terminal.has(state.mission?.status||""))connection("Live connection","live");};
   ws.onmessage=message=>{
     if(gen!==generation)return;
     try{
       const e=JSON.parse(message.data);
-      if(applyEvent(state,e)){schedule();if(e.event_type==='agent.message')setTimeout(schedule,9100);if(e.event_type.startsWith("mission.")&&terminal.has(e.event_type.split(".")[1]))refreshHistory();}
+      if(applyEvent(state,e)){
+        schedule();
+        considerAlert(e,liveFrom);
+        if(e.event_type==='agent.message')setTimeout(schedule,9100);
+        if(e.event_type.startsWith("mission.")&&terminal.has(e.event_type.split(".")[1]))refreshHistory();
+      }
     }catch{showNotice("An event could not be read. Reconnect to restore the mission.");}
   };
   ws.onerror=()=>connection("Connection interrupted","disconnected");
   ws.onclose=()=>{
     if(gen!==generation)return;
+    const status=state.mission?.status||"";
+    if(terminal.has(status)){connection("Mission "+status,status==="completed"?"live":"disconnected");return;}
     connection("Reconnecting…","disconnected");
     retry=setTimeout(()=>connect(id,gen),2000);
   };
@@ -167,6 +250,11 @@ async function loadMission(id){
   try{
     const m=await request("/api/missions/"+id);if(gen!==generation)return;
     reset(m);localStorage.setItem("swarm.mission",id);$("goal").value=m.goal;
+    try{
+      const events=await request("/api/missions/"+id+"/events");
+      if(gen!==generation)return;
+      for(const e of events)applyEvent(state,e);
+    }catch{}
     connect(id,gen);schedule();
   }catch(error){showNotice(error.message);}
 }
@@ -181,7 +269,7 @@ async function refreshHistory(){
 }
 $("missionForm").addEventListener("submit",async e=>{
   e.preventDefault();if($("launch").disabled)return;
-  showNotice("");$("launch").disabled=true;
+  showNotice("");$("launch").disabled=true;armNotifications();
   try{
     const m=await request("/api/missions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({goal:$("goal").value})});
     disconnect();reset(m);localStorage.setItem("swarm.mission",m.id);connect(m.id,generation);
@@ -191,11 +279,20 @@ $("missionForm").addEventListener("submit",async e=>{
 $("stopAll").addEventListener("click",async()=>{
   $("stopAll").disabled=true;$("stopAll").innerHTML="<span>■</span> STOPPING…";
   try{
-    if(state.preview){clearTimeout(previewTimer);for(const a of state.agents.values())a.status="stopped";state.mission.status="stopped";schedule();}
+    if(state.preview){
+      clearTimeout(previewTimer);for(const a of state.agents.values())a.status="stopped";state.mission.status="stopped";
+      state.mission.result={reason:"Preview halted"};
+      pushAlert({level:"warning",title:"Execution stopped",detail:"Preview halted",event_type:"mission.stopped"});
+      schedule();
+    }
     const result=await request("/api/stop-all",{method:"POST"});
     $("announcement").textContent="All mission execution stopped";
     connection("All execution stopped");
-    if(state.mission&&!state.preview){const m=await request("/api/missions/"+state.mission.id);state.mission=m;schedule();}
+    if(state.mission&&!state.preview){
+      const mode=state.mission.mode;
+      const m=await request("/api/missions/"+state.mission.id);
+      state.mission=m;if(mode)state.mission.mode=mode;schedule();
+    }
     if(result.active_missions)showNotice("Some executions are still shutting down.");
   }catch(error){showNotice("Shutdown could not be confirmed: "+error.message);}
   finally{$("stopAll").disabled=false;$("stopAll").innerHTML="<span>■</span> STOP ALL";refreshHistory();}
@@ -224,7 +321,7 @@ $("mapViewport").addEventListener("pointermove",e=>{if(drag){$("mapViewport").sc
 for(const type of ["pointerup","pointercancel"])$("mapViewport").addEventListener(type,()=>{drag=null;$("mapViewport").classList.remove("panning");});
 new ResizeObserver(()=>schedule()).observe($("mapViewport"));
 function preview(){
-  disconnect();reset({id:"preview",goal:"Design a launch plan for a small business",status:"running"});state.preview=true;
+  disconnect();reset({id:"preview",goal:"Design a launch plan for a small business",status:"running",created_at:new Date().toISOString()});state.preview=true;
   const specs=[
     ["root",null,"mission_controller","Turn the goal into useful work",["spawn","coordinate","reason"],"running"],
     ["strategy","root","strategist","Define the audience and launch priorities",["reason","write"],"completed"],
