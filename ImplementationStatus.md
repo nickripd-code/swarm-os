@@ -156,7 +156,7 @@ Nothing in the current test suite is known red. UI preview is synthetic by desig
 
 ## NEXT PRIORITY
 
-**This slice:** fourth local/self-hosted adapter — llama.cpp OpenAI-compatible Chat Completions (`LlamaCppModelProvider`). Opt-in via `LLAMACPP_MODEL` / `LLAMACPP_BASE_URL`. Registered in `build_router()` when opted in; unconfigured stays out of the catalog. Daemon-down health is `unavailable`; `complete()` fails closed with no fake completions. Rebased onto main after vLLM (`#16`) and the verifier seed (`#15`); those modules were not rewritten. Lane is the llama.cpp adapter (not ModelRouter ranking). No OrganizationDesigner. No React/Pixi rewrite. Tests: `python3 -m pytest tests/ -q` → recorded after rebase.
+**This slice:** fourth local/self-hosted adapter — llama.cpp OpenAI-compatible Chat Completions (`LlamaCppModelProvider`). Opt-in via `LLAMACPP_MODEL` / `LLAMACPP_BASE_URL`. Registered in `build_router()` when opted in; unconfigured stays out of the catalog. Daemon-down health is `unavailable`; `complete()` fails closed with no fake completions. Rebased onto main after vLLM (`#16`) and the verifier seed (`#15`); those modules were not rewritten. Lane is the llama.cpp adapter (not ModelRouter ranking). No OrganizationDesigner. No React/Pixi rewrite. Tests: `python3 -m pytest tests/ -q` → **180 passed**.
 
 **Recommended next backend slice:** OrganizationDesigner remains reserved. External evidence runners (tests/endpoints/files) or ModelRouter historical success / cost-aware ranking. Still fail closed. Still no game-world UI rewrite.
 
