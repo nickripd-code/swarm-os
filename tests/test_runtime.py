@@ -6,6 +6,7 @@ from app.runtime import SwarmRuntime, PolicyError
 from app.llm import FallbackController
 from app.llm import LLMProvider, ProviderError, DEFAULT_MAX_RETRIES, retry_delay_seconds
 from app.store import Store
+from app.tools import LocalToolProvider
 from app.verifier import local_evidence_check
 
 
@@ -331,26 +332,29 @@ async def test_finish_while_tasks_pending_fails_closed(tmp_path):
 @pytest.mark.asyncio
 async def test_max_tool_calls_enforced_when_exceeded(tmp_path):
     store = Store(str(tmp_path / "swarm.db"))
-    runtime = SwarmRuntime(store)
-    runtime.external_tools = ["echo"]
+    runtime = SwarmRuntime(store, tools=LocalToolProvider(allowlist=["echo"]))
     mission = Mission(goal="Budget tools", limits={"max_tool_calls": 2})
     store.save_mission(mission)
-    assert await runtime.invoke_tool(mission, "echo") == 1
-    assert await runtime.invoke_tool(mission, "echo") == 2
+    first = await runtime.invoke_tool(mission, "echo", {"text": "one"})
+    second = await runtime.invoke_tool(mission, "echo", {"text": "two"})
+    assert first["used"] == 1 and first["ok"] and first["output"]["text"] == "one"
+    assert second["used"] == 2 and second["output"]["text"] == "two"
     with pytest.raises(PolicyError) as exc:
-        await runtime.invoke_tool(mission, "echo")
+        await runtime.invoke_tool(mission, "echo", {"text": "three"})
     assert exc.value.failure_class == FailureClass.RESOURCE_EXHAUSTED
     assert runtime.tool_calls_used(mission.id) == 2
     failed = [e for e in store.events(mission.id) if e.event_type == "tool.failed"]
     assert failed and failed[-1].payload["failure_class"] == "RESOURCE_EXHAUSTED"
     started = [e for e in store.events(mission.id) if e.event_type == "tool.started"]
+    completed = [e for e in store.events(mission.id) if e.event_type == "tool.completed"]
     assert len(started) == 2
+    assert len(completed) == 2
 
 
 @pytest.mark.asyncio
 async def test_tool_call_without_provider_fails_closed_and_does_not_charge(tmp_path):
     store = Store(str(tmp_path / "swarm.db"))
-    runtime = SwarmRuntime(store)
+    runtime = SwarmRuntime(store, tools=None)
     mission = Mission(goal="No tools connected")
     store.save_mission(mission)
     state = runtime._state(mission)

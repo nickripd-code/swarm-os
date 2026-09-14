@@ -203,7 +203,7 @@ def response_format(name: str, properties: dict) -> dict:
 
 
 DECISION_FORMAT = response_format("mission_decision", {
-    "action": {"type": "string", "enum": ["spawn", "finish", "wait", "ask", "blocked"]},
+    "action": {"type": "string", "enum": ["spawn", "finish", "wait", "ask", "blocked", "use_tool"]},
     "role": {"type": ["string", "null"]},
     "purpose": {"type": ["string", "null"]},
     "parent_id": {"type": ["string", "null"]},
@@ -211,6 +211,8 @@ DECISION_FORMAT = response_format("mission_decision", {
     "summary": {"type": ["string", "null"]},
     "reason": {"type": ["string", "null"]},
     "question": {"type": ["string", "null"]},
+    "tool": {"type": ["string", "null"]},
+    "arguments_json": {"type": ["string", "null"]},
 })
 WORK_FORMAT = response_format("worker_result", {
     "status": {"type": "string", "enum": ["completed", "blocked"]},
@@ -1062,8 +1064,10 @@ class OpenAIProvider(LLMProvider):
 Spawn only useful specialists, with a concrete purpose; prefer a small team. Any existing agent can be
 the parent of a new specialist: provide its exact parent_id or null for the mission controller.
 Available capabilities: reason (analyze supplied information), write (compose text/code in the result),
-review (inspect other workers' results). No browser, network, shell, messaging, files or payment tools
-are connected yet. Capabilities do not grant access to tools that do not exist.
+review (inspect other workers' results). If external_tools is non-empty you may use_tool with an exact
+name and arguments_json as a JSON object string; results appear in tool_results. If external_tools is
+empty, no tools exist — do not invent tool output. No browser, shell, filesystem, payments or unverified
+network tools beyond that list. Capabilities do not grant access to tools that do not exist.
 Use completed worker results; do not redo completed work. Spawned workers are assigned pending tasks;
 those tasks run when you wait. Do not finish while tasks are pending or running.
 Choose ordinary defaults when a reasonable assumption is enough. If a required fact can only come from

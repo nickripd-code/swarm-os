@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import defaultdict
 from datetime import datetime
 from typing import Any, Awaitable, Callable
@@ -15,6 +16,7 @@ from .llm import (
     DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BASE_SECONDS, LLMProvider, build_controller,
     ProviderError, RETRYABLE_FAILURE_CLASSES, retry_delay_seconds,
 )
+from .tools import ToolCall, ToolError, ToolProvider, build_tool_provider, public_tool_data
 from .verifier import public_verification, verification_accepted
 from .payments import PaymentError, PaymentProvider, resolve_payment_provider
 
@@ -47,11 +49,13 @@ class WalletAdapter:
 
 
 EventSink = Callable[[MissionEvent], Awaitable[None]]
+_UNSET = object()
 
 
 class SwarmRuntime:
     def __init__(self, store: Store, sink: EventSink | None = None, controller: LLMProvider | None = None,
-                 max_retries: int = DEFAULT_MAX_RETRIES, retry_base_seconds: float = DEFAULT_RETRY_BASE_SECONDS):
+                 max_retries: int = DEFAULT_MAX_RETRIES, retry_base_seconds: float = DEFAULT_RETRY_BASE_SECONDS,
+                 tools: ToolProvider | None | object = _UNSET):
         self.store, self.sink = store, sink
         self.agents: dict[UUID, list[AgentSpec]] = defaultdict(list)
         self.tasks: dict[UUID, list[Task]] = defaultdict(list)
@@ -65,8 +69,9 @@ class SwarmRuntime:
         self.max_retries = max_retries
         self.retry_base_seconds = retry_base_seconds
         self._tool_calls: dict[UUID, int] = {}
+        self._tool_results: dict[UUID, list[dict[str, Any]]] = {}
         self._answer_waiters: dict[UUID, asyncio.Event] = {}
-        self.external_tools: list[str] = []
+        self.tools = build_tool_provider() if tools is _UNSET else tools
 
     async def emit(self, mission_id: UUID, event_type: str, payload: dict[str, Any], actor_id: UUID | None = None):
         event = self.store.append(MissionEvent(mission_id=mission_id, event_type=event_type, actor_id=actor_id, payload=payload))
@@ -151,7 +156,9 @@ class SwarmRuntime:
 
     def available_tools(self, mission: Mission | None = None) -> list[str]:
         _ = mission
-        return list(self.external_tools)
+        if self.tools is None:
+            return []
+        return [spec.name for spec in self.tools.list_tools()]
 
     def tool_calls_used(self, mission_id: UUID) -> int:
         if mission_id not in self._tool_calls:
@@ -159,6 +166,15 @@ class SwarmRuntime:
                 1 for event in self.store.events(mission_id) if event.event_type == "tool.started"
             )
         return self._tool_calls[mission_id]
+
+    def tool_results(self, mission_id: UUID) -> list[dict[str, Any]]:
+        if mission_id not in self._tool_results:
+            self._tool_results[mission_id] = [
+                dict(event.payload)
+                for event in self.store.events(mission_id)
+                if event.event_type == "tool.completed"
+            ]
+        return self._tool_results[mission_id]
 
     def consume_tool_call(self, mission: Mission) -> int:
         """Charge one tool-call against the mission budget. Fail closed when exhausted."""
@@ -170,10 +186,16 @@ class SwarmRuntime:
         self._tool_calls[mission.id] = used
         return used
 
-    async def invoke_tool(self, mission: Mission, name: str, actor_id: UUID | None = None) -> int:
-        """Enforce max_tool_calls before any tool use. No ToolProvider exists yet."""
+    async def invoke_tool(self, mission: Mission, name: str, arguments: dict[str, Any] | None = None,
+                          actor_id: UUID | None = None) -> dict[str, Any]:
+        """Charge max_tool_calls, then execute a real ToolProvider. Never invent success."""
         used = self.tool_calls_used(mission.id)
         limit = mission.limits.max_tool_calls
+        if self.tools is not None:
+            try:
+                await self.tools.discover()
+            except ToolError:
+                pass
         available = self.available_tools(mission)
         if used >= limit:
             await self.emit(mission.id, "tool.failed", {
@@ -181,7 +203,7 @@ class SwarmRuntime:
                 "error": "Tool call limit reached", "used": used, "max": limit,
             }, actor_id)
             raise PolicyError("Tool call limit reached", FailureClass.RESOURCE_EXHAUSTED)
-        if name not in available:
+        if self.tools is None or name not in available:
             error = "No tool provider is connected" if not available else f"Unknown tool: {name}"
             await self.emit(mission.id, "tool.failed", {
                 "tool": name, "failure_class": str(FailureClass.TOOL_MISSING),
@@ -192,7 +214,33 @@ class SwarmRuntime:
         await self.emit(mission.id, "tool.started", {
             "tool": name, "used": charged, "max": limit,
         }, actor_id)
-        return charged
+        try:
+            result = await self.tools.invoke(ToolCall(name=name, arguments=arguments or {}))
+        except ToolError as exc:
+            await self.emit(mission.id, "tool.failed", {
+                "tool": name, "failure_class": str(exc.failure_class),
+                "error": str(exc), "used": charged, "max": limit,
+            }, actor_id)
+            raise PolicyError(str(exc), exc.failure_class) from exc
+        if not result.ok:
+            failure_class = result.failure_class or FailureClass.TOOL_FAILURE
+            error = result.error or "Tool call failed"
+            await self.emit(mission.id, "tool.failed", {
+                "tool": name, "failure_class": str(failure_class),
+                "error": error, "used": charged, "max": limit,
+            }, actor_id)
+            raise PolicyError(error, failure_class)
+        payload = {
+            "tool": name,
+            "used": charged,
+            "max": limit,
+            "ok": True,
+            "output": public_tool_data(result.output or {}),
+            "provider": result.provider,
+        }
+        await self.emit(mission.id, "tool.completed", payload, actor_id)
+        self.tool_results(mission.id).append(payload)
+        return payload
 
     def _in_flight_tasks(self, mission: Mission) -> list[Task]:
         return [task for task in self.tasks[mission.id]
@@ -368,6 +416,11 @@ class SwarmRuntime:
             self.check_stopped(mission.id)
             self.hydrate(mission.id)
             self._sync_answers(mission, self.store.get_mission(mission.id))
+            if self.tools is not None:
+                try:
+                    await self.tools.discover()
+                except ToolError:
+                    pass
             existing = list(self.agents[mission.id])
             history = self.store.events(mission.id)
             started = next((event.created_at for event in history
@@ -449,6 +502,21 @@ class SwarmRuntime:
                         mission.result = claim
                         mission.status = MissionStatus.COMPLETED
                         break
+                    elif action == "use_tool":
+                        tool = decision.get("tool") or decision.get("name")
+                        if not tool:
+                            raise PolicyError("Model omitted the tool name", FailureClass.INVALID_OUTPUT)
+                        raw_args = decision.get("arguments")
+                        if raw_args is None and decision.get("arguments_json"):
+                            try:
+                                raw_args = json.loads(decision["arguments_json"])
+                            except (TypeError, ValueError):
+                                raise PolicyError("Tool arguments_json was not valid JSON",
+                                                  FailureClass.INVALID_OUTPUT) from None
+                        raw_args = raw_args or {}
+                        if not isinstance(raw_args, dict):
+                            raise PolicyError("Tool arguments must be an object", FailureClass.INVALID_OUTPUT)
+                        await self.invoke_tool(mission, str(tool), raw_args, root.id)
                     elif action == "blocked":
                         mission.status = MissionStatus.BLOCKED
                         mission.result = {"reason": decision.get("reason") or "Required capability or information is unavailable"}
@@ -587,6 +655,7 @@ class SwarmRuntime:
                 "tool_calls": {"used": used, "max": mission.limits.max_tool_calls},
                 "available_capabilities": ["reason", "write", "review"],
                 "external_tools": self.available_tools(mission),
+                "tool_results": self.tool_results(mission.id),
                 "pending_question": (mission.pending_question.model_dump(mode="json")
                                      if mission.pending_question else None),
                 "answers": [item.model_dump(mode="json") for item in mission.answers]}
