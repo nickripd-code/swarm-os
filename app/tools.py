@@ -445,9 +445,10 @@ def build_tool_provider(
     local: LocalToolProvider | None = None,
     mcp: McpToolProvider | None = None,
     browser: ToolProvider | None | object = _UNSET,
+    selfmod: ToolProvider | None | object = _UNSET,
     transport=None,
 ) -> ToolProvider | None:
-    """Compose opted-in local, MCP, and browser tools. Unconfigured returns None."""
+    """Compose opted-in local, MCP, browser, and selfmod tools. Unconfigured returns None."""
     providers: list[ToolProvider] = []
     local = local if local is not None else LocalToolProvider()
     if local.list_tools():
@@ -460,6 +461,11 @@ def build_tool_provider(
         browser = BrowserToolProvider()
     if browser is not None and getattr(browser, "configured", lambda: True)():
         providers.append(browser)
+    if selfmod is _UNSET:
+        from .selfmod import SelfModToolProvider
+        selfmod = SelfModToolProvider()
+    if selfmod is not None and getattr(selfmod, "configured", lambda: True)():
+        providers.append(selfmod)
     if not providers:
         return None
     if len(providers) == 1:

@@ -56,6 +56,8 @@ class FakeBrowserDriver(BrowserDriver):
 
 def _no_browser_env(monkeypatch):
     monkeypatch.delenv("SWARM_BROWSER", raising=False)
+    monkeypatch.delenv("SWARM_SELFMOD", raising=False)
+    monkeypatch.delenv("SWARM_SELFMOD_WRITE", raising=False)
     monkeypatch.delenv("SWARM_LOCAL_TOOLS", raising=False)
     monkeypatch.delenv("MCP_SERVER_URL", raising=False)
     monkeypatch.delenv("MCP_API_KEY", raising=False)

@@ -15,8 +15,8 @@ from .store import Store
 from .health import (
     anthropic_status, azure_status, browser_health_status, cohere_status, deepseek_status,
     fireworks_status, gemini_status, groq_status, llamacpp_health_status, mistral_status,
-    ollama_health_status, openai_status, openrouter_status, perplexity_status, together_status,
-    vllm_health_status, xai_status,
+    ollama_health_status, openai_status, openrouter_status, perplexity_status,
+    selfmod_health_status, together_status, vllm_health_status, xai_status,
 )
 from .tools import tools_status
 
@@ -61,6 +61,7 @@ async def health():
             "llamacpp": await llamacpp_health_status(),
             "tools": tools_status(runtime.tools),
             "browser": await browser_health_status(),
+            "selfmod": await selfmod_health_status(),
             "active_missions": len(runtime.runs)}
 
 

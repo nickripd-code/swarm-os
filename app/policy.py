@@ -25,7 +25,7 @@ DANGEROUS_TOOLS = frozenset({
 })
 DANGEROUS_PREFIXES = (
     "shell.", "bash.", "fs.", "file.", "browser.", "http.", "net.",
-    "pay.", "wallet.", "secret.", "deploy.", "ssh.",
+    "pay.", "wallet.", "secret.", "deploy.", "ssh.", "selfmod.", "self_modify.",
 )
 CLOUD_EXFIL_TOOLS = frozenset({
     "browser", "playwright", "computer_use", "network", "http", "fetch",
@@ -35,6 +35,9 @@ CLOUD_EXFIL_TOOLS = frozenset({
 OPTED_IN_BROWSER_TOOLS = frozenset({
     "browser.navigate", "browser.snapshot", "browser.click",
 })
+# Operator-opted self-mod tools. Propose/diff need SWARM_SELFMOD; apply also needs WRITE.
+OPTED_IN_SELFMOD_DIFF_TOOLS = frozenset({"selfmod.propose", "selfmod.diff"})
+OPTED_IN_SELFMOD_WRITE_TOOLS = frozenset({"selfmod.apply"})
 TRUE_ENV = frozenset({"1", "true", "yes", "on"})
 
 
@@ -92,6 +95,23 @@ def tool_is_opted_in_browser(name: str) -> bool:
     return name.strip().lower() in OPTED_IN_BROWSER_TOOLS and browser_capability_enabled()
 
 
+def selfmod_capability_enabled() -> bool:
+    return os.getenv("SWARM_SELFMOD", "").strip().lower() in TRUE_ENV
+
+
+def selfmod_write_enabled() -> bool:
+    return selfmod_capability_enabled() and os.getenv("SWARM_SELFMOD_WRITE", "").strip().lower() in TRUE_ENV
+
+
+def tool_is_opted_in_selfmod(name: str) -> bool:
+    lowered = name.strip().lower()
+    if lowered in OPTED_IN_SELFMOD_DIFF_TOOLS:
+        return selfmod_capability_enabled()
+    if lowered in OPTED_IN_SELFMOD_WRITE_TOOLS:
+        return selfmod_write_enabled()
+    return False
+
+
 class PolicyGate:
     """Authorization outside the LLM. Unknown or dangerous acts fail closed."""
 
@@ -145,5 +165,5 @@ class PolicyGate:
             raise PolicyError("Tool use omitted a tool name", FailureClass.POLICY_REFUSAL)
         if mission_privacy(request.mission) == "local_only" and tool_exfiltrates(name):
             raise PolicyError("local_only policy forbids cloud or network tools", FailureClass.POLICY_REFUSAL)
-        if tool_is_dangerous(name) and not tool_is_opted_in_browser(name):
+        if tool_is_dangerous(name) and not tool_is_opted_in_browser(name) and not tool_is_opted_in_selfmod(name):
             raise PolicyError(f"Tool '{name}' is denied by default", FailureClass.POLICY_REFUSAL)
