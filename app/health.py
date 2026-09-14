@@ -6,7 +6,7 @@ from .credentials import (
     get_deepseek_api_key,
     get_fireworks_api_key, get_gemini_api_key, get_groq_api_key, get_huggingface_api_key,
     get_mistral_api_key, get_openrouter_api_key, get_perplexity_api_key,
-    get_sambanova_api_key, get_together_api_key, get_xai_api_key,
+    get_sambanova_api_key, get_together_api_key, get_vertex_project, get_xai_api_key,
 )
 from .llm import (
     DEFAULT_ANTHROPIC_BASE_URL, DEFAULT_ANTHROPIC_MODEL, DEFAULT_AZURE_OPENAI_API_VERSION,
@@ -21,11 +21,11 @@ from .llm import (
     DEFAULT_OPENROUTER_MODEL, DEFAULT_PERPLEXITY_BASE_URL, DEFAULT_PERPLEXITY_MODEL,
     DEFAULT_SAMBANOVA_BASE_URL, DEFAULT_SAMBANOVA_MODEL,
     DEFAULT_REASONING, DEFAULT_TOGETHER_BASE_URL,
-    DEFAULT_TOGETHER_MODEL, DEFAULT_VLLM_BASE_URL,
+    DEFAULT_TOGETHER_MODEL, DEFAULT_VERTEX_LOCATION, DEFAULT_VERTEX_MODEL, DEFAULT_VLLM_BASE_URL,
     DEFAULT_XAI_MODEL, DEFAULT_XAI_BASE_URL,
     LlamaCppModelProvider, OllamaModelProvider, VllmModelProvider,
-    azure_openai_opted_in, bedrock_opted_in, default_bedrock_base_url, llamacpp_opted_in,
-    ollama_opted_in, vllm_opted_in,
+    azure_openai_opted_in, bedrock_opted_in, default_bedrock_base_url, default_vertex_base_url,
+    llamacpp_opted_in, ollama_opted_in, vertex_opted_in, vllm_opted_in,
 )
 
 
@@ -152,6 +152,16 @@ def sambanova_status() -> dict:
             "base_url": os.getenv("SAMBANOVA_BASE_URL", DEFAULT_SAMBANOVA_BASE_URL),
             "provider": "sambanova", "fallback": False}
 
+
+def vertex_status() -> dict:
+    location = (os.getenv("VERTEX_LOCATION") or DEFAULT_VERTEX_LOCATION).strip() or DEFAULT_VERTEX_LOCATION
+    base_url = (os.getenv("VERTEX_BASE_URL") or default_vertex_base_url(location)).rstrip("/")
+    return {"configured": vertex_opted_in(),
+            "model": os.getenv("VERTEX_MODEL", DEFAULT_VERTEX_MODEL),
+            "project": get_vertex_project(),
+            "location": location,
+            "base_url": base_url,
+            "provider": "vertex", "fallback": False}
 
 
 def ollama_status() -> dict:
