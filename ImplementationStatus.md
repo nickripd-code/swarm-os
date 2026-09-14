@@ -155,7 +155,7 @@ Nothing in the current test suite is known red. UI preview is synthetic by desig
 
 ## NEXT PRIORITY
 
-**This slice:** third local/self-hosted adapter — vLLM OpenAI-compatible Chat Completions (`VllmModelProvider`). Opt-in via `VLLM_MODEL` / `VLLM_BASE_URL`. Registered in `build_router()` when opted in; unconfigured stays out of the catalog. Daemon-down health is `unavailable`; `complete()` fails closed with no fake completions. Rebased onto main after the verifier seed (`#15`); verifier modules were not rewritten. No OrganizationDesigner. No React/Pixi rewrite.
+**This slice:** third local/self-hosted adapter — vLLM OpenAI-compatible Chat Completions (`VllmModelProvider`). Opt-in via `VLLM_MODEL` / `VLLM_BASE_URL`. Registered in `build_router()` when opted in; unconfigured stays out of the catalog. Daemon-down health is `unavailable`; `complete()` fails closed with no fake completions. Rebased onto main after the verifier seed (`#15`); verifier modules were not rewritten. No OrganizationDesigner. No React/Pixi rewrite. Tests: `python3 -m pytest tests/ -q` → **160 passed**.
 
 **Recommended next backend slice:** OrganizationDesigner remains reserved. External evidence runners (tests/endpoints/files) or llama.cpp if a fourth local OpenAI-compatible endpoint is needed. Still fail closed. Still no game-world UI rewrite.
 
