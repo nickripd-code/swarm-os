@@ -20,7 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
 SCHEMA_TABLE = "schema_migrations"
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 
 class MigrationError(RuntimeError):
@@ -94,8 +94,42 @@ def _upgrade_001_initial(conn: Connection) -> None:
     conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_mission_id ON tasks (mission_id)"))
 
 
+def _upgrade_002_worker_leases(conn: Connection) -> None:
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS worker_leases (
+            id VARCHAR(36) PRIMARY KEY,
+            scope VARCHAR(32) NOT NULL,
+            scope_id VARCHAR(36) NOT NULL,
+            mission_id VARCHAR(36) NOT NULL,
+            owner_id VARCHAR(36) NOT NULL,
+            status VARCHAR(32) NOT NULL DEFAULT 'claimed',
+            expires_at DATETIME NOT NULL,
+            heartbeat_at DATETIME NOT NULL,
+            created_at DATETIME NOT NULL,
+            UNIQUE (scope, scope_id)
+        )
+    """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS idempotency_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mission_id VARCHAR(36) NOT NULL,
+            key VARCHAR(200) NOT NULL,
+            step VARCHAR(64) NOT NULL,
+            status VARCHAR(32) NOT NULL DEFAULT 'completed',
+            payload TEXT NOT NULL DEFAULT '{}',
+            created_at DATETIME NOT NULL,
+            UNIQUE (mission_id, key)
+        )
+    """))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_worker_leases_mission_id ON worker_leases (mission_id)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_worker_leases_owner_id ON worker_leases (owner_id)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_worker_leases_expires_at ON worker_leases (expires_at)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_idempotency_keys_mission_id ON idempotency_keys (mission_id)"))
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial_schema", _upgrade_001_initial),
+    Migration(2, "worker_leases_and_idempotency_keys", _upgrade_002_worker_leases),
 )
 
 

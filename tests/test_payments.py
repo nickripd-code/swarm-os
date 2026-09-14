@@ -150,7 +150,7 @@ async def test_runtime_live_payments_do_not_spend_or_emit_success(tmp_path):
     mission = Mission(goal="pay", budget=10, live_payments=True, limits={"max_payment_amount": 5})
     store.save_mission(mission)
     with pytest.raises(PolicyError) as exc:
-        await runtime.create_payment(mission, "0xabc", 2, "live attempt")
+        await runtime.create_payment(mission, "0xabc", 2, "live attempt", idempotency_key="live-1")
     assert exc.value.failure_class == FailureClass.AUTHORIZATION_REQUIRED
     saved = store.get_mission(mission.id)
     assert saved.spent == 0
@@ -164,12 +164,12 @@ async def test_runtime_simulated_payment_still_enforces_cap(tmp_path):
     runtime = SwarmRuntime(store)
     mission = Mission(goal="pay", budget=10, limits={"max_payment_amount": 5})
     store.save_mission(mission)
-    intent = await runtime.create_payment(mission, "0xabc", 2, "test work")
+    intent = await runtime.create_payment(mission, "0xabc", 2, "test work", idempotency_key="pay-ok")
     assert intent.status == "simulated"
     assert mission.spent == 2
     assert any(e.event_type == "payment.created" for e in store.events(mission.id))
     with pytest.raises(PolicyError) as exc:
-        await runtime.create_payment(mission, "0xabc", 6, "too much")
+        await runtime.create_payment(mission, "0xabc", 6, "too much", idempotency_key="pay-over")
     assert exc.value.failure_class == FailureClass.RESOURCE_EXHAUSTED
     assert mission.spent == 2
 

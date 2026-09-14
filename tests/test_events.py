@@ -59,6 +59,9 @@ UI_EVENT_TYPES = {
     "verification.failed",
     "payment.created",
     "user.answered",
+    "lease.claimed",
+    "lease.expired",
+    "lease.released",
 }
 
 
@@ -74,6 +77,9 @@ def test_event_type_values_match_historical_ui_strings():
     assert EventType.MISSION_QUESTION == "mission.question"
     assert EventType.USER_ANSWERED == "user.answered"
     assert EventType.TOOL_COMPLETED == "tool.completed"
+    assert EventType.LEASE_CLAIMED == "lease.claimed"
+    assert EventType.LEASE_EXPIRED == "lease.expired"
+    assert EventType.LEASE_RELEASED == "lease.released"
     assert "controller.fallback" not in KNOWN_EVENT_TYPES
     assert FORBIDDEN_EVENT_TYPES == {"controller.fallback"}
 

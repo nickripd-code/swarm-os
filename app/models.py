@@ -138,6 +138,7 @@ class PaymentIntent(BaseModel):
     reason: str
     status: str = "simulated"
     transaction_hash: str | None = None
+    idempotency_key: str | None = None
 
 
 class MissionEvent(BaseModel):

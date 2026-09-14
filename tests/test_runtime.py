@@ -54,10 +54,11 @@ async def test_payment_defaults_to_simulation_and_enforces_cap(tmp_path):
     runtime = SwarmRuntime(store)
     mission = Mission(goal="pay", budget=10, limits={"max_payment_amount": 5})
     store.save_mission(mission)
-    intent = await runtime.create_payment(mission, "0xabc", 2, "test work")
+    intent = await runtime.create_payment(mission, "0xabc", 2, "test work", idempotency_key="pay-ok")
     assert intent.status == "simulated"
     assert mission.spent == 2
-    with pytest.raises(PolicyError): await runtime.create_payment(mission, "0xabc", 6, "too much")
+    with pytest.raises(PolicyError):
+        await runtime.create_payment(mission, "0xabc", 6, "too much", idempotency_key="pay-over")
 
 
 class BrokenProvider(LLMProvider):
@@ -335,12 +336,12 @@ async def test_max_tool_calls_enforced_when_exceeded(tmp_path):
     runtime = SwarmRuntime(store, tools=LocalToolProvider(allowlist=["echo"]))
     mission = Mission(goal="Budget tools", limits={"max_tool_calls": 2})
     store.save_mission(mission)
-    first = await runtime.invoke_tool(mission, "echo", {"text": "one"})
-    second = await runtime.invoke_tool(mission, "echo", {"text": "two"})
+    first = await runtime.invoke_tool(mission, "echo", {"text": "one"}, idempotency_key="echo-1")
+    second = await runtime.invoke_tool(mission, "echo", {"text": "two"}, idempotency_key="echo-2")
     assert first["used"] == 1 and first["ok"] and first["output"]["text"] == "one"
     assert second["used"] == 2 and second["output"]["text"] == "two"
     with pytest.raises(PolicyError) as exc:
-        await runtime.invoke_tool(mission, "echo", {"text": "three"})
+        await runtime.invoke_tool(mission, "echo", {"text": "three"}, idempotency_key="echo-3")
     assert exc.value.failure_class == FailureClass.RESOURCE_EXHAUSTED
     assert runtime.tool_calls_used(mission.id) == 2
     failed = [e for e in store.events(mission.id) if e.event_type == "tool.failed"]
@@ -361,7 +362,7 @@ async def test_tool_call_without_provider_fails_closed_and_does_not_charge(tmp_p
     assert state["external_tools"] == []
     assert state["tool_calls"] == {"used": 0, "max": mission.limits.max_tool_calls}
     with pytest.raises(PolicyError) as exc:
-        await runtime.invoke_tool(mission, "search")
+        await runtime.invoke_tool(mission, "search", idempotency_key="search-missing")
     assert exc.value.failure_class == FailureClass.TOOL_MISSING
     assert runtime.tool_calls_used(mission.id) == 0
     failed = [e for e in store.events(mission.id) if e.event_type == "tool.failed"]
@@ -377,6 +378,6 @@ async def test_exhausted_tool_budget_wins_even_when_tools_are_absent(tmp_path):
     store.save_mission(mission)
     assert runtime.consume_tool_call(mission) == 1
     with pytest.raises(PolicyError) as exc:
-        await runtime.invoke_tool(mission, "search")
+        await runtime.invoke_tool(mission, "search", idempotency_key="search-budget")
     assert exc.value.failure_class == FailureClass.RESOURCE_EXHAUSTED
     assert runtime.tool_calls_used(mission.id) == 1

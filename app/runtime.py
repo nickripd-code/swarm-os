@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
 from .events import EventType, event_type_for_mission, event_type_for_task
+from .leases import IdempotencyError, IdempotencyGuard, LeaseConflict, LeaseError, WorkerLeases
 from .models import (
     AgentSpec, AgentStatus, FailureClass, Mission, MissionAnswer, MissionEvent,
     MissionStatus, PaymentIntent, PendingQuestion, Task, TaskStatus, utcnow,
@@ -73,11 +74,62 @@ class SwarmRuntime:
         self._tool_results: dict[UUID, list[dict[str, Any]]] = {}
         self._answer_waiters: dict[UUID, asyncio.Event] = {}
         self.tools = build_tool_provider() if tools is _UNSET else tools
+        self.worker_id = uuid4()
+        self.leases = WorkerLeases(store)
+        self.idempotency = IdempotencyGuard(store)
+        self._held_leases: dict[tuple[str, str], str] = {}
+
+    def _owner(self) -> str:
+        return str(self.worker_id)
 
     async def emit(self, mission_id: UUID, event_type: EventType | str, payload: dict[str, Any], actor_id: UUID | None = None):
         event = self.store.append(MissionEvent(mission_id=mission_id, event_type=event_type, actor_id=actor_id, payload=payload))
         if self.sink:
             await self.sink(event)
+
+    async def claim_work(self, mission: Mission, scope: str, scope_id: str,
+                         ttl_seconds: float | None = None):
+        """Claim or reclaim a durable worker lease. Expired leases are reclaimable."""
+        outcome = self.leases.claim(
+            scope=scope, scope_id=scope_id, mission_id=str(mission.id),
+            owner_id=self._owner(), ttl_seconds=ttl_seconds,
+        )
+        self._held_leases[(scope, scope_id)] = outcome.lease.id
+        if outcome.reclaimed:
+            await self.emit(mission.id, EventType.LEASE_EXPIRED, {
+                "scope": scope, "scope_id": scope_id, "lease_id": outcome.lease.id,
+                "owner_id": self._owner(),
+            })
+        await self.emit(mission.id, EventType.LEASE_CLAIMED, {
+            "scope": scope, "scope_id": scope_id, "lease_id": outcome.lease.id,
+            "owner_id": self._owner(), "expires_at": outcome.lease.expires_at.isoformat(),
+            "reclaimed": outcome.reclaimed,
+        })
+        return outcome.lease
+
+    async def renew_work(self, mission: Mission, scope: str, scope_id: str,
+                         ttl_seconds: float | None = None):
+        lease_id = self._held_leases.get((scope, scope_id))
+        if not lease_id:
+            raise PolicyError("Cannot renew a lease that this worker does not hold",
+                              FailureClass.POLICY_REFUSAL)
+        try:
+            return self.leases.renew(lease_id, self._owner(), ttl_seconds)
+        except (LeaseConflict, LeaseError) as exc:
+            raise PolicyError(str(exc), FailureClass.POLICY_REFUSAL) from exc
+
+    async def release_work(self, mission: Mission, scope: str, scope_id: str) -> None:
+        lease_id = self._held_leases.pop((scope, scope_id), None)
+        if not lease_id:
+            return
+        try:
+            lease = self.leases.release(lease_id, self._owner())
+        except (LeaseConflict, LeaseError):
+            return
+        await self.emit(mission.id, EventType.LEASE_RELEASED, {
+            "scope": scope, "scope_id": scope_id, "lease_id": lease.id,
+            "owner_id": self._owner(),
+        })
 
     async def _emit_planning(self, mission_id: UUID, actor_id: UUID | None):
         planning = getattr(self.controller, "last_planning", None)
@@ -187,9 +239,39 @@ class SwarmRuntime:
         self._tool_calls[mission.id] = used
         return used
 
+    def _require_idempotency_key(self, key: str | None) -> str:
+        try:
+            return self.idempotency.require_key(key)
+        except IdempotencyError as exc:
+            raise PolicyError(str(exc), FailureClass.POLICY_REFUSAL) from exc
+
+    def _replay_side_effect(self, mission_id: UUID, key: str) -> dict[str, Any] | None:
+        found = self.idempotency.lookup(str(mission_id), key)
+        if found is None:
+            return None
+        if found["status"] != "completed":
+            raise PolicyError("Idempotency key has an unknown prior outcome", FailureClass.POLICY_REFUSAL)
+        return found["payload"]
+
+    def _tool_idempotency_key(self, mission: Mission, name: str, arguments: dict[str, Any] | None,
+                              key: str | None) -> str:
+        if key is not None:
+            return self._require_idempotency_key(key)
+        blob = json.dumps({"name": name, "arguments": arguments or {}}, sort_keys=True, default=str)
+        return f"tool:{self.tool_calls_used(mission.id)}:{blob}"
+
+    def _raise_replayed_error(self, payload: dict[str, Any]) -> None:
+        if payload.get("error"):
+            raise PolicyError(str(payload["error"]), FailureClass(payload["failure_class"]))
+
     async def invoke_tool(self, mission: Mission, name: str, arguments: dict[str, Any] | None = None,
-                          actor_id: UUID | None = None) -> dict[str, Any]:
+                          actor_id: UUID | None = None, *, idempotency_key: str | None = None) -> dict[str, Any]:
         """Charge max_tool_calls, then execute a real ToolProvider. Never invent success."""
+        key = self._tool_idempotency_key(mission, name, arguments, idempotency_key)
+        replay = self._replay_side_effect(mission.id, key)
+        if replay is not None:
+            self._raise_replayed_error(replay)
+            return replay
         used = self.tool_calls_used(mission.id)
         limit = mission.limits.max_tool_calls
         if self.tools is not None:
@@ -199,6 +281,9 @@ class SwarmRuntime:
                 pass
         available = self.available_tools(mission)
         if used >= limit:
+            self.idempotency.record(str(mission.id), key, "tool", {
+                "error": "Tool call limit reached", "failure_class": str(FailureClass.RESOURCE_EXHAUSTED),
+            })
             await self.emit(mission.id, EventType.TOOL_FAILED, {
                 "tool": name, "failure_class": str(FailureClass.RESOURCE_EXHAUSTED),
                 "error": "Tool call limit reached", "used": used, "max": limit,
@@ -206,6 +291,9 @@ class SwarmRuntime:
             raise PolicyError("Tool call limit reached", FailureClass.RESOURCE_EXHAUSTED)
         if self.tools is None or name not in available:
             error = "No tool provider is connected" if not available else f"Unknown tool: {name}"
+            self.idempotency.record(str(mission.id), key, "tool", {
+                "error": error, "failure_class": str(FailureClass.TOOL_MISSING),
+            })
             await self.emit(mission.id, EventType.TOOL_FAILED, {
                 "tool": name, "failure_class": str(FailureClass.TOOL_MISSING),
                 "error": error, "used": used, "max": limit,
@@ -218,6 +306,9 @@ class SwarmRuntime:
         try:
             result = await self.tools.invoke(ToolCall(name=name, arguments=arguments or {}))
         except ToolError as exc:
+            self.idempotency.record(str(mission.id), key, "tool", {
+                "error": str(exc), "failure_class": str(exc.failure_class),
+            })
             await self.emit(mission.id, EventType.TOOL_FAILED, {
                 "tool": name, "failure_class": str(exc.failure_class),
                 "error": str(exc), "used": charged, "max": limit,
@@ -226,6 +317,9 @@ class SwarmRuntime:
         if not result.ok:
             failure_class = result.failure_class or FailureClass.TOOL_FAILURE
             error = result.error or "Tool call failed"
+            self.idempotency.record(str(mission.id), key, "tool", {
+                "error": error, "failure_class": str(failure_class),
+            })
             await self.emit(mission.id, EventType.TOOL_FAILED, {
                 "tool": name, "failure_class": str(failure_class),
                 "error": error, "used": charged, "max": limit,
@@ -239,6 +333,7 @@ class SwarmRuntime:
             "output": public_tool_data(result.output or {}),
             "provider": result.provider,
         }
+        self.idempotency.record(str(mission.id), key, "tool", payload)
         await self.emit(mission.id, EventType.TOOL_COMPLETED, payload, actor_id)
         self.tool_results(mission.id).append(payload)
         return payload
@@ -413,7 +508,13 @@ class SwarmRuntime:
     async def run(self, mission: Mission):
         root = None
         suspended = False
+        held_mission_lease = False
         try:
+            try:
+                await self.claim_work(mission, "mission", str(mission.id))
+            except LeaseConflict:
+                return
+            held_mission_lease = True
             self.check_stopped(mission.id)
             self.hydrate(mission.id)
             self._sync_answers(mission, self.store.get_mission(mission.id))
@@ -586,29 +687,34 @@ class SwarmRuntime:
             mission.status = MissionStatus.FAILED
             mission.result = failure_payload("Unexpected runtime error", FailureClass.UNKNOWN_FAILURE)
         finally:
-            self._sync_answers(mission, self.store.get_mission(mission.id))
-            if suspended:
-                if mission.pending_question is not None:
-                    mission.status = MissionStatus.WAITING
-                self.store.save_mission(mission)
-                await self.emit(mission.id, EventType.MISSION_SUSPENDED, {
-                    "reason": "Runtime is shutting down; unfinished work remains recoverable",
-                    "mode": self.controller.mode,
-                })
-                self.suspending.discard(mission.id)
-            else:
-                for task in self.tasks[mission.id]:
-                    if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
-                        task.status = TaskStatus.STOPPED if mission.status == MissionStatus.STOPPED else TaskStatus.FAILED
-                        self.store.save_task(task)
-                        await self.emit(mission.id, event_type_for_task(task.status), task.model_dump(mode="json"), task.agent_id)
-                for agent in self.agents[mission.id]:
-                    if agent.status in {AgentStatus.CREATED, AgentStatus.RUNNING}:
-                        status = AgentStatus.STOPPED if mission.status == MissionStatus.STOPPED else AgentStatus.FAILED
-                        await self.agent_status(agent, status)
-                mission.updated_at = utcnow()
-                self.store.save_mission(mission)
-                await self.emit(mission.id, event_type_for_mission(mission.status), mission.result or {})
+            if not held_mission_lease:
+                return
+            try:
+                self._sync_answers(mission, self.store.get_mission(mission.id))
+                if suspended:
+                    if mission.pending_question is not None:
+                        mission.status = MissionStatus.WAITING
+                    self.store.save_mission(mission)
+                    await self.emit(mission.id, EventType.MISSION_SUSPENDED, {
+                        "reason": "Runtime is shutting down; unfinished work remains recoverable",
+                        "mode": self.controller.mode,
+                    })
+                    self.suspending.discard(mission.id)
+                else:
+                    for task in self.tasks[mission.id]:
+                        if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+                            task.status = TaskStatus.STOPPED if mission.status == MissionStatus.STOPPED else TaskStatus.FAILED
+                            self.store.save_task(task)
+                            await self.emit(mission.id, event_type_for_task(task.status), task.model_dump(mode="json"), task.agent_id)
+                    for agent in self.agents[mission.id]:
+                        if agent.status in {AgentStatus.CREATED, AgentStatus.RUNNING}:
+                            status = AgentStatus.STOPPED if mission.status == MissionStatus.STOPPED else AgentStatus.FAILED
+                            await self.agent_status(agent, status)
+                    mission.updated_at = utcnow()
+                    self.store.save_mission(mission)
+                    await self.emit(mission.id, event_type_for_mission(mission.status), mission.result or {})
+            finally:
+                await self.release_work(mission, "mission", str(mission.id))
 
     async def _verify_finish(self, mission: Mission, root: AgentSpec, claim: dict[str, Any]):
         """Controller finish is a claim. Complete only after a real verifier accepts it."""
@@ -663,24 +769,33 @@ class SwarmRuntime:
 
     async def _execute_task(self, mission: Mission, task: Task, agent: AgentSpec):
         self.check_stopped(mission.id)
-        task.status = TaskStatus.RUNNING
-        self.store.save_task(task)
-        await self.agent_status(agent, AgentStatus.RUNNING)
-        await self.emit(mission.id, EventType.TASK_STARTED, task.model_dump(mode="json"), agent.id)
-        result = await self.model_call(mission, agent, "work",
-                   lambda: self.controller.work(self._state(mission), agent.model_dump(mode="json")))
-        if result.get("status") not in {"completed", "blocked"} or not result.get("finding"):
-            raise PolicyError("Worker did not return a valid result", FailureClass.INVALID_OUTPUT)
-        task.output = result
-        task.status = TaskStatus.COMPLETED if result["status"] == "completed" else TaskStatus.BLOCKED
-        agent.output = result
-        self.store.save_task(task)
-        await self.agent_status(agent, AgentStatus.COMPLETED if task.status == TaskStatus.COMPLETED else AgentStatus.BLOCKED)
-        await self.emit(mission.id, event_type_for_task(task.status), task.model_dump(mode="json"), agent.id)
-        root = self.agents[mission.id][0]
-        await self.emit(mission.id, EventType.AGENT_MESSAGE, {
-            "from_id": str(agent.id), "to_id": str(root.id), "kind": "result",
-            "text": result["finding"][:500]}, agent.id)
+        try:
+            await self.claim_work(mission, "task", str(task.id))
+        except LeaseConflict as exc:
+            raise PolicyError("Task is already leased by another worker",
+                              FailureClass.POLICY_REFUSAL) from exc
+        try:
+            await self.renew_work(mission, "task", str(task.id))
+            task.status = TaskStatus.RUNNING
+            self.store.save_task(task)
+            await self.agent_status(agent, AgentStatus.RUNNING)
+            await self.emit(mission.id, EventType.TASK_STARTED, task.model_dump(mode="json"), agent.id)
+            result = await self.model_call(mission, agent, "work",
+                       lambda: self.controller.work(self._state(mission), agent.model_dump(mode="json")))
+            if result.get("status") not in {"completed", "blocked"} or not result.get("finding"):
+                raise PolicyError("Worker did not return a valid result", FailureClass.INVALID_OUTPUT)
+            task.output = result
+            task.status = TaskStatus.COMPLETED if result["status"] == "completed" else TaskStatus.BLOCKED
+            agent.output = result
+            self.store.save_task(task)
+            await self.agent_status(agent, AgentStatus.COMPLETED if task.status == TaskStatus.COMPLETED else AgentStatus.BLOCKED)
+            await self.emit(mission.id, event_type_for_task(task.status), task.model_dump(mode="json"), agent.id)
+            root = self.agents[mission.id][0]
+            await self.emit(mission.id, EventType.AGENT_MESSAGE, {
+                "from_id": str(agent.id), "to_id": str(root.id), "kind": "result",
+                "text": result["finding"][:500]}, agent.id)
+        finally:
+            await self.release_work(mission, "task", str(task.id))
 
     async def _run_tasks(self, mission: Mission):
         await self._assign_unassigned_tasks(mission)
@@ -737,15 +852,24 @@ class SwarmRuntime:
             await asyncio.gather(*jobs, return_exceptions=True)
         return ids
 
-    async def create_payment(self, mission: Mission, recipient: str, amount: float, reason: str) -> PaymentIntent:
+    async def create_payment(self, mission: Mission, recipient: str, amount: float, reason: str,
+                             *, idempotency_key: str | None = None) -> PaymentIntent:
+        key = self._require_idempotency_key(idempotency_key)
+        replay = self._replay_side_effect(mission.id, key)
+        if replay is not None:
+            if replay.get("error"):
+                raise PolicyError(str(replay["error"]), FailureClass(replay["failure_class"]))
+            return PaymentIntent.model_validate(replay["intent"])
         if mission.id in self.stopped:
             raise PolicyError("Mission was stopped")
         if amount > mission.limits.max_payment_amount or mission.spent + amount > mission.budget:
             raise PolicyError("Payment exceeds mission budget or payment cap", FailureClass.RESOURCE_EXHAUSTED)
-        intent = PaymentIntent(mission_id=mission.id, recipient=recipient, amount=amount, reason=reason)
+        intent = PaymentIntent(mission_id=mission.id, recipient=recipient, amount=amount, reason=reason,
+                               idempotency_key=key)
         intent = await self.wallet.pay(intent, mission)
         mission.spent += amount
         mission.updated_at = utcnow()
         self.store.save_mission(mission)
+        self.idempotency.record(str(mission.id), key, "payment", {"intent": intent.model_dump(mode="json")})
         await self.emit(mission.id, EventType.PAYMENT_CREATED, intent.model_dump(mode="json"))
         return intent
