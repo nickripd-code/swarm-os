@@ -109,6 +109,15 @@ class WorkItemRow(Base):
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class MemoryNoteRow(Base):
+    __tablename__ = "memory_notes"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    mission_id: Mapped[str] = mapped_column(String(36), index=True)
+    agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    body: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class Store:
     def __init__(self, path: str = "swarm.db"):
         Path(path).parent.mkdir(parents=True, exist_ok=True)

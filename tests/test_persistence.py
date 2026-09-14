@@ -372,6 +372,7 @@ def test_additive_schema_preserves_existing_missions_and_events(tmp_path):
     assert len(events) == 1
     assert events[0].event_type == "mission.completed"
     names = set(inspect(store.engine).get_table_names())
-    assert {"missions", "mission_events", "agents", "tasks", "worker_leases", "idempotency_keys"} <= names
+    assert {"missions", "mission_events", "agents", "tasks", "worker_leases", "idempotency_keys",
+            "work_items", "memory_notes"} <= names
     assert store.load_agents(mission.id) == []
     assert store.load_tasks(mission.id) == []
