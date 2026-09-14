@@ -158,7 +158,7 @@ Nothing in the current test suite is known red. UI preview is synthetic by desig
 
 ## NEXT PRIORITY
 
-**This slice:** `ToolProvider` / MCP tool-calling seam. Allowlisted local tools (`SWARM_LOCAL_TOOLS`) and an MCP JSON-RPC stub (`MCP_SERVER_URL`) execute for real; unknown/unconfigured tools fail `TOOL_MISSING` without charging the budget; execution failures are classified and emit `tool.failed`. `MissionLimits.max_tool_calls` still gates every start. Controller `use_tool` is wired. Rebased onto main after answers (`#19`), PaymentProvider (`#18`), and llama.cpp (`#17`); those modules were not rewritten. No OrganizationDesigner. No React/Pixi / LangGraph rewrite. Tests: recorded after this revision.
+**This slice:** `ToolProvider` / MCP tool-calling seam. Allowlisted local tools (`SWARM_LOCAL_TOOLS`) and an MCP JSON-RPC stub (`MCP_SERVER_URL`) execute for real; unknown/unconfigured tools fail `TOOL_MISSING` without charging the budget; execution failures are classified and emit `tool.failed`. `MissionLimits.max_tool_calls` still gates every start. Controller `use_tool` is wired. Rebased onto main after answers (`#19`), PaymentProvider (`#18`), and llama.cpp (`#17`); those modules were not rewritten. No OrganizationDesigner. No React/Pixi / LangGraph rewrite. Tests: `python3 -m pytest tests/ -q` → **215 passed**.
 
 **Landed on main (keep):** mission answers path (`#19`) — controller `ask` parks in `WAITING` until a matching `/answers/{question_id}`. `PaymentProvider` behind `WalletAdapter` (`#18`). llama.cpp OpenAI-compatible adapter (`#17`).
 
