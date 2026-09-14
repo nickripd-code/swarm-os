@@ -36,8 +36,19 @@
         <div><dt>Agents</dt><dd id="hudAgents">0</dd></div>
         <div><dt>Tasks done</dt><dd id="hudTasks">0</dd></div>
         <div><dt>Tokens</dt><dd id="hudTokens">0</dd></div>
-        <div><dt>Est. spend</dt><dd id="hudSpend">—</dd></div>
+        <div><dt>Est. spend</dt><dd id="hudSpend">estimate unavailable</dd></div>
       </dl>
+      <aside class="cost-hud" id="costHud" aria-label="Token cost">
+        <div class="cost-hud-heading">
+          <span class="eyebrow">TOKEN COST</span>
+          <span id="costHudNote" class="cost-hud-note">estimate unavailable</span>
+        </div>
+        <dl class="cost-hud-stats">
+          <div><dt>Tokens</dt><dd id="costHudTokens">0</dd></div>
+          <div><dt>Est. spend</dt><dd id="costHudSpend">estimate unavailable</dd></div>
+          <div><dt>Token budget</dt><dd id="costHudBudget">estimate unavailable</dd></div>
+        </dl>
+      </aside>
     </section>
     <div class="notice" id="notice" role="alert" hidden></div>
     <section class="question-panel" id="questionPanel" hidden>
