@@ -1,11 +1,11 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent} from "./state.mjs";
-const $ = id => document.getElementById(id);
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";`nconst $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
-const statusName = status => ({created:"Ready",running:"Thinking",completed:"Done",blocked:"Blocked",failed:"Failed",stopped:"Stopped",pending:"Queued"}[status] || status);
-const symbol = status => ({created:"·",running:"",completed:"✓",blocked:"?",failed:"!",stopped:"■"}[status] || "·");
+const statusName = status => ({created:"Ready",running:"Thinking",completed:"Done",blocked:"Blocked",failed:"Failed",stopped:"Stopped",pending:"Queued",paused:"Paused",waiting:"Waiting"}[status] || status);
+const symbol = status => ({created:"Â·",running:"",completed:"âœ“",blocked:"?",failed:"!",stopped:"â– "}[status] || "Â·");
 const colors = ["#c6b4ef","#edbd9e","#aed8cf","#e6cd90","#b5cbe3","#dfb9ca"];
 let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null, hudTick=null, notifyArmed=false, killAvailable=false;
+let eventLog=[], replayCursor=-1, replayLive=true, replayTimer=null, sourceMission=null;
 const elements=new Map();
 const bot = color => '<span class="bot" style="--agent-color:'+color+'" aria-hidden="true"><span class="ear ear-left"></span><span class="ear ear-right"></span><span class="visor"><i></i><i></i><b class="mouth"></b></span></span>';
 function colorFor(a) {if(!a.parent_id)return colors[0];let n=0;for(const c of a.role)n=(n*31+c.charCodeAt(0))>>>0;return colors[1+n%(colors.length-1)];}
@@ -64,10 +64,20 @@ function renderHud(){
   }
   if($("costHud"))$("costHud").dataset.known=cost.known?"true":"false";
   if($("hudElapsed")){
-    const start=mission?.created_at?new Date(mission.created_at).getTime():NaN;
-    $("hudElapsed").textContent=Number.isFinite(start)?formatElapsed(Date.now()-start):"—";
+    const view=replayView(eventLog,replayCursor,{preview:state.preview,mission:sourceMission||mission});
+    if(!replayLive&&!state.preview&&view.elapsedMs!=null){
+      $("hudElapsed").textContent=formatElapsed(view.elapsedMs);
+    }else{
+      const start=mission?.created_at?new Date(mission.created_at).getTime():NaN;
+      $("hudElapsed").textContent=Number.isFinite(start)?formatElapsed(Date.now()-start):"â€”";
+    }
   }
-  const running=!!mission&&!terminal.has(status);
+  if($("replayChip")){
+    $("replayChip").hidden=state.preview||!mission;
+    $("replayChip").textContent=state.preview?"PREVIEW":(replayLive?"LIVE":"REPLAY");
+    $("replayChip").className="hud-chip mode "+(state.preview?"preview":replayLive?"replay-live":"replay");
+  }
+  const running=!!mission&&!terminal.has(status)&&replayLive&&!state.preview;
   if(running&&!hudTick)hudTick=setInterval(renderHud,1000);
   if(!running&&hudTick){clearInterval(hudTick);hudTick=null;}
 }
@@ -83,7 +93,7 @@ function pushAlert(alert){
   item.dataset.type=alert.event_type||"";
   item.dataset.detail=alert.detail||"";
   const klass=alert.failure_class?'<span class="alert-class">'+esc(alert.failure_class)+"</span>":"";
-  item.innerHTML="<header><strong>"+esc(alert.title)+"</strong>"+klass+'<button type="button" class="alert-dismiss" aria-label="Dismiss">×</button></header>'+(alert.detail?"<p>"+esc(alert.detail)+"</p>":"");
+  item.innerHTML="<header><strong>"+esc(alert.title)+"</strong>"+klass+'<button type="button" class="alert-dismiss" aria-label="Dismiss">Ã—</button></header>'+(alert.detail?"<p>"+esc(alert.detail)+"</p>":"");
   item.querySelector(".alert-dismiss").onclick=ev=>{ev.stopPropagation();item.remove();};
   item.onclick=()=>{const panel=$("resultPanel");if(panel&&!panel.hidden)panel.scrollIntoView({behavior:"smooth",block:"nearest"});};
   stack.prepend(item);
@@ -103,7 +113,7 @@ function considerAlert(e,liveFrom){
 function maybeNotify(alert){
   if(!notifyArmed||typeof Notification==="undefined"||Notification.permission!=="granted"||!document.hidden)return;
   try{
-    const body=[alert.failure_class,alert.detail].filter(Boolean).join(" · ").slice(0,140);
+    const body=[alert.failure_class,alert.detail].filter(Boolean).join(" Â· ").slice(0,140);
     const n=new Notification(alert.title,{body,tag:"swarm-"+(alert.event_type||"alert")});
     n.onclick=()=>{window.focus();n.close();};
   }catch{}
@@ -116,17 +126,18 @@ function schedule(){if(!frame)frame=requestAnimationFrame(()=>{frame=0;render();
 function render(){
   const mission=state.mission, status=mission?.status||"idle";
   renderHud();
-  $("modeLabel").textContent=state.preview?"PREVIEW":status.toUpperCase();
-  $("modeLabel").className="mode-tag "+status;
+  $("modeLabel").textContent=state.preview?"PREVIEW":(!replayLive?"REPLAY":status.toUpperCase());
+  $("modeLabel").className="mode-tag "+(state.preview?"preview":(!replayLive?"replay":status));
   $("agentCount").textContent=state.agents.size;
   $("taskCount").textContent=[...state.tasks.values()].filter(t=>t.status==="completed").length;
   $("tokenCount").textContent=tokenTotal(state.usage).toLocaleString();
   $("eventCount").textContent=state.seen.size+" events";
   $("emptyMap").hidden=state.agents.size>0;
   $("launch").disabled=!!mission&&!terminal.has(status)&&!state.preview;
-  $("launch").innerHTML=$("launch").disabled?'Mission running <span>⌁</span>':'Launch mission <span>↗</span>';
-  $("missionCaption").textContent=state.preview?"Interactive preview · no models or tools are running":mission?.goal||"One mission. As many minds as it needs.";
+  $("launch").innerHTML=$("launch").disabled?'Mission running <span>âŒ</span>':'Launch mission <span>â†—</span>';
+  $("missionCaption").textContent=state.preview?"Interactive preview Â· no models or tools are running":(!replayLive?"Historical replay Â· recorded events only":mission?.goal||"One mission. As many minds as it needs.");
   if(state.preview)connection("Preview");
+  else if(!replayLive)connection("Replay");
   else if(terminal.has(status))connection("Mission "+status,status==="completed"?"live":"disconnected");
   graph=layoutTree(state.agents,Math.max(650,$("mapViewport").clientWidth/zoom));
   $("world").style.width=graph.width+"px";$("world").style.height=graph.height+"px";
@@ -141,7 +152,7 @@ function render(){
       paths+='<path class="branch-line '+(a.status==="running"?'active ':'')+(selected===a.id?'selected':'')+'" d="M '+x+' '+y+' C '+x+' '+mid+', '+tx+' '+mid+', '+tx+' '+ty+'"/><circle class="branch-joint" cx="'+x+'" cy="'+y+'" r="3"/>';
     }
   }
-  const recent=state.events.filter(e=>e.event_type==='agent.message'&&Date.now()-new Date(e.created_at).getTime()<9000).slice(0,3);
+  const recent=(!state.replay&&replayLive)?state.events.filter(e=>e.event_type==='agent.message'&&Date.now()-new Date(e.created_at).getTime()<9000).slice(0,3):[];
   for(const e of recent){
     const from=graph.positions.get(e.payload.from_id),to=graph.positions.get(e.payload.to_id);
     if(!from||!to)continue;
@@ -153,7 +164,7 @@ function render(){
   let signal=document.getElementById('messageSignal');
   if(!signal){signal=document.createElement('div');signal.id='messageSignal';signal.className='message-signal';$('mapViewport').append(signal);}
   signal.hidden=!recent.length;
-  if(recent.length){const p=recent[0].payload;signal.textContent=label(state.agents.get(p.from_id)?.role)+' → '+label(state.agents.get(p.to_id)?.role)+' · '+p.kind;}
+  if(recent.length){const p=recent[0].payload;signal.textContent=label(state.agents.get(p.from_id)?.role)+' â†’ '+label(state.agents.get(p.to_id)?.role)+' Â· '+p.kind;}
   for(const [id,button] of elements)if(!state.agents.has(id)){button.remove();elements.delete(id);}
   for(const [index,a] of [...state.agents.values()].entries()){
     const pos=graph.positions.get(a.id);if(!pos)continue;
@@ -163,7 +174,7 @@ function render(){
       button=document.createElement("button");button.type="button";button.dataset.id=a.id;
       button.addEventListener("click",()=>selectAgent(a.id));$("nodes").append(button);elements.set(a.id,button);
     }
-    button.className="agent-node "+a.status+(selected===a.id?" selected":"")+(isNew?" new":"")+(recent.some(e=>e.payload.from_id===a.id||e.payload.to_id===a.id)?" talking":"");
+    button.className="agent-node "+a.status+(selected===a.id?" selected":"")+(isNew&&!state.replay?" new":"")+(recent.some(e=>e.payload.from_id===a.id||e.payload.to_id===a.id)?" talking":"");
     button.style.left=pos.x+"px";button.style.top=pos.y+"px";button.style.setProperty("--agent-color",colorFor(a));
     button.setAttribute("aria-label",label(a.role)+", "+statusName(a.status)+". "+a.purpose);
     button.setAttribute("aria-pressed",String(selected===a.id));
@@ -173,15 +184,16 @@ function render(){
       '</span><span class="node-task">'+esc(task?.description||a.purpose)+'</span><span class="node-bottom"><span class="node-access">'+
       (a.capabilities?.length||0)+' capabilities</span><span class="node-state">'+esc(statusName(a.status))+'</span></span>';
     if(button.innerHTML!==html)button.innerHTML=html;
-    if(isNew)setTimeout(()=>button.classList.remove("new"),850);
+    if(isNew&&!state.replay)setTimeout(()=>button.classList.remove("new"),850);
   }
   if(!selected&&state.agents.size)selected=state.agents.keys().next().value;
   renderInspector();
   renderActivity();
   renderQuestion();
-  $("resultPanel").hidden=!mission?.result||state.preview;
+  renderReplayHud();
+  $("resultPanel").hidden=!mission?.result||state.preview||!replayLive;
   if(mission?.result){
-    $("resultTitle").textContent=status==="completed"?"Here’s what the crew delivered.":status==="blocked"?"The mission needs a missing capability.":status==="stopped"?"All execution stopped.":"The mission couldn’t finish.";
+    $("resultTitle").textContent=status==="completed"?"Hereâ€™s what the crew delivered.":status==="blocked"?"The mission needs a missing capability.":status==="stopped"?"All execution stopped.":"The mission couldnâ€™t finish.";
     $("resultText").textContent=mission.result.summary||mission.result.reason||mission.result.error||"";
     const meta=resultMetaText(mission);
     if($("resultMeta")){$("resultMeta").hidden=!meta;$("resultMeta").textContent=meta;}
@@ -197,19 +209,19 @@ function renderInspector(){
   const tasks=[...state.tasks.values()].filter(t=>t.agent_id===a.id),current=tasks.find(t=>t.status==="running")||tasks.at(-1);
   const parent=state.agents.get(a.parent_id),children=[...state.agents.values()].filter(c=>c.parent_id===a.id);
   const output=current?.output||a.output;
-  const missionLive=!terminal.has(state.mission?.status||"");
+  const missionLive=replayLive&&!state.preview&&!terminal.has(state.mission?.status||"");
   const canKill=missionLive&&!terminal.has(a.status);
   const html='<div class="agent-detail"><div class="agent-detail-header">'+bot(colorFor(a))+'<div><h2>'+esc(label(a.role))+
-    '</h2><span class="detail-status '+a.status+'">'+esc(statusName(a.status))+' · LEVEL '+a.depth+'</span></div></div>'+
+    '</h2><span class="detail-status '+a.status+'">'+esc(statusName(a.status))+' Â· LEVEL '+a.depth+'</span></div></div>'+
     '<div class="detail-label">CURRENT OBJECTIVE</div><p class="detail-purpose">'+esc(current?.description||a.purpose)+'</p>'+
     '<div class="detail-label">CAPABILITIES</div><div class="access-list">'+(a.capabilities||[]).map(c=>'<span class="access-chip">'+esc(c)+'</span>').join("")+
-    '</div><div class="relationships"><span>Reports to</span>'+(parent?'<button type="button" id="selectParent">'+esc(label(parent.role))+' ↗</button>':'<span>You</span>')+'</div>'+
+    '</div><div class="relationships"><span>Reports to</span>'+(parent?'<button type="button" id="selectParent">'+esc(label(parent.role))+' â†—</button>':'<span>You</span>')+'</div>'+
     '<div class="relationships"><span>Direct reports</span><span>'+children.length+' agents</span></div>'+
     (output?'<div class="detail-label">RESULT</div><div class="detail-output">'+esc(output.finding||JSON.stringify(output))+'</div>':
-    '<div class="detail-label">RIGHT NOW</div><p class="detail-purpose">'+esc(a.status==="running"?a.activity||"Considering the next step…":statusName(a.status))+'</p>')+
+    '<div class="detail-label">RIGHT NOW</div><p class="detail-purpose">'+esc(a.status==="running"?a.activity||"Considering the next stepâ€¦":statusName(a.status))+'</p>')+
     (canKill?'<button type="button" class="kill-agent" id="killAgent">Kill this agent</button>':'')+
-    '<div class="detail-label">COMMUNICATIONS</div>'+state.events.filter(e=>e.event_type==='agent.message'&&(e.payload.from_id===a.id||e.payload.to_id===a.id)).slice(0,3).map(e=>'<p class="detail-purpose message-detail">'+esc(label(state.agents.get(e.payload.from_id)?.role))+' → '+esc(label(state.agents.get(e.payload.to_id)?.role))+'<br><small>'+esc(e.payload.kind)+' · '+esc(e.payload.text.slice(0,160))+'</small></p>').join('')+
-    '<div class="detail-usage">'+esc(a.model||health?.openai?.model||"")+(a.tokens?' · '+a.tokens.toLocaleString()+' tokens':'')+'</div></div>';
+    '<div class="detail-label">COMMUNICATIONS</div>'+state.events.filter(e=>e.event_type==='agent.message'&&(e.payload.from_id===a.id||e.payload.to_id===a.id)).slice(0,3).map(e=>'<p class="detail-purpose message-detail">'+esc(label(state.agents.get(e.payload.from_id)?.role))+' â†’ '+esc(label(state.agents.get(e.payload.to_id)?.role))+'<br><small>'+esc(e.payload.kind)+' Â· '+esc(e.payload.text.slice(0,160))+'</small></p>').join('')+
+    '<div class="detail-usage">'+esc(a.model||health?.openai?.model||"")+(a.tokens?' Â· '+a.tokens.toLocaleString()+' tokens':'')+'</div></div>';
   const inspector=$("inspectorContent");
   if(inspector.innerHTML!==html){const scroll=inspector.querySelector(".detail-output")?.scrollTop||0;inspector.innerHTML=html;
     if(inspector.querySelector(".detail-output"))inspector.querySelector(".detail-output").scrollTop=scroll;
@@ -220,40 +232,40 @@ function renderInspector(){
 function describe(e){
   const p=e.payload||{},a=state.agents.get(e.actor_id),name=label(a?.role);
   switch(e.event_type){
-    case "agent.message":return '<b>'+esc(label(state.agents.get(p.from_id)?.role))+'</b> → '+esc(label(state.agents.get(p.to_id)?.role))+' · '+esc(p.kind);
+    case "agent.message":return '<b>'+esc(label(state.agents.get(p.from_id)?.role))+'</b> â†’ '+esc(label(state.agents.get(p.to_id)?.role))+' Â· '+esc(p.kind);
     case "agent.spawned":return "<b>"+esc(label(p.role))+"</b> joined the crew";
     case "agent.killed":return "<b>"+esc(label(p.role||a?.role))+"</b> was killed";
-    case "controller.decision":return "<b>Controller</b> · "+esc(p.action==="spawn"?"delegated to "+label(p.role):p.action==="finish"?"assembled the final answer":p.action==="ask"?"asked the user a question":p.reason||p.action);
-    case "mission.question":return "<b>Waiting for you</b> · "+esc(p.question||"A question is unanswered");
-    case "user.answered":return "<b>Answer received</b> · "+esc(p.question||p.question_id||"question");
+    case "controller.decision":return "<b>Controller</b> Â· "+esc(p.action==="spawn"?"delegated to "+label(p.role):p.action==="finish"?"assembled the final answer":p.action==="ask"?"asked the user a question":p.reason||p.action);
+    case "mission.question":return "<b>Waiting for you</b> Â· "+esc(p.question||"A question is unanswered");
+    case "user.answered":return "<b>Answer received</b> Â· "+esc(p.question||p.question_id||"question");
     case "llm.started":return "<b>"+esc(name)+"</b> is "+(p.kind==="decision"?"deciding the next move":p.kind==="verification"?"verifying the claimed result":"working");
-    case "llm.completed":return "<b>"+esc(name)+"</b> · "+((p.input_tokens||0)+(p.output_tokens||0)+(p.reasoning_tokens||0)).toLocaleString()+" tokens";
+    case "llm.completed":return "<b>"+esc(name)+"</b> Â· "+((p.input_tokens||0)+(p.output_tokens||0)+(p.reasoning_tokens||0)).toLocaleString()+" tokens";
     case "budget.updated":return p.known===true&&typeof p.token_spent==="number"
-      ?"<b>Spend</b> · est. "+esc(formatUsd(p.token_spent)||String(p.token_spent))+(typeof p.token_budget==="number"?" / "+esc(formatUsd(p.token_budget)||String(p.token_budget)):"")
-      :"<b>Spend</b> · estimate unavailable";
+      ?"<b>Spend</b> Â· est. "+esc(formatUsd(p.token_spent)||String(p.token_spent))+(typeof p.token_budget==="number"?" / "+esc(formatUsd(p.token_budget)||String(p.token_budget)):"")
+      :"<b>Spend</b> Â· estimate unavailable";
     case "budget.warning":return typeof p.token_spent==="number"&&typeof p.token_budget==="number"
-      ?"<b>Budget warning</b> · est. "+esc(formatUsd(p.token_spent)||String(p.token_spent))+" / "+esc(formatUsd(p.token_budget)||String(p.token_budget))
-      :"<b>Budget warning</b> · estimate unavailable";
+      ?"<b>Budget warning</b> Â· est. "+esc(formatUsd(p.token_spent)||String(p.token_spent))+" / "+esc(formatUsd(p.token_budget)||String(p.token_budget))
+      :"<b>Budget warning</b> Â· estimate unavailable";
     case "verification.started":return "<b>Verifier</b> is checking the claimed result";
     case "verification.passed":return "<b>Verifier</b> accepted the claimed result";
-    case "verification.failed":return "<b>Verifier</b> rejected the claim"+(p.failure_class?" · "+esc(p.failure_class):"")+(p.rationale?" · "+esc(p.rationale):"");
+    case "verification.failed":return "<b>Verifier</b> rejected the claim"+(p.failure_class?" Â· "+esc(p.failure_class):"")+(p.rationale?" Â· "+esc(p.rationale):"");
     case "task.completed":return "<b>"+esc(name)+"</b> delivered a result";
     case "task.blocked":return "<b>"+esc(name)+"</b> needs a missing capability";
     case "mission.started":return "The mission is underway";
     case "mission.completed":return "<b>Mission complete.</b> Result ready below";
     case "mission.stopped":return "<b>Execution stopped</b>";
-    case "mission.failed":return "<b>Mission failed</b>"+(p.failure_class?" · "+esc(p.failure_class):"")+(p.error?" · "+esc(p.error):"");
-    case "mission.blocked":return "<b>Mission blocked</b> · "+esc(p.reason||"");
+    case "mission.failed":return "<b>Mission failed</b>"+(p.failure_class?" Â· "+esc(p.failure_class):"")+(p.error?" Â· "+esc(p.error):"");
+    case "mission.blocked":return "<b>Mission blocked</b> Â· "+esc(p.reason||"");
     default:return "";
   }
 }
 function renderActivity(){
   const html=state.events.filter(e=>describe(e)).slice(0,30).map(e=>'<li>'+describe(e)+'<time>'+
     new Date(e.created_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"})+'</time></li>').join("");
-  $("activity").innerHTML=html||'<li class="empty-activity">The mission’s story will appear here.</li>';
+  $("activity").innerHTML=html||'<li class="empty-activity">The missionâ€™s story will appear here.</li>';
 }
 function pendingQuestion(){
-  if(state.preview)return null;
+  if(state.preview||!replayLive)return null;
   const open=state.mission?.pending_question;
   return open&&open.question_id?open:null;
 }
@@ -291,15 +303,91 @@ async function request(path,options){
   return data;
 }
 function disconnect(){
-  generation++;clearTimeout(retry);clearTimeout(previewTimer);if(ws){ws.onclose=null;ws.close();ws=null;}
+  generation++;clearTimeout(retry);clearTimeout(previewTimer);stopReplayPlay();if(ws){ws.onclose=null;ws.close();ws=null;}
 }
 function reset(mission){
+  stopReplayPlay();
+  eventLog=[];replayCursor=-1;replayLive=true;sourceMission=mission||null;
   state=newState(mission);selected=null;elements.clear();$("nodes").replaceChildren();$("activity").replaceChildren();
   $("resultPanel").hidden=true;if($("resultMeta")){$("resultMeta").hidden=true;$("resultMeta").textContent="";}
   if($("questionPanel"))$("questionPanel").hidden=!mission?.pending_question;
   if($("answerText"))$("answerText").value="";
   showNotice("");setCommandStatus("");zoom=1;$("zoomValue").textContent="100%";clearAlerts();
   if(hudTick){clearInterval(hudTick);hudTick=null;}
+}
+function stopReplayPlay(){
+  if(replayTimer){clearInterval(replayTimer);replayTimer=null;}
+}
+function ingestRecorded(e){
+  if(!recordEvent(eventLog,e))return false;
+  if(replayLive){
+    replayCursor=eventLog.length-1;
+    applyEvent(state,e);
+    applyQuestionEvent(e);
+  }
+  return true;
+}
+function showReplayAt(index,playing=false){
+  if(state.preview)return;
+  stopReplayPlay();
+  const cursor=clampReplayIndex(index,eventLog.length);
+  replayCursor=cursor;
+  replayLive=isReplayLive(cursor,eventLog.length);
+  const projected=projectEvents(sourceMission,eventLog,cursor);
+  projected.preview=false;
+  projected.replay=!replayLive;
+  state=projected;
+  if(selected&&!state.agents.has(selected))selected=null;
+  elements.clear();
+  if($("nodes"))$("nodes").replaceChildren();
+  if(playing&&!replayLive){
+    replayTimer=setInterval(()=>{
+      const next=stepReplay(replayCursor,eventLog.length,1);
+      const live=isReplayLive(next,eventLog.length);
+      replayCursor=next;
+      replayLive=live;
+      const step=projectEvents(sourceMission,eventLog,next);
+      step.preview=false;
+      step.replay=!live;
+      state=step;
+      if(selected&&!state.agents.has(selected))selected=null;
+      elements.clear();
+      if($("nodes"))$("nodes").replaceChildren();
+      schedule();
+      if(live)stopReplayPlay();
+    },400);
+  }
+  schedule();
+}
+function renderReplayHud(){
+  const hud=$("replayHud");
+  if(!hud)return;
+  const playing=!!replayTimer;
+  const view=replayView(eventLog,replayCursor,{preview:state.preview,playing,mission:sourceMission||state.mission});
+  hud.hidden=!state.mission||state.preview;
+  hud.dataset.live=view.live?"true":"false";
+  if($("replayMode")){
+    $("replayMode").textContent=view.label;
+    $("replayMode").className="hud-chip mode "+(view.preview?"preview":view.live?"replay-live":"replay");
+  }
+  if($("replayCaption"))$("replayCaption").textContent=view.caption;
+  if($("replayPosition"))$("replayPosition").textContent=view.positionLabel;
+  if($("replayEvent"))$("replayEvent").textContent=view.eventType||"â€”";
+  const scrub=$("replayScrub");
+  if(scrub){
+    const max=Math.max(0,view.total-1);
+    scrub.max=String(max);
+    scrub.value=String(Math.max(0,view.cursor));
+    scrub.disabled=view.disabled;
+  }
+  const disable=view.disabled;
+  if($("replayPrev"))$("replayPrev").disabled=disable||view.cursor<=0;
+  if($("replayNext"))$("replayNext").disabled=disable||view.live;
+  if($("replayLiveBtn"))$("replayLiveBtn").disabled=disable||view.live;
+  if($("replayPlay")){
+    $("replayPlay").disabled=disable||view.total<2||view.live;
+    $("replayPlay").textContent=playing?"Pause":"Play";
+  }
 }
 function connect(id,gen){
   if(gen!==generation)return;
@@ -310,17 +398,18 @@ function connect(id,gen){
     if(gen!==generation)return;
     try{
       const e=JSON.parse(message.data);
-      if(applyEvent(state,e)){
-        applyQuestionEvent(e);
+      if(ingestRecorded(e)){
         schedule();
-        considerAlert(e,liveFrom);
-        if(e.event_type==="mission.question"){
-          const created=e.created_at?new Date(e.created_at).getTime():NaN;
-          if(!(Number.isFinite(created)&&created<liveFrom-2000)){
-            pushAlert({level:"warning",title:"Human answer required",detail:(e.payload&&e.payload.question)||"A question is unanswered",event_type:"mission.question"});
+        if(replayLive){
+          considerAlert(e,liveFrom);
+          if(e.event_type==="mission.question"){
+            const created=e.created_at?new Date(e.created_at).getTime():NaN;
+            if(!(Number.isFinite(created)&&created<liveFrom-2000)){
+              pushAlert({level:"warning",title:"Human answer required",detail:(e.payload&&e.payload.question)||"A question is unanswered",event_type:"mission.question"});
+            }
           }
+          if(e.event_type==='agent.message')setTimeout(schedule,9100);
         }
-        if(e.event_type==='agent.message')setTimeout(schedule,9100);
         if(e.event_type.startsWith("mission.")&&terminal.has(e.event_type.split(".")[1]))refreshHistory();
       }
     }catch{showNotice("An event could not be read. Reconnect to restore the mission.");}
@@ -330,7 +419,7 @@ function connect(id,gen){
     if(gen!==generation)return;
     const status=state.mission?.status||"";
     if(terminal.has(status)){connection("Mission "+status,status==="completed"?"live":"disconnected");return;}
-    connection("Reconnecting…","disconnected");
+    connection("Reconnectingâ€¦","disconnected");
     retry=setTimeout(()=>connect(id,gen),2000);
   };
 }
@@ -342,7 +431,7 @@ async function loadMission(id){
     try{
       const events=await request("/api/missions/"+id+"/events");
       if(gen!==generation)return;
-      for(const e of events){applyEvent(state,e);applyQuestionEvent(e);}
+      for(const e of events)ingestRecorded(e);
     }catch{}
     connect(id,gen);schedule();
   }catch(error){showNotice(error.message);}
@@ -351,7 +440,7 @@ async function refreshHistory(){
   try{
     const missions=await request("/api/missions");
     $("history").replaceChildren(new Option("Mission history",""));
-    for(const m of missions)$("history").add(new Option(m.goal.slice(0,60)+" · "+m.status,m.id));
+    for(const m of missions)$("history").add(new Option(m.goal.slice(0,60)+" Â· "+m.status,m.id));
     if(state.mission&&!state.preview)$("history").value=state.mission.id;
     return missions;
   }catch{return [];}
@@ -366,7 +455,7 @@ $("missionForm").addEventListener("submit",async e=>{
   }catch(error){showNotice(error.message);$("launch").disabled=false;}
 });
 $("stopAll").addEventListener("click",async()=>{
-  $("stopAll").disabled=true;$("stopAll").innerHTML="<span>■</span> STOPPING…";
+  $("stopAll").disabled=true;$("stopAll").innerHTML="<span>â– </span> STOPPINGâ€¦";
   try{
     haltPreviewLocally();
     const result=await request("/api/stop-all",{method:"POST"});
@@ -379,7 +468,7 @@ $("stopAll").addEventListener("click",async()=>{
     }
     if(result.active_missions)showNotice("Some executions are still shutting down.");
   }catch(error){showNotice("Shutdown could not be confirmed: "+error.message);}
-  finally{$("stopAll").disabled=false;$("stopAll").innerHTML="<span>■</span> STOP ALL";refreshHistory();}
+  finally{$("stopAll").disabled=false;$("stopAll").innerHTML="<span>â– </span> STOP ALL";refreshHistory();}
 });
 async function killSelectedAgent(){
   const a=state.agents.get(selected);if(!a)return;
@@ -417,7 +506,7 @@ function commandSuccessMessage(resolved,result){
   if(resolved.action==="stop-all"){
     if(!result||result.status!=="stopped"||!Array.isArray(result.mission_ids))return null;
     let message="Stopped "+result.mission_ids.length+" mission(s)";
-    if(result.active_missions)message+=" · some executions are still shutting down";
+    if(result.active_missions)message+=" Â· some executions are still shutting down";
     return message;
   }
   if(resolved.action==="answer"){
@@ -534,13 +623,25 @@ function preview(){
   next();
 }
 $("preview").onclick=preview;$("emptyPreview").onclick=preview;
+if($("replayPrev"))$("replayPrev").onclick=()=>{if(state.preview)return;showReplayAt(stepReplay(replayCursor,eventLog.length,-1));};
+if($("replayNext"))$("replayNext").onclick=()=>{if(state.preview)return;showReplayAt(stepReplay(replayCursor,eventLog.length,1));};
+if($("replayLiveBtn"))$("replayLiveBtn").onclick=()=>{if(state.preview)return;showReplayAt(eventLog.length-1);};
+if($("replayPlay"))$("replayPlay").onclick=()=>{
+  if(state.preview)return;
+  if(replayTimer){stopReplayPlay();schedule();return;}
+  showReplayAt(replayCursor,true);
+};
+if($("replayScrub"))$("replayScrub").addEventListener("input",()=>{
+  if(state.preview||$("replayScrub").disabled)return;
+  showReplayAt(Number($("replayScrub").value));
+});
 async function initialize(){
   try{
     const spec=await request("/openapi.json");
     killAvailable=killRoutePresent(spec);
   }catch{killAvailable=false;}
   try{health=await request("/api/health");const o=health.openai;
-    $("brain").innerHTML='<span class="brain-dot"></span><div><strong>'+esc(o.model)+'</strong><small>'+esc(o.reasoning_effort)+' reasoning · '+(o.configured?'connected':'key needed')+'</small></div>';
+    $("brain").innerHTML='<span class="brain-dot"></span><div><strong>'+esc(o.model)+'</strong><small>'+esc(o.reasoning_effort)+' reasoning Â· '+(o.configured?'connected':'key needed')+'</small></div>';
     connection(o.configured?"Ready to think":"API key needed",o.configured?"live":"disconnected");
     if(!o.configured)showNotice("OpenAI is not configured on the server yet.");
   }catch{connection("Server unavailable","disconnected");showNotice("Cannot reach the local server.");}

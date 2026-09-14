@@ -186,6 +186,22 @@ export function applyEvent(state, e) {
   if (e.event_type === "mission.running" && state.mission) {
     state.mission.status = "running";
   }
+  if (e.event_type === "mission.paused" && state.mission) {
+    state.mission.status = "paused";
+  }
+  if (e.event_type === "mission.resumed" && state.mission) {
+    state.mission.status = "running";
+  }
+  if (e.event_type === "mission.question" && state.mission) {
+    state.mission.pending_question = p;
+    state.mission.status = "waiting";
+  }
+  if (e.event_type === "user.answered" && state.mission) {
+    const open = state.mission.pending_question;
+    if (!open || !p.question_id || open.question_id === p.question_id) {
+      state.mission.pending_question = null;
+    }
+  }
   if (e.event_type.startsWith("mission.") && terminal.has(e.event_type.split(".")[1]) && state.mission) {
     state.mission.status = e.event_type.split(".")[1];
     state.mission.result = p;
@@ -308,4 +324,83 @@ export function layoutTree(agents, minimumWidth = 700) {
   for(const a of list) if(!visited.has(a.id)) {spans.set(a.id,250);place(a,50,0);}
   const depth=Math.max(0,...[...positions.values()].map(p=>p.depth));
   return {positions,width,height:Math.max(420,depth*230+320)};
+}
+export function recordEvent(log, e) {
+  if (!Array.isArray(log) || !e || e.id == null || e.id === "") return false;
+  for (const item of log) if (item.id === e.id) return false;
+  log.push(e);
+  return true;
+}
+export function clampReplayIndex(index, length) {
+  if (!length || length < 1) return -1;
+  if (index === -1) return -1;
+  if (typeof index !== "number" || !Number.isFinite(index)) return length - 1;
+  return Math.max(0, Math.min(length - 1, Math.trunc(index)));
+}
+export function stepReplay(index, length, delta) {
+  const amount = typeof delta === "number" && Number.isFinite(delta) ? Math.trunc(delta) : 0;
+  const cur = clampReplayIndex(index, length);
+  if (cur < 0) return -1;
+  return clampReplayIndex(cur + amount, length);
+}
+export function isReplayLive(index, length) {
+  if (!length || length < 1) return true;
+  return clampReplayIndex(index, length) === length - 1;
+}
+export function missionSnapshot(mission) {
+  if (!mission) return null;
+  return {
+    id: mission.id,
+    goal: mission.goal,
+    created_at: mission.created_at,
+    mode: mission.mode,
+    budget: mission.budget,
+    status: "pending",
+    result: null,
+    pending_question: null,
+  };
+}
+export function projectEvents(mission, log, throughIndex) {
+  const events = Array.isArray(log) ? log : [];
+  const cursor = throughIndex == null
+    ? (events.length ? events.length - 1 : -1)
+    : clampReplayIndex(throughIndex, events.length);
+  const state = newState(missionSnapshot(mission));
+  state.replay = cursor >= 0 && cursor < events.length - 1;
+  if (cursor < 0) return state;
+  for (let i = 0; i <= cursor; i++) applyEvent(state, events[i]);
+  state.replay = cursor < events.length - 1;
+  return state;
+}
+export function replayElapsedMs(mission, event) {
+  const start = mission?.created_at ? Date.parse(mission.created_at) : NaN;
+  const at = event?.created_at ? Date.parse(event.created_at) : start;
+  if (!Number.isFinite(start) || !Number.isFinite(at)) return null;
+  return Math.max(0, at - start);
+}
+export function replayView(log, index, options = {}) {
+  const events = Array.isArray(log) ? log : [];
+  const preview = options.preview === true;
+  const cursor = clampReplayIndex(index, events.length);
+  const live = !preview && isReplayLive(cursor, events.length);
+  const event = cursor >= 0 ? events[cursor] : null;
+  const playing = options.playing === true && !live && !preview && events.length > 0;
+  return {
+    total: events.length,
+    cursor,
+    live,
+    preview,
+    playing,
+    disabled: preview || events.length < 1,
+    label: preview ? "PREVIEW" : (live ? "LIVE" : "REPLAY"),
+    positionLabel: events.length < 1 ? "0 / 0" : (cursor + 1) + " / " + events.length,
+    eventType: event?.event_type || "",
+    createdAt: event?.created_at || null,
+    elapsedMs: replayElapsedMs(options.mission, event),
+    caption: preview
+      ? "Preview is synthetic · not historical replay"
+      : (events.length < 1
+        ? "No recorded events yet"
+        : "Recorded events only · not a simulation"),
+  };
 }

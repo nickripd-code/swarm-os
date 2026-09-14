@@ -27,3 +27,15 @@
 .kill-agent{margin-top:14px;width:100%;border:1px solid #e4cfc4;background:#fff4ee;color:#8a4b3a;border-radius:8px;padding:9px 12px;font:11px var(--mono);letter-spacing:.5px;cursor:pointer}
 .kill-agent:hover{background:#ffe8dc}
 .kill-agent:disabled{opacity:.55;cursor:default}
+.hud-chip.status.paused,.hud-chip.mode.replay{color:#5b6e88;background:#eef3f8;border-color:#cfdbe6}
+.hud-chip.mode.replay-live{color:#58775e;border-color:#cde0cb;background:#eff6ed}
+.replay-hud{margin:12px 0 0;padding:12px 0 0;border-top:1px solid #eeece4}
+.replay-hud[data-live="false"]{border-top-color:#cfdbe6}
+.replay-hud-heading{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+.replay-caption{margin:8px 0 0;font:11px 'DM Sans',system-ui;color:#6d7468}
+.replay-controls{display:flex;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap}
+.replay-controls button{border:1px solid #d6dccb;background:#fff;border-radius:6px;padding:6px 10px;font:11px var(--mono);letter-spacing:.4px}
+.replay-controls button:hover{background:#e8edde}
+.replay-controls input[type="range"]{flex:1;min-width:120px;accent-color:#6a4e98}
+.replay-meta{display:flex;justify-content:space-between;gap:12px;margin-top:8px;font:10px var(--mono);color:#8a7b6a}
+.replay-meta #replayEvent{text-align:right;overflow-wrap:anywhere}
