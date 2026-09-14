@@ -15,6 +15,11 @@ def get_openrouter_api_key() -> str | None:
     return key.strip() if key else None
 
 
+def get_xai_api_key() -> str | None:
+    key = os.getenv("XAI_API_KEY")
+    return key.strip() if key else None
+
+
 def get_api_key() -> str | None:
     if os.getenv("OPENAI_API_KEY"):
         return os.environ["OPENAI_API_KEY"].strip()
