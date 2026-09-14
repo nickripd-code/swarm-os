@@ -152,6 +152,33 @@ async def test_resume_while_waiting_for_finish_approval_does_not_fabricate_one(t
     assert saved.status == "completed"
 
 
+@pytest.mark.asyncio
+async def test_pause_during_finish_approval_stays_paused_until_resume(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(store, controller=PassingFinishProvider())
+    mission = Mission(goal="Approve after pause", limits={"require_finish_approval": True})
+    store.save_mission(mission)
+    await runtime.start(mission)
+    waiting = await wait_until_question(store, mission.id)
+    question_id = waiting.pending_question.question_id
+    paused = await runtime.pause(mission.id)
+    assert paused.status == MissionStatus.PAUSED
+    assert paused.pending_question.question_id == question_id
+    record = await runtime.submit_answer(mission.id, question_id, "approve")
+    assert record["kind"] == "approval"
+    assert record["resume"] == "paused"
+    answered = store.get_mission(mission.id)
+    assert answered.status == MissionStatus.PAUSED
+    assert answered.answers[0].consumed_at is None
+    assert not any(e.event_type == "mission.completed" for e in store.events(mission.id))
+    await runtime.resume(mission.id)
+    await asyncio.wait_for(asyncio.gather(*runtime.runs.values()), 2)
+    saved = store.get_mission(mission.id)
+    assert saved.status == "completed"
+    assert saved.answers[0].consumed_at is not None
+    assert any(e.event_type == "user.answer_consumed" for e in store.events(mission.id))
+
+
 def parse_is_approve(text: str) -> bool:
     from app.policy import parse_approval_answer
     return parse_approval_answer(text) == "approve"
