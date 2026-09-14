@@ -12,7 +12,6 @@ from .policy import PolicyError, PolicyGate, PolicyRequest
 ORG_OPS = frozenset({"spawn", "replace", "reparent", "retire"})
 CONTROLLER_ROLE = "mission_controller"
 IN_FLIGHT = {TaskStatus.PENDING, TaskStatus.RUNNING}
-LIVE_DESCENDANT = {AgentStatus.CREATED, AgentStatus.RUNNING, AgentStatus.BLOCKED}
 
 
 class OrgChange(BaseModel):
@@ -248,8 +247,8 @@ class OrganizationDesigner:
             raise PolicyError("Cannot retire a specialist with in-flight work", FailureClass.INVALID_OUTPUT)
         if allow_live_children:
             return
-        live = [agent for agent in _descendants(agents, target) if agent.status in LIVE_DESCENDANT]
-        if live:
+        leftover = [agent for agent in _descendants(agents, target) if agent.status != AgentStatus.STOPPED]
+        if leftover:
             raise PolicyError(
                 "Cannot retire a specialist that still has live descendants; reparent them first",
                 FailureClass.INVALID_OUTPUT,
