@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import os
 from .credentials import (
-    get_api_key, get_anthropic_api_key, get_cohere_api_key, get_deepseek_api_key,
+    get_api_key, get_anthropic_api_key, get_cerebras_api_key, get_cohere_api_key,
+    get_deepseek_api_key,
     get_fireworks_api_key, get_gemini_api_key, get_groq_api_key, get_huggingface_api_key,
     get_mistral_api_key, get_openrouter_api_key, get_perplexity_api_key,
     get_together_api_key, get_xai_api_key,
 )
 from .llm import (
     DEFAULT_ANTHROPIC_BASE_URL, DEFAULT_ANTHROPIC_MODEL, DEFAULT_AZURE_OPENAI_API_VERSION,
-    DEFAULT_BEDROCK_MODEL, DEFAULT_BEDROCK_REGION, DEFAULT_COHERE_BASE_URL, DEFAULT_COHERE_MODEL,
+    DEFAULT_BEDROCK_MODEL, DEFAULT_BEDROCK_REGION, DEFAULT_CEREBRAS_BASE_URL,
+    DEFAULT_CEREBRAS_MODEL, DEFAULT_COHERE_BASE_URL, DEFAULT_COHERE_MODEL,
     DEFAULT_DEEPSEEK_BASE_URL,
     DEFAULT_DEEPSEEK_MODEL, DEFAULT_FIREWORKS_BASE_URL, DEFAULT_FIREWORKS_MODEL,
     DEFAULT_GEMINI_BASE_URL, DEFAULT_GEMINI_MODEL, DEFAULT_GROQ_BASE_URL,
@@ -134,6 +136,13 @@ def huggingface_status() -> dict:
             "model": os.getenv("HUGGINGFACE_MODEL", DEFAULT_HUGGINGFACE_MODEL),
             "base_url": os.getenv("HUGGINGFACE_BASE_URL", DEFAULT_HUGGINGFACE_BASE_URL),
             "provider": "huggingface", "fallback": False}
+
+
+def cerebras_status() -> dict:
+    return {"configured": bool(get_cerebras_api_key()),
+            "model": os.getenv("CEREBRAS_MODEL", DEFAULT_CEREBRAS_MODEL),
+            "base_url": os.getenv("CEREBRAS_BASE_URL", DEFAULT_CEREBRAS_BASE_URL),
+            "provider": "cerebras", "fallback": False}
 
 
 def ollama_status() -> dict:
