@@ -3,7 +3,7 @@ import asyncio
 import pytest
 from fastapi import HTTPException
 
-from app.llm import LLMProvider
+from app.llm import LLMProvider, WORK_FORMAT
 from app.main import answer_question
 from app.models import AnswerRequest, FailureClass, Mission, MissionStatus, PendingQuestion
 from app.runtime import PolicyError, SwarmRuntime
@@ -53,6 +53,12 @@ async def wait_until_question(store: Store, mission_id, timeout: float = 2) -> M
             if saved and saved.status == MissionStatus.WAITING and saved.pending_question:
                 return saved
             await asyncio.sleep(0.01)
+
+
+def test_work_format_allows_ask():
+    props = WORK_FORMAT["schema"]["properties"]
+    assert "ask" in props["status"]["enum"]
+    assert "question" in props
 
 
 @pytest.mark.asyncio
@@ -277,3 +283,155 @@ async def test_http_answer_mismatch_is_409(tmp_path, monkeypatch):
     assert exc.value.status_code == 409
     assert store.get_mission(mission.id).pending_question is not None
     assert not any(e.event_type == "user.answered" for e in store.events(mission.id))
+
+
+class SpawnWaitThenFinishProvider(LLMProvider):
+    """Controller that spawns one analyst, waits, then finishes from worker output."""
+
+    async def decide(self, state):
+        if not any(agent.get("role") == "analyst" for agent in state.get("agents", [])):
+            return {"action": "spawn", "role": "analyst", "purpose": "Collect a user fact",
+                    "capabilities": ["reason"]}
+        if any(task.get("status") in {"pending", "running"} for task in state.get("tasks", [])):
+            return {"action": "wait", "reason": "worker running"}
+        finding = next(
+            ((task.get("output") or {}).get("finding") for task in state.get("tasks", [])
+             if (task.get("output") or {}).get("finding")),
+            None,
+        )
+        return {"action": "finish", "summary": finding or "Worker finished"}
+
+    async def verify(self, state, claim):
+        return local_evidence_check(state, claim)
+
+
+class WorkerAskThenCompleteProvider(SpawnWaitThenFinishProvider):
+    async def work(self, state, agent):
+        del agent
+        answers = state.get("answers") or []
+        if answers:
+            return {"status": "completed", "finding": f"User said: {answers[0]['answer']}",
+                    "limitations": []}
+        return {"status": "ask", "finding": "Need the name", "question": "What is the target name?",
+                "question_id": "spoofed-from-model"}
+
+
+class WorkerAskWithoutQuestionProvider(SpawnWaitThenFinishProvider):
+    async def work(self, state, agent):
+        del state, agent
+        return {"status": "ask", "finding": "Need a fact"}
+
+
+@pytest.mark.asyncio
+async def test_worker_ask_waits_consumes_matching_answer_and_continues(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(store, controller=WorkerAskThenCompleteProvider())
+    mission = Mission(goal="Need one user fact from a worker")
+    store.save_mission(mission)
+    job = asyncio.create_task(runtime.run(mission))
+    waiting = await wait_until_question(store, mission.id)
+    question_id = waiting.pending_question.question_id
+    assert question_id != "spoofed-from-model"
+    events = store.events(mission.id)
+    assert any(e.event_type == "mission.question" and e.payload["question_id"] == question_id for e in events)
+    assert any(e.event_type == "mission.waiting" and e.payload.get("question_id") == question_id for e in events)
+    assert store.get_mission(mission.id).status == "waiting"
+    assert store.get_mission(mission.id).result is None
+    task = store.load_tasks(mission.id)[0]
+    assert task.status == "running"
+
+    with pytest.raises(PolicyError) as mismatch:
+        await runtime.submit_answer(mission.id, "not-the-question", "Ada")
+    assert mismatch.value.failure_class == FailureClass.AUTHORIZATION_REQUIRED
+    assert store.get_mission(mission.id).pending_question is not None
+    assert not any(e.event_type == "user.answered" for e in store.events(mission.id))
+
+    record = await runtime.submit_answer(mission.id, question_id, "Ada")
+    assert record["answer"] == "Ada"
+    await asyncio.wait_for(job, 2)
+
+    saved = store.get_mission(mission.id)
+    assert saved.status == "completed"
+    assert saved.result["summary"] == "User said: Ada"
+    assert saved.pending_question is None
+    assert saved.answers[0].answer == "Ada"
+    assert any(e.event_type == "user.answered" for e in store.events(mission.id))
+    assert not any(e.event_type == "mission.failed" for e in store.events(mission.id))
+    completed = store.load_tasks(mission.id)[0]
+    assert completed.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_worker_ask_without_question_fails_closed(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(store, controller=WorkerAskWithoutQuestionProvider())
+    mission = Mission(goal="Invalid worker ask")
+    store.save_mission(mission)
+    await runtime.run(mission)
+    saved = store.get_mission(mission.id)
+    assert saved.status == "failed"
+    assert saved.result["failure_class"] == "INVALID_OUTPUT"
+    assert "without a question" in saved.result["error"]
+    assert not any(e.event_type == "mission.question" for e in store.events(mission.id))
+    assert not any(e.event_type == "mission.completed" for e in store.events(mission.id))
+
+
+@pytest.mark.asyncio
+async def test_stop_during_human_wait_is_stopped_not_success(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(store, controller=AskThenFinishProvider())
+    mission = Mission(goal="Stop while waiting for a human")
+    store.save_mission(mission)
+    job = asyncio.create_task(runtime.run(mission))
+    waiting = await wait_until_question(store, mission.id)
+    question_id = waiting.pending_question.question_id
+    await runtime.stop(mission.id)
+    await asyncio.wait_for(job, 2)
+    saved = store.get_mission(mission.id)
+    assert saved.status == "stopped"
+    assert saved.result == {"reason": "Execution stopped"}
+    assert not any(e.event_type == "mission.completed" for e in store.events(mission.id))
+    with pytest.raises(PolicyError) as exc:
+        await runtime.submit_answer(mission.id, question_id, "Ada")
+    assert "no longer accepting" in str(exc.value)
+    assert not any(e.event_type == "user.answered" for e in store.events(mission.id))
+
+
+@pytest.mark.asyncio
+async def test_stop_during_worker_ask_is_stopped_not_success(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(store, controller=WorkerAskThenCompleteProvider())
+    mission = Mission(goal="Stop while a worker waits for a human")
+    store.save_mission(mission)
+    job = asyncio.create_task(runtime.run(mission))
+    waiting = await wait_until_question(store, mission.id)
+    await runtime.stop(mission.id)
+    await asyncio.wait_for(job, 2)
+    saved = store.get_mission(mission.id)
+    assert saved.status == "stopped"
+    assert saved.result == {"reason": "Execution stopped"}
+    assert not any(e.event_type == "mission.completed" for e in store.events(mission.id))
+    assert not any(e.event_type == "user.answered" for e in store.events(mission.id))
+
+
+@pytest.mark.asyncio
+async def test_answer_for_another_mission_fails_closed(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(store, controller=AskThenFinishProvider())
+    waiting_mission = Mission(goal="Need a name")
+    other = Mission(goal="Unrelated mission", status=MissionStatus.RUNNING)
+    store.save_mission(waiting_mission)
+    store.save_mission(other)
+    job = asyncio.create_task(runtime.run(waiting_mission))
+    waiting = await wait_until_question(store, waiting_mission.id)
+    question_id = waiting.pending_question.question_id
+    with pytest.raises(PolicyError) as exc:
+        await runtime.submit_answer(other.id, question_id, "Ada")
+    assert exc.value.failure_class == FailureClass.AUTHORIZATION_REQUIRED
+    assert store.get_mission(waiting_mission.id).pending_question is not None
+    assert store.get_mission(other.id).answers == []
+    assert not any(e.event_type == "user.answered" for e in store.events(waiting_mission.id))
+    assert not any(e.event_type == "user.answered" for e in store.events(other.id))
+    await runtime.stop(waiting_mission.id)
+    await asyncio.wait_for(job, 2)
+    assert store.get_mission(waiting_mission.id).status == "stopped"

@@ -393,6 +393,22 @@ class SwarmRuntime:
             if self._answer_waiters.get(mission.id) is event:
                 self._answer_waiters.pop(mission.id, None)
 
+    async def _ask_human(self, mission: Mission, actor: AgentSpec, question: str,
+                         reason: str | None = None) -> None:
+        """Emit a real question and park until the matching answer. Ignore model-supplied ids."""
+        text = (question or "").strip()
+        if not text:
+            raise PolicyError("Asked without a question", FailureClass.INVALID_OUTPUT)
+        if mission.pending_question is not None:
+            raise PolicyError("A question is already awaiting an answer", FailureClass.INVALID_OUTPUT)
+        pending = PendingQuestion(
+            question_id=str(uuid4()),
+            question=text,
+            reason=(str(reason).strip() or None) if reason is not None else None,
+        )
+        mission.pending_question = pending
+        await self._park_for_human_answer(mission, actor, pending, asked_now=True)
+
     async def _park_for_human_answer(self, mission: Mission, root: AgentSpec,
                                      pending: PendingQuestion, *, asked_now: bool) -> None:
         await self._persist_status(mission, MissionStatus.WAITING)
@@ -667,16 +683,7 @@ class SwarmRuntime:
                         if self._in_flight_tasks(mission):
                             raise PolicyError("Cannot ask while tasks are active",
                                               FailureClass.INVALID_OUTPUT)
-                        if mission.pending_question is not None:
-                            raise PolicyError("A question is already awaiting an answer",
-                                              FailureClass.INVALID_OUTPUT)
-                        pending = PendingQuestion(
-                            question_id=str(uuid4()),
-                            question=question,
-                            reason=decision.get("reason"),
-                        )
-                        mission.pending_question = pending
-                        await self._park_for_human_answer(mission, root, pending, asked_now=True)
+                        await self._ask_human(mission, root, question, decision.get("reason"))
                     elif action == "wait":
                         if mission.pending_question is not None:
                             raise PolicyError("Cannot wait for tasks while a question is unanswered",
@@ -823,7 +830,7 @@ class SwarmRuntime:
         return str(tool), raw_args
 
     async def _worker_result(self, mission: Mission, agent: AgentSpec) -> dict[str, Any]:
-        """Run WORK_FORMAT until the worker completes, blocks, or a tool request fails closed."""
+        """Run WORK_FORMAT until the worker completes, blocks, asks a human, or a tool request fails closed."""
         max_rounds = max(mission.limits.max_tool_calls + 1, 1)
         for _ in range(max_rounds):
             self.check_stopped(mission.id)
@@ -835,6 +842,12 @@ class SwarmRuntime:
             if status == "use_tool":
                 tool, raw_args = self._tool_call_from_model(result)
                 await self.invoke_tool(mission, tool, raw_args, agent.id)
+                continue
+            if status == "ask":
+                question = str(result.get("question") or "").strip()
+                if not question:
+                    raise PolicyError("Worker asked without a question", FailureClass.INVALID_OUTPUT)
+                await self._ask_human(mission, agent, question, result.get("reason"))
                 continue
             if status not in {"completed", "blocked"} or not result.get("finding"):
                 raise PolicyError("Worker did not return a valid result", FailureClass.INVALID_OUTPUT)
