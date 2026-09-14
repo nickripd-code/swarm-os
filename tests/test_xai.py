@@ -59,6 +59,9 @@ def no_extra_providers(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    monkeypatch.delenv("MISTRAL_MODEL", raising=False)
+    monkeypatch.delenv("MISTRAL_BASE_URL", raising=False)
 
 
 @pytest.mark.asyncio

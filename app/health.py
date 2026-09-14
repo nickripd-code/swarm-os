@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import os
-from .credentials import get_api_key, get_anthropic_api_key, get_openrouter_api_key, get_xai_api_key
+from .credentials import (
+    get_api_key, get_anthropic_api_key, get_mistral_api_key, get_openrouter_api_key,
+    get_xai_api_key,
+)
 from .llm import (
     DEFAULT_ANTHROPIC_BASE_URL, DEFAULT_ANTHROPIC_MODEL, DEFAULT_LLAMACPP_BASE_URL, DEFAULT_MODEL,
-    DEFAULT_OLLAMA_BASE_URL, DEFAULT_OPENROUTER_MODEL, DEFAULT_REASONING, DEFAULT_VLLM_BASE_URL,
+    DEFAULT_MISTRAL_BASE_URL, DEFAULT_MISTRAL_MODEL, DEFAULT_OLLAMA_BASE_URL,
+    DEFAULT_OPENROUTER_MODEL, DEFAULT_REASONING, DEFAULT_VLLM_BASE_URL,
     DEFAULT_XAI_MODEL, DEFAULT_XAI_BASE_URL,
     LlamaCppModelProvider, OllamaModelProvider, VllmModelProvider,
     llamacpp_opted_in, ollama_opted_in, vllm_opted_in,
@@ -35,6 +39,13 @@ def anthropic_status() -> dict:
             "model": os.getenv("ANTHROPIC_MODEL", DEFAULT_ANTHROPIC_MODEL),
             "base_url": os.getenv("ANTHROPIC_BASE_URL", DEFAULT_ANTHROPIC_BASE_URL),
             "provider": "anthropic", "fallback": False}
+
+
+def mistral_status() -> dict:
+    return {"configured": bool(get_mistral_api_key()),
+            "model": os.getenv("MISTRAL_MODEL", DEFAULT_MISTRAL_MODEL),
+            "base_url": os.getenv("MISTRAL_BASE_URL", DEFAULT_MISTRAL_BASE_URL),
+            "provider": "mistral", "fallback": False}
 
 
 def ollama_status() -> dict:
