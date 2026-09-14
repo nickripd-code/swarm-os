@@ -159,7 +159,7 @@ Nothing in the current test suite is known red. UI preview is synthetic by desig
 
 ## NEXT PRIORITY
 
-**This slice:** `PolicyGate` seed. Spawn / finish / tool use go through `app/policy.py` before the runtime mutates state. Mission limits, capability allowlist, deny-by-default dangerous tools, and optional `local_only` privacy. Fail closed with existing `PolicyError`. OpenAI-only path unchanged (`privacy` defaults to `cloud_allowed`). Rebased onto main after worker leases (`#22`), migrations (`#24`), xAI (`#25`), typed events (`#20`), ToolProvider (`#21`), answers (`#19`), PaymentProvider (`#18`), and llama.cpp (`#17`); those modules were not rewritten. Tests recorded after this revision.
+**This slice:** `PolicyGate` seed. Spawn / finish / tool use go through `app/policy.py` before the runtime mutates state. Mission limits, capability allowlist, deny-by-default dangerous tools, and optional `local_only` privacy. Fail closed with existing `PolicyError`. OpenAI-only path unchanged (`privacy` defaults to `cloud_allowed`). Rebased onto main after worker leases (`#22`), migrations (`#24`), xAI (`#25`), typed events (`#20`), ToolProvider (`#21`), answers (`#19`), PaymentProvider (`#18`), and llama.cpp (`#17`); those modules were not rewritten. `python3 -m pytest tests/ -q` → **283 passed** (198 warnings, SQLAlchemy datetime adapter).
 
 **Landed on main (keep):** worker leases / idempotency (`#22`); versioned SQLite migrations (`#24`); xAI ModelProvider (`#25`); typed `EventType` catalog (`#20`); `ToolProvider` / MCP seam (`#21`); answers path (`#19`); `PaymentProvider` seam (`#18`, simulated default, live fail-closed); llama.cpp (`#17`).
 
