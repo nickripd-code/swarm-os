@@ -177,6 +177,8 @@ function renderInspector(){
   const tasks=[...state.tasks.values()].filter(t=>t.agent_id===a.id),current=tasks.find(t=>t.status==="running")||tasks.at(-1);
   const parent=state.agents.get(a.parent_id),children=[...state.agents.values()].filter(c=>c.parent_id===a.id);
   const output=current?.output||a.output;
+  const missionLive=!terminal.has(state.mission?.status||"");
+  const canKill=missionLive&&!terminal.has(a.status);
   const html='<div class="agent-detail"><div class="agent-detail-header">'+bot(colorFor(a))+'<div><h2>'+esc(label(a.role))+
     '</h2><span class="detail-status '+a.status+'">'+esc(statusName(a.status))+' · LEVEL '+a.depth+'</span></div></div>'+
     '<div class="detail-label">CURRENT OBJECTIVE</div><p class="detail-purpose">'+esc(current?.description||a.purpose)+'</p>'+
@@ -185,12 +187,14 @@ function renderInspector(){
     '<div class="relationships"><span>Direct reports</span><span>'+children.length+' agents</span></div>'+
     (output?'<div class="detail-label">RESULT</div><div class="detail-output">'+esc(output.finding||JSON.stringify(output))+'</div>':
     '<div class="detail-label">RIGHT NOW</div><p class="detail-purpose">'+esc(a.status==="running"?a.activity||"Considering the next step…":statusName(a.status))+'</p>')+
+    (canKill?'<button type="button" class="kill-agent" id="killAgent">Kill this agent</button>':'')+
     '<div class="detail-label">COMMUNICATIONS</div>'+state.events.filter(e=>e.event_type==='agent.message'&&(e.payload.from_id===a.id||e.payload.to_id===a.id)).slice(0,3).map(e=>'<p class="detail-purpose message-detail">'+esc(label(state.agents.get(e.payload.from_id)?.role))+' → '+esc(label(state.agents.get(e.payload.to_id)?.role))+'<br><small>'+esc(e.payload.kind)+' · '+esc(e.payload.text.slice(0,160))+'</small></p>').join('')+
     '<div class="detail-usage">'+esc(a.model||health?.openai?.model||"")+(a.tokens?' · '+a.tokens.toLocaleString()+' tokens':'')+'</div></div>';
   const inspector=$("inspectorContent");
   if(inspector.innerHTML!==html){const scroll=inspector.querySelector(".detail-output")?.scrollTop||0;inspector.innerHTML=html;
     if(inspector.querySelector(".detail-output"))inspector.querySelector(".detail-output").scrollTop=scroll;
     if(parent)$("selectParent").onclick=()=>{selectAgent(parent.id);focusAgent(parent.id);};
+    if($("killAgent"))$("killAgent").onclick=()=>{killSelectedAgent();};
   }
 }
 function describe(e){
@@ -198,6 +202,7 @@ function describe(e){
   switch(e.event_type){
     case "agent.message":return '<b>'+esc(label(state.agents.get(p.from_id)?.role))+'</b> → '+esc(label(state.agents.get(p.to_id)?.role))+' · '+esc(p.kind);
     case "agent.spawned":return "<b>"+esc(label(p.role))+"</b> joined the crew";
+    case "agent.killed":return "<b>"+esc(label(p.role||a?.role))+"</b> was killed";
     case "controller.decision":return "<b>Controller</b> · "+esc(p.action==="spawn"?"delegated to "+label(p.role):p.action==="finish"?"assembled the final answer":p.action==="ask"?"asked the user a question":p.reason||p.action);
     case "mission.question":return "<b>Waiting for you</b> · "+esc(p.question||"A question is unanswered");
     case "user.answered":return "<b>Answer received</b> · "+esc(p.question||p.question_id||"question");
@@ -361,6 +366,25 @@ $("stopAll").addEventListener("click",async()=>{
   }catch(error){showNotice("Shutdown could not be confirmed: "+error.message);}
   finally{$("stopAll").disabled=false;$("stopAll").innerHTML="<span>■</span> STOP ALL";refreshHistory();}
 });
+async function killSelectedAgent(){
+  const a=state.agents.get(selected);if(!a)return;
+  const btn=$("killAgent");if(btn)btn.disabled=true;
+  try{
+    if(state.preview){
+      a.status="stopped";
+      for(const t of state.tasks.values()){
+        if(t.agent_id===a.id&&(t.status==="pending"||t.status==="running"))t.status="stopped";
+      }
+      $("announcement").textContent=label(a.role)+" stopped";
+      schedule();
+      return;
+    }
+    if(!state.mission?.id||terminal.has(state.mission.status||""))return;
+    await request("/api/missions/"+state.mission.id+"/agents/"+a.id+"/kill",{method:"POST"});
+    $("announcement").textContent=label(a.role)+" stopped";
+  }catch(error){showNotice("Could not kill that agent: "+error.message);}
+  finally{schedule();}
+}
 $("history").addEventListener("change",()=>{if($("history").value)loadMission($("history").value);});
 $("answerForm").addEventListener("submit",async e=>{
   e.preventDefault();

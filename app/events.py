@@ -17,6 +17,7 @@ class EventType(StrEnum):
     AGENT_MESSAGE = "agent.message"
     AGENT_REPARENTED = "agent.reparented"
     AGENT_RETIRED = "agent.retired"
+    AGENT_KILLED = "agent.killed"
 
     TASK_PENDING = "task.pending"
     TASK_STARTED = "task.started"

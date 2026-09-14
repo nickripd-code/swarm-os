@@ -161,6 +161,23 @@ async def resume_mission(mission_id: UUID):
     return {"status": "resume_requested"}
 
 
+@app.post("/api/missions/{mission_id}/agents/{agent_id}/kill")
+async def kill_mission_agent(mission_id: UUID, agent_id: UUID):
+    if not store.get_mission(mission_id):
+        raise HTTPException(404, "Mission not found")
+    try:
+        agent = await runtime.kill_agent(mission_id, agent_id)
+    except PolicyError as exc:
+        code = 404 if str(exc).lower().startswith("unknown agent") else 409
+        raise HTTPException(code, str(exc)) from exc
+    mission = store.get_mission(mission_id)
+    return {
+        "status": agent.status,
+        "agent_id": str(agent.id),
+        "mission_status": mission.status if mission else None,
+    }
+
+
 @app.post("/api/missions/{mission_id}/answers/{question_id}")
 async def answer_question(mission_id: UUID, question_id: str, request: AnswerRequest):
     if not store.get_mission(mission_id):

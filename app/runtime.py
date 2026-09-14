@@ -70,6 +70,8 @@ class SwarmRuntime:
         self.stopped: set[UUID] = set()
         self.pausing: set[UUID] = set()
         self.suspending: set[UUID] = set()
+        self.killed_agents: dict[UUID, set[UUID]] = defaultdict(set)
+        self.agent_jobs: dict[tuple[UUID, UUID], asyncio.Task] = {}
         self.started_at: dict[UUID, datetime] = {}
         self.runs: dict[UUID, asyncio.Task] = {}
         self.wallet = WalletAdapter()
@@ -243,6 +245,18 @@ class SwarmRuntime:
             raise asyncio.CancelledError()
         if mission_id in self.pausing:
             raise PauseRequested()
+
+    def check_agent(self, mission_id: UUID, agent_id: UUID):
+        self.check_stopped(mission_id)
+        if agent_id in self.killed_agents[mission_id]:
+            raise asyncio.CancelledError()
+
+    def _agent_kill_swallowed(self, mission_id: UUID, agent_id: UUID) -> bool:
+        return (
+            agent_id in self.killed_agents[mission_id]
+            and mission_id not in self.stopped
+            and mission_id not in self.suspending
+        )
 
     async def spawn(self, mission: Mission, role: str, purpose: str, parent: AgentSpec | None = None,
                     capabilities: list[str] | None = None) -> AgentSpec:
@@ -481,8 +495,10 @@ class SwarmRuntime:
         return payload
 
     def _in_flight_tasks(self, mission: Mission) -> list[Task]:
+        killed = self.killed_agents[mission.id]
         return [task for task in self.tasks[mission.id]
-                if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}]
+                if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}
+                and task.agent_id not in killed]
 
     async def _persist_status(self, mission: Mission, status: MissionStatus):
         mission.status, mission.updated_at = status, utcnow()
@@ -626,6 +642,8 @@ class SwarmRuntime:
         for agent in list(self.agents[mission.id]):
             if agent.parent_id is None or agent.id in assigned:
                 continue
+            if agent.id in self.killed_agents[mission.id]:
+                continue
             if agent.status not in {AgentStatus.CREATED, AgentStatus.RUNNING}:
                 continue
             self.check_stopped(mission.id)
@@ -645,7 +663,7 @@ class SwarmRuntime:
             await asyncio.sleep(seconds)
 
     async def model_call(self, mission: Mission, actor: AgentSpec, kind: str, call):
-        self.check_stopped(mission.id)
+        self.check_agent(mission.id, actor.id)
         self.resources.authorize_start(mission)
         model = getattr(self.controller, "model", "demo")
         await self.emit(mission.id, EventType.LLM_STARTED, {"kind": kind, "model": model,
@@ -653,7 +671,7 @@ class SwarmRuntime:
         attempts = self.max_retries + 1
         response = None
         for attempt in range(1, attempts + 1):
-            self.check_stopped(mission.id)
+            self.check_agent(mission.id, actor.id)
             try:
                 response = await call()
                 break
@@ -674,7 +692,7 @@ class SwarmRuntime:
                     "error": str(exc), "attempt": attempt, "max_attempts": attempts,
                 }, actor.id)
                 raise
-        self.check_stopped(mission.id)
+        self.check_agent(mission.id, actor.id)
         assert response is not None
         await self._emit_planning(mission.id, actor.id)
         metadata = response.pop("_meta", None)
@@ -1020,7 +1038,7 @@ class SwarmRuntime:
         """Run WORK_FORMAT until the worker completes, blocks, asks a human, or a tool request fails closed."""
         max_rounds = max(mission.limits.max_tool_calls + 1, 1)
         for _ in range(max_rounds):
-            self.check_stopped(mission.id)
+            self.check_agent(mission.id, agent.id)
             result = await self.model_call(
                 mission, agent, "work",
                 lambda: self.controller.work(self._state(mission), agent.model_dump(mode="json")),
@@ -1041,30 +1059,59 @@ class SwarmRuntime:
             return result
         raise PolicyError("Worker tool request limit reached", FailureClass.RESOURCE_EXHAUSTED)
 
+    async def _stop_agent_work(self, mission: Mission, agent: AgentSpec, *, emit_killed: bool) -> None:
+        """Mark this agent's unfinished work stopped. Idempotent. Does not stop the mission."""
+        for task in self.tasks[mission.id]:
+            if task.agent_id != agent.id or task.status not in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+                continue
+            task.status = TaskStatus.STOPPED
+            self.store.save_task(task)
+            payload = task.model_dump(mode="json")
+            payload["reason"] = "Agent killed"
+            await self.emit(mission.id, EventType.TASK_STOPPED, payload, agent.id)
+        if agent.status in {AgentStatus.CREATED, AgentStatus.RUNNING, AgentStatus.BLOCKED, AgentStatus.PAUSED}:
+            await self.agent_status(agent, AgentStatus.STOPPED)
+        if emit_killed:
+            await self.emit(mission.id, EventType.AGENT_KILLED, {
+                "id": str(agent.id),
+                "agent_id": str(agent.id),
+                "role": agent.role,
+                "status": AgentStatus.STOPPED,
+                "reason": "Human killed this agent",
+            }, agent.id)
+
     async def _execute_task(self, mission: Mission, task: Task, agent: AgentSpec):
-        self.check_stopped(mission.id)
+        self.check_agent(mission.id, agent.id)
         try:
             await self.claim_work(mission, "task", str(task.id))
         except LeaseConflict as exc:
             raise PolicyError("Task is already leased by another worker",
                               FailureClass.POLICY_REFUSAL) from exc
         try:
-            await self.renew_work(mission, "task", str(task.id))
-            task.status = TaskStatus.RUNNING
-            self.store.save_task(task)
-            await self.agent_status(agent, AgentStatus.RUNNING)
-            await self.emit(mission.id, EventType.TASK_STARTED, task.model_dump(mode="json"), agent.id)
-            result = await self._worker_result(mission, agent)
-            task.output = result
-            task.status = TaskStatus.COMPLETED if result["status"] == "completed" else TaskStatus.BLOCKED
-            agent.output = result
-            self.store.save_task(task)
-            await self.agent_status(agent, AgentStatus.COMPLETED if task.status == TaskStatus.COMPLETED else AgentStatus.BLOCKED)
-            await self.emit(mission.id, event_type_for_task(task.status), task.model_dump(mode="json"), agent.id)
-            root = self.agents[mission.id][0]
-            await self.emit(mission.id, EventType.AGENT_MESSAGE, {
-                "from_id": str(agent.id), "to_id": str(root.id), "kind": "result",
-                "text": result["finding"][:500]}, agent.id)
+            try:
+                self.check_agent(mission.id, agent.id)
+                await self.renew_work(mission, "task", str(task.id))
+                task.status = TaskStatus.RUNNING
+                self.store.save_task(task)
+                await self.agent_status(agent, AgentStatus.RUNNING)
+                await self.emit(mission.id, EventType.TASK_STARTED, task.model_dump(mode="json"), agent.id)
+                result = await self._worker_result(mission, agent)
+                async with self.lock:
+                    self.check_agent(mission.id, agent.id)
+                    task.output = result
+                    task.status = TaskStatus.COMPLETED if result["status"] == "completed" else TaskStatus.BLOCKED
+                    agent.output = result
+                    self.store.save_task(task)
+                    await self.agent_status(agent, AgentStatus.COMPLETED if task.status == TaskStatus.COMPLETED else AgentStatus.BLOCKED)
+                    await self.emit(mission.id, event_type_for_task(task.status), task.model_dump(mode="json"), agent.id)
+                    root = self.agents[mission.id][0]
+                    await self.emit(mission.id, EventType.AGENT_MESSAGE, {
+                        "from_id": str(agent.id), "to_id": str(root.id), "kind": "result",
+                        "text": result["finding"][:500]}, agent.id)
+            except asyncio.CancelledError:
+                if self._agent_kill_swallowed(mission.id, agent.id):
+                    return
+                raise
         finally:
             await self.release_work(mission, "task", str(task.id))
 
@@ -1074,10 +1121,49 @@ class SwarmRuntime:
         for task in list(self.tasks[mission.id]):
             if task.status not in {TaskStatus.PENDING, TaskStatus.RUNNING}:
                 continue
+            if task.agent_id in self.killed_agents[mission.id]:
+                continue
             agent = by_id.get(task.agent_id)
             if agent is None:
                 raise PolicyError("Persisted task references an unknown agent", FailureClass.INVALID_OUTPUT)
-            await self._execute_task(mission, task, agent)
+            job = asyncio.create_task(self._execute_task(mission, task, agent))
+            self.agent_jobs[(mission.id, agent.id)] = job
+            try:
+                await job
+            finally:
+                if self.agent_jobs.get((mission.id, agent.id)) is job:
+                    self.agent_jobs.pop((mission.id, agent.id), None)
+                if not job.done():
+                    job.cancel()
+                    await asyncio.gather(job, return_exceptions=True)
+            self.check_stopped(mission.id)
+
+    async def kill_agent(self, mission_id: UUID, agent_id: UUID) -> AgentSpec:
+        """Cancel one agent's in-flight work. The mission continues if others remain."""
+        job = None
+        async with self.lock:
+            mission = self.store.get_mission(mission_id)
+            if mission is None:
+                raise PolicyError("Mission not found", FailureClass.POLICY_REFUSAL)
+            if mission.status in TERMINAL or mission_id in self.stopped:
+                raise PolicyError("Cannot kill an agent on a finished mission",
+                                  FailureClass.POLICY_REFUSAL)
+            self.hydrate(mission_id)
+            agent = next((item for item in self.agents[mission_id] if item.id == agent_id), None)
+            if agent is None:
+                raise PolicyError("Unknown agent", FailureClass.POLICY_REFUSAL)
+            if agent_id in self.killed_agents[mission_id] or agent.status in {
+                AgentStatus.COMPLETED, AgentStatus.FAILED, AgentStatus.STOPPED,
+            }:
+                raise PolicyError("Agent is already finished", FailureClass.POLICY_REFUSAL)
+            self.killed_agents[mission_id].add(agent_id)
+            await self._stop_agent_work(mission, agent, emit_killed=True)
+            job = self.agent_jobs.get((mission_id, agent_id))
+            if job and not job.done():
+                job.cancel()
+        if job is not None and not job.done():
+            await asyncio.gather(job, return_exceptions=True)
+        return agent
 
     async def _checkpoint_pause(self, mission: Mission) -> Mission:
         """Persist a truthful safe-point checkpoint for an explicit user pause."""
