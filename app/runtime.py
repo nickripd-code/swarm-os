@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
+from .events import EventType, event_type_for_mission, event_type_for_task
 from .models import (
     AgentSpec, AgentStatus, FailureClass, Mission, MissionAnswer, MissionEvent,
     MissionStatus, PaymentIntent, PendingQuestion, Task, TaskStatus, utcnow,
@@ -73,7 +74,7 @@ class SwarmRuntime:
         self._answer_waiters: dict[UUID, asyncio.Event] = {}
         self.tools = build_tool_provider() if tools is _UNSET else tools
 
-    async def emit(self, mission_id: UUID, event_type: str, payload: dict[str, Any], actor_id: UUID | None = None):
+    async def emit(self, mission_id: UUID, event_type: EventType | str, payload: dict[str, Any], actor_id: UUID | None = None):
         event = self.store.append(MissionEvent(mission_id=mission_id, event_type=event_type, actor_id=actor_id, payload=payload))
         if self.sink:
             await self.sink(event)
@@ -86,10 +87,10 @@ class SwarmRuntime:
             return
         planning["emitted"] = True
         for proposal in planning.get("proposals") or []:
-            await self.emit(mission_id, "planner.proposal", proposal, actor_id)
+            await self.emit(mission_id, EventType.PLANNER_PROPOSAL, proposal, actor_id)
         judge = planning.get("judge")
         if judge:
-            await self.emit(mission_id, "judge.decision", judge, actor_id)
+            await self.emit(mission_id, EventType.JUDGE_DECISION, judge, actor_id)
 
     def check_stopped(self, mission_id: UUID):
         if mission_id in self.stopped:
@@ -108,13 +109,13 @@ class SwarmRuntime:
                           role=role, purpose=purpose, capabilities=capabilities or [], depth=depth)
         current.append(agent)
         self.store.save_agent(agent)
-        await self.emit(mission.id, "agent.spawned", agent.model_dump(mode="json"), agent.id)
+        await self.emit(mission.id, EventType.AGENT_SPAWNED, agent.model_dump(mode="json"), agent.id)
         return agent
 
     async def agent_status(self, agent: AgentSpec, status: AgentStatus):
         agent.status = status
         self.store.save_agent(agent)
-        await self.emit(agent.mission_id, "agent.updated", agent.model_dump(mode="json"), agent.id)
+        await self.emit(agent.mission_id, EventType.AGENT_UPDATED, agent.model_dump(mode="json"), agent.id)
 
     def hydrate(self, mission_id: UUID) -> None:
         if self.agents[mission_id] or self.tasks[mission_id]:
@@ -163,7 +164,7 @@ class SwarmRuntime:
     def tool_calls_used(self, mission_id: UUID) -> int:
         if mission_id not in self._tool_calls:
             self._tool_calls[mission_id] = sum(
-                1 for event in self.store.events(mission_id) if event.event_type == "tool.started"
+                1 for event in self.store.events(mission_id) if event.event_type == EventType.TOOL_STARTED
             )
         return self._tool_calls[mission_id]
 
@@ -172,7 +173,7 @@ class SwarmRuntime:
             self._tool_results[mission_id] = [
                 dict(event.payload)
                 for event in self.store.events(mission_id)
-                if event.event_type == "tool.completed"
+                if event.event_type == EventType.TOOL_COMPLETED
             ]
         return self._tool_results[mission_id]
 
@@ -198,26 +199,26 @@ class SwarmRuntime:
                 pass
         available = self.available_tools(mission)
         if used >= limit:
-            await self.emit(mission.id, "tool.failed", {
+            await self.emit(mission.id, EventType.TOOL_FAILED, {
                 "tool": name, "failure_class": str(FailureClass.RESOURCE_EXHAUSTED),
                 "error": "Tool call limit reached", "used": used, "max": limit,
             }, actor_id)
             raise PolicyError("Tool call limit reached", FailureClass.RESOURCE_EXHAUSTED)
         if self.tools is None or name not in available:
             error = "No tool provider is connected" if not available else f"Unknown tool: {name}"
-            await self.emit(mission.id, "tool.failed", {
+            await self.emit(mission.id, EventType.TOOL_FAILED, {
                 "tool": name, "failure_class": str(FailureClass.TOOL_MISSING),
                 "error": error, "used": used, "max": limit,
             }, actor_id)
             raise PolicyError(error, FailureClass.TOOL_MISSING)
         charged = self.consume_tool_call(mission)
-        await self.emit(mission.id, "tool.started", {
+        await self.emit(mission.id, EventType.TOOL_STARTED, {
             "tool": name, "used": charged, "max": limit,
         }, actor_id)
         try:
             result = await self.tools.invoke(ToolCall(name=name, arguments=arguments or {}))
         except ToolError as exc:
-            await self.emit(mission.id, "tool.failed", {
+            await self.emit(mission.id, EventType.TOOL_FAILED, {
                 "tool": name, "failure_class": str(exc.failure_class),
                 "error": str(exc), "used": charged, "max": limit,
             }, actor_id)
@@ -225,7 +226,7 @@ class SwarmRuntime:
         if not result.ok:
             failure_class = result.failure_class or FailureClass.TOOL_FAILURE
             error = result.error or "Tool call failed"
-            await self.emit(mission.id, "tool.failed", {
+            await self.emit(mission.id, EventType.TOOL_FAILED, {
                 "tool": name, "failure_class": str(failure_class),
                 "error": error, "used": charged, "max": limit,
             }, actor_id)
@@ -238,7 +239,7 @@ class SwarmRuntime:
             "output": public_tool_data(result.output or {}),
             "provider": result.provider,
         }
-        await self.emit(mission.id, "tool.completed", payload, actor_id)
+        await self.emit(mission.id, EventType.TOOL_COMPLETED, payload, actor_id)
         self.tool_results(mission.id).append(payload)
         return payload
 
@@ -289,8 +290,8 @@ class SwarmRuntime:
         await self._persist_status(mission, MissionStatus.WAITING)
         payload = pending.model_dump(mode="json")
         if asked_now:
-            await self.emit(mission.id, "mission.question", payload, root.id)
-        await self.emit(mission.id, "mission.waiting", {
+            await self.emit(mission.id, EventType.MISSION_QUESTION, payload, root.id)
+        await self.emit(mission.id, EventType.MISSION_WAITING, {
             "reason": pending.reason or "Waiting for a human answer",
             "question_id": pending.question_id,
             "question": pending.question,
@@ -304,7 +305,7 @@ class SwarmRuntime:
                 FailureClass.AUTHORIZATION_REQUIRED,
             )
         await self._persist_status(mission, MissionStatus.RUNNING)
-        await self.emit(mission.id, "mission.running", {
+        await self.emit(mission.id, EventType.MISSION_RUNNING, {
             "reason": "Human answer received; controller will continue",
             "question_id": pending.question_id,
         }, root.id)
@@ -335,7 +336,7 @@ class SwarmRuntime:
         mission.updated_at = utcnow()
         self.store.save_mission(mission)
         payload = record.model_dump(mode="json")
-        await self.emit(mission_id, "user.answered", payload)
+        await self.emit(mission_id, EventType.USER_ANSWERED, payload)
         waiter = self._answer_waiters.get(mission_id)
         if waiter:
             waiter.set()
@@ -355,7 +356,7 @@ class SwarmRuntime:
                         description=agent.purpose, status=TaskStatus.PENDING)
             self.tasks[mission.id].append(task)
             self.store.save_task(task)
-            await self.emit(mission.id, "task.pending", task.model_dump(mode="json"), agent.id)
+            await self.emit(mission.id, EventType.TASK_PENDING, task.model_dump(mode="json"), agent.id)
             assigned.add(agent.id)
             created.append(task)
         return created
@@ -367,7 +368,7 @@ class SwarmRuntime:
     async def model_call(self, mission: Mission, actor: AgentSpec, kind: str, call):
         self.check_stopped(mission.id)
         model = getattr(self.controller, "model", "demo")
-        await self.emit(mission.id, "llm.started", {"kind": kind, "model": model,
+        await self.emit(mission.id, EventType.LLM_STARTED, {"kind": kind, "model": model,
                         "reasoning_effort": getattr(self.controller, "reasoning", None)}, actor.id)
         attempts = self.max_retries + 1
         response = None
@@ -380,7 +381,7 @@ class SwarmRuntime:
                 retryable = exc.failure_class in RETRYABLE_FAILURE_CLASSES and attempt < attempts
                 delay = retry_delay_seconds(attempt, self.retry_base_seconds) if retryable else 0.0
                 if retryable and self.remaining_runtime(mission) > delay:
-                    await self.emit(mission.id, "llm.retry", {
+                    await self.emit(mission.id, EventType.LLM_RETRY, {
                         "kind": kind, "model": model, "failure_class": str(exc.failure_class),
                         "error": str(exc), "attempt": attempt, "max_attempts": attempts,
                         "delay_seconds": delay,
@@ -388,7 +389,7 @@ class SwarmRuntime:
                     await self._sleep(delay)
                     continue
                 await self._emit_planning(mission.id, actor.id)
-                await self.emit(mission.id, "llm.failed", {
+                await self.emit(mission.id, EventType.LLM_FAILED, {
                     "kind": kind, "model": model, "failure_class": str(exc.failure_class),
                     "error": str(exc), "attempt": attempt, "max_attempts": attempts,
                 }, actor.id)
@@ -399,14 +400,14 @@ class SwarmRuntime:
         metadata = response.pop("_meta", None)
         if metadata:
             if metadata.get("failover_from"):
-                await self.emit(mission.id, "llm.failover", {
+                await self.emit(mission.id, EventType.LLM_FAILOVER, {
                     "kind": kind,
                     "from_provider": metadata["failover_from"],
                     "to_provider": metadata.get("provider"),
                     "reason": metadata.get("failover_reason"),
                     "model": metadata.get("model", model),
                 }, actor.id)
-            await self.emit(mission.id, "llm.completed", {"kind": kind, **metadata}, actor.id)
+            await self.emit(mission.id, EventType.LLM_COMPLETED, {"kind": kind, **metadata}, actor.id)
         return response
 
     async def run(self, mission: Mission):
@@ -424,7 +425,7 @@ class SwarmRuntime:
             existing = list(self.agents[mission.id])
             history = self.store.events(mission.id)
             started = next((event.created_at for event in history
-                            if event.event_type in {"mission.started", "mission.resumed"}), None)
+                            if event.event_type in {EventType.MISSION_STARTED, EventType.MISSION_RESUMED}), None)
             execution_anchor = started or (mission.updated_at if existing else utcnow())
             mission.status, mission.updated_at = MissionStatus.RUNNING, utcnow()
             self.started_at[mission.id] = execution_anchor
@@ -435,7 +436,7 @@ class SwarmRuntime:
             async with asyncio.timeout(remaining):
                 if existing:
                     root = next((a for a in existing if a.parent_id is None), existing[0])
-                    await self.emit(mission.id, "mission.resumed", {
+                    await self.emit(mission.id, EventType.MISSION_RESUMED, {
                         "goal": mission.goal, "mode": self.controller.mode,
                         "agents": len(existing), "tasks": len(self.tasks[mission.id]),
                     })
@@ -448,7 +449,7 @@ class SwarmRuntime:
                         interrupted_agents.add(task.agent_id)
                         payload = task.model_dump(mode="json")
                         payload["reason"] = "Interrupted by process restart; a new safe attempt will be created"
-                        await self.emit(mission.id, "task.stopped", payload, task.agent_id)
+                        await self.emit(mission.id, EventType.TASK_STOPPED, payload, task.agent_id)
                     for agent in existing:
                         if agent.id in interrupted_agents:
                             agent.status = AgentStatus.CREATED
@@ -459,7 +460,7 @@ class SwarmRuntime:
                     if mission.pending_question is None:
                         await self._run_tasks(mission)
                 else:
-                    await self.emit(mission.id, "mission.started", {"goal": mission.goal, "mode": self.controller.mode})
+                    await self.emit(mission.id, EventType.MISSION_STARTED, {"goal": mission.goal, "mode": self.controller.mode})
                     root = await self.spawn(mission, "mission_controller", "Delegate work, inspect results and deliver the mission.",
                                             capabilities=["spawn", "coordinate", "reason"])
                     await self.agent_status(root, AgentStatus.RUNNING)
@@ -467,7 +468,7 @@ class SwarmRuntime:
                     await self._park_for_human_answer(mission, root, mission.pending_question, asked_now=False)
                 for _ in range(mission.limits.max_agents * 2 + 2):
                     decision = await self.model_call(mission, root, "decision", lambda: self.controller.decide(self._state(mission)))
-                    await self.emit(mission.id, "controller.decision", decision, root.id)
+                    await self.emit(mission.id, EventType.CONTROLLER_DECISION, decision, root.id)
                     action = decision.get("action")
                     if action == "spawn":
                         if not decision.get("role") or not decision.get("purpose"):
@@ -484,7 +485,7 @@ class SwarmRuntime:
                             raise PolicyError("Model requested an unavailable capability",
                                               FailureClass.CAPABILITY_MISMATCH)
                         child = await self.spawn(mission, decision["role"], decision["purpose"], parent, caps)
-                        await self.emit(mission.id, "agent.message", {
+                        await self.emit(mission.id, EventType.AGENT_MESSAGE, {
                             "from_id": str(root.id), "to_id": str(child.id), "kind": "assignment",
                             "text": decision["purpose"]}, root.id)
                         await self._assign_unassigned_tasks(mission)
@@ -549,7 +550,7 @@ class SwarmRuntime:
                             raise PolicyError("Controller requested a wait with no work in flight",
                                               FailureClass.INVALID_OUTPUT)
                         await self._persist_status(mission, MissionStatus.WAITING)
-                        await self.emit(mission.id, "mission.waiting", {
+                        await self.emit(mission.id, EventType.MISSION_WAITING, {
                             "reason": decision.get("reason") or "Waiting for in-flight work",
                             "pending_tasks": [str(task.id) for task in inflight],
                         }, root.id)
@@ -557,7 +558,7 @@ class SwarmRuntime:
                         if mission.id in self.stopped or mission.id in self.suspending:
                             raise asyncio.CancelledError()
                         await self._persist_status(mission, MissionStatus.RUNNING)
-                        await self.emit(mission.id, "mission.running", {
+                        await self.emit(mission.id, EventType.MISSION_RUNNING, {
                             "reason": "In-flight work finished; controller will continue",
                         }, root.id)
                     else:
@@ -590,7 +591,7 @@ class SwarmRuntime:
                 if mission.pending_question is not None:
                     mission.status = MissionStatus.WAITING
                 self.store.save_mission(mission)
-                await self.emit(mission.id, "mission.suspended", {
+                await self.emit(mission.id, EventType.MISSION_SUSPENDED, {
                     "reason": "Runtime is shutting down; unfinished work remains recoverable",
                     "mode": self.controller.mode,
                 })
@@ -600,18 +601,18 @@ class SwarmRuntime:
                     if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
                         task.status = TaskStatus.STOPPED if mission.status == MissionStatus.STOPPED else TaskStatus.FAILED
                         self.store.save_task(task)
-                        await self.emit(mission.id, "task." + task.status, task.model_dump(mode="json"), task.agent_id)
+                        await self.emit(mission.id, event_type_for_task(task.status), task.model_dump(mode="json"), task.agent_id)
                 for agent in self.agents[mission.id]:
                     if agent.status in {AgentStatus.CREATED, AgentStatus.RUNNING}:
                         status = AgentStatus.STOPPED if mission.status == MissionStatus.STOPPED else AgentStatus.FAILED
                         await self.agent_status(agent, status)
                 mission.updated_at = utcnow()
                 self.store.save_mission(mission)
-                await self.emit(mission.id, "mission." + mission.status, mission.result or {})
+                await self.emit(mission.id, event_type_for_mission(mission.status), mission.result or {})
 
     async def _verify_finish(self, mission: Mission, root: AgentSpec, claim: dict[str, Any]):
         """Controller finish is a claim. Complete only after a real verifier accepts it."""
-        await self.emit(mission.id, "verification.started", {
+        await self.emit(mission.id, EventType.VERIFICATION_STARTED, {
             "summary": str(claim.get("summary") or "")[:500],
             "outputs": len(claim.get("outputs") or []),
         }, root.id)
@@ -621,7 +622,7 @@ class SwarmRuntime:
                 lambda: self.controller.verify(self._state(mission), claim),
             )
         except (ProviderError, PolicyError) as exc:
-            await self.emit(mission.id, "verification.failed", {
+            await self.emit(mission.id, EventType.VERIFICATION_FAILED, {
                 "verdict": "inconclusive",
                 "rationale": str(exc),
                 "failure_class": str(exc.failure_class),
@@ -636,7 +637,7 @@ class SwarmRuntime:
             raise
         public = public_verification(result)
         if not verification_accepted(public):
-            await self.emit(mission.id, "verification.failed", {
+            await self.emit(mission.id, EventType.VERIFICATION_FAILED, {
                 **public,
                 "failure_class": str(FailureClass.VERIFICATION_FAILURE),
             }, root.id)
@@ -644,7 +645,7 @@ class SwarmRuntime:
                 public.get("rationale") or "Verification did not accept the claimed result",
                 FailureClass.VERIFICATION_FAILURE,
             )
-        await self.emit(mission.id, "verification.passed", public, root.id)
+        await self.emit(mission.id, EventType.VERIFICATION_PASSED, public, root.id)
 
     def _state(self, mission: Mission) -> dict[str, Any]:
         used = self.tool_calls_used(mission.id)
@@ -665,7 +666,7 @@ class SwarmRuntime:
         task.status = TaskStatus.RUNNING
         self.store.save_task(task)
         await self.agent_status(agent, AgentStatus.RUNNING)
-        await self.emit(mission.id, "task.started", task.model_dump(mode="json"), agent.id)
+        await self.emit(mission.id, EventType.TASK_STARTED, task.model_dump(mode="json"), agent.id)
         result = await self.model_call(mission, agent, "work",
                    lambda: self.controller.work(self._state(mission), agent.model_dump(mode="json")))
         if result.get("status") not in {"completed", "blocked"} or not result.get("finding"):
@@ -675,9 +676,9 @@ class SwarmRuntime:
         agent.output = result
         self.store.save_task(task)
         await self.agent_status(agent, AgentStatus.COMPLETED if task.status == TaskStatus.COMPLETED else AgentStatus.BLOCKED)
-        await self.emit(mission.id, "task." + task.status, task.model_dump(mode="json"), agent.id)
+        await self.emit(mission.id, event_type_for_task(task.status), task.model_dump(mode="json"), agent.id)
         root = self.agents[mission.id][0]
-        await self.emit(mission.id, "agent.message", {
+        await self.emit(mission.id, EventType.AGENT_MESSAGE, {
             "from_id": str(agent.id), "to_id": str(root.id), "kind": "result",
             "text": result["finding"][:500]}, agent.id)
 
@@ -704,7 +705,7 @@ class SwarmRuntime:
             if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
                 task.status = TaskStatus.STOPPED
                 self.store.save_task(task)
-                await self.emit(mission_id, "task.stopped", task.model_dump(mode="json"), task.agent_id)
+                await self.emit(mission_id, EventType.TASK_STOPPED, task.model_dump(mode="json"), task.agent_id)
         for agent in self.agents[mission_id]:
             if agent.status in {AgentStatus.CREATED, AgentStatus.RUNNING}:
                 await self.agent_status(agent, AgentStatus.STOPPED)
@@ -712,7 +713,7 @@ class SwarmRuntime:
         if mission and mission.status not in TERMINAL:
             mission.status, mission.updated_at = MissionStatus.STOPPED, utcnow()
             self.store.save_mission(mission)
-            await self.emit(mission_id, "mission.stopped", {"reason": "Execution stopped"})
+            await self.emit(mission_id, EventType.MISSION_STOPPED, {"reason": "Execution stopped"})
         return mission
 
     async def stop_all(self) -> list[UUID]:
@@ -746,5 +747,5 @@ class SwarmRuntime:
         mission.spent += amount
         mission.updated_at = utcnow()
         self.store.save_mission(mission)
-        await self.emit(mission.id, "payment.created", intent.model_dump(mode="json"))
+        await self.emit(mission.id, EventType.PAYMENT_CREATED, intent.model_dump(mode="json"))
         return intent

@@ -9,6 +9,9 @@ from uuid import UUID
 from sqlalchemy import DateTime, Integer, String, Text, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
+from .events import (
+    EventType, coerce_event_type, is_task_event, parse_event_type, task_status_from_event,
+)
 from .models import AgentSpec, Mission, MissionEvent, Task, utcnow
 
 
@@ -130,21 +133,21 @@ class Store:
         agents, tasks = {}, {}
         for event in self.events(mission_id):
             p = event.payload
-            if event.event_type in {"agent.spawned", "agent.updated"}:
+            if event.event_type in {EventType.AGENT_SPAWNED, EventType.AGENT_UPDATED}:
                 agents[p["id"]] = {**agents.get(p["id"], {}), **p}
-            elif event.event_type.startswith("task."):
+            elif is_task_event(event.event_type):
                 tid = p.get("id") or p.get("task_id")
                 if tid:
-                    status = event.event_type.split(".")[1]
-                    status = "running" if status == "started" else status
+                    status = task_status_from_event(event.event_type)
                     tasks[tid] = {**tasks.get(tid, {}), **p, "id": tid, "status": status}
-            elif event.event_type in {"mission.stopped", "mission.failed"}:
+            elif event.event_type in {EventType.MISSION_STOPPED, EventType.MISSION_FAILED}:
                 for agent in agents.values():
                     if agent["status"] in {"created", "running"}:
-                        agent["status"] = event.event_type.split(".")[1]
+                        agent["status"] = task_status_from_event(event.event_type)
         return {"agents": list(agents.values()), "tasks": list(tasks.values())}
 
     def append(self, event: MissionEvent) -> MissionEvent:
+        event.event_type = parse_event_type(event.event_type).value
         with self.sessions.begin() as db:
             row = EventRow(mission_id=str(event.mission_id), event_type=event.event_type,
                            actor_id=str(event.actor_id) if event.actor_id else None,
@@ -157,7 +160,7 @@ class Store:
     def events(self, mission_id: UUID) -> list[MissionEvent]:
         with self.sessions() as db:
             rows = db.scalars(select(EventRow).where(EventRow.mission_id == str(mission_id)).order_by(EventRow.id)).all()
-            return [MissionEvent(id=r.id, mission_id=UUID(r.mission_id), event_type=r.event_type,
+            return [MissionEvent(id=r.id, mission_id=UUID(r.mission_id), event_type=coerce_event_type(r.event_type),
                                  actor_id=UUID(r.actor_id) if r.actor_id else None,
                                  payload=json.loads(r.payload),
                                  created_at=(r.created_at.replace(tzinfo=timezone.utc)

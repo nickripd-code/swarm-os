@@ -141,6 +141,8 @@ class PaymentIntent(BaseModel):
 
 
 class MissionEvent(BaseModel):
+    """Append-only mission event. `event_type` is the historical dotted name from EventType."""
+
     id: int | None = None
     mission_id: UUID
     event_type: str
