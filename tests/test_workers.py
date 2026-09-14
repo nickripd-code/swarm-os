@@ -150,3 +150,37 @@ def test_process_worker_records_real_handler_failure(tmp_path):
         }
     finally:
         pool.stop()
+
+
+def test_process_worker_supplies_trusted_context_outside_payload(tmp_path):
+    path = tmp_path / "swarm.db"
+    queue = WorkQueue(Store(str(path)))
+    item = queue.enqueue(mission_id="m1", kind="context", payload={"task_id": "only"})
+    pool = ProcessWorkerPool(path, {"context": "tests.worker_handlers:context_echo"})
+    try:
+        worker = pool.start()[0]
+        completed = _wait_for(queue, item.id, "completed")
+        assert completed.payload == {"task_id": "only"}
+        assert completed.result == {
+            "database_path": str(path.resolve()),
+            "owner_id": worker.owner_id,
+            "pid": worker.pid,
+        }
+    finally:
+        pool.stop()
+
+
+def test_process_worker_preserves_classified_handler_failure(tmp_path):
+    path = tmp_path / "swarm.db"
+    queue = WorkQueue(Store(str(path)))
+    item = queue.enqueue(mission_id="m1", kind="auth", payload={})
+    pool = ProcessWorkerPool(path, {"auth": "tests.worker_handlers:authorization_failure"})
+    try:
+        pool.start()
+        failed = _wait_for(queue, item.id, "failed")
+        assert failed.result == {
+            "error": "worker provider is unconfigured",
+            "failure_class": "AUTHORIZATION_REQUIRED",
+        }
+    finally:
+        pool.stop()
