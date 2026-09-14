@@ -16,6 +16,7 @@ from .health import (
     llamacpp_health_status, ollama_health_status, openai_status, openrouter_status,
     vllm_health_status,
 )
+from .tools import tools_status
 
 BASE = Path(__file__).parent
 
@@ -51,6 +52,7 @@ async def health():
     return {"ok": True, "openai": openai_status(), "openrouter": openrouter_status(),
             "ollama": await ollama_health_status(), "vllm": await vllm_health_status(),
             "llamacpp": await llamacpp_health_status(),
+            "tools": tools_status(runtime.tools),
             "active_missions": len(runtime.runs)}
 
 
