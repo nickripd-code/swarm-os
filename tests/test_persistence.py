@@ -250,9 +250,10 @@ async def test_graceful_suspend_keeps_mission_and_attempt_recoverable(tmp_path):
 
     assert suspended == [mission.id]
     assert provider.cancelled
-    assert store.get_mission(mission.id).status == MissionStatus.RUNNING
+    assert store.get_mission(mission.id).status == MissionStatus.WAITING
     assert any(task.status == TaskStatus.RUNNING for task in store.load_tasks(mission.id))
     events = store.events(mission.id)
+    assert any(event.event_type == "mission.waiting" for event in events)
     assert any(event.event_type == "mission.suspended" for event in events)
     assert not any(event.event_type in {"mission.stopped", "mission.failed"} for event in events)
 
