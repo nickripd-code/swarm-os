@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from .models import utcnow
 from .store import IdempotencyRow, Store, WorkerLeaseRow
 
-LEASE_SCOPES = frozenset({"mission", "task"})
+LEASE_SCOPES = frozenset({"mission", "task", "job"})
 DEFAULT_LEASE_TTL_SECONDS = 60.0
 
 
@@ -97,6 +97,57 @@ class WorkerLeases:
             )
             return _row_to_lease(row) if row else None
 
+    def claim_in_session(
+        self,
+        db,
+        *,
+        scope: str,
+        scope_id: str,
+        mission_id: str,
+        owner_id: str,
+        ttl_seconds: float | None = None,
+    ) -> ClaimOutcome:
+        """Claim inside an open store session so queue rows and leases stay atomic."""
+        if scope not in LEASE_SCOPES:
+            raise LeaseError(f"Unsupported lease scope: {scope}")
+        if not owner_id:
+            raise LeaseError("Lease owner is required")
+        ttl = self._ttl(ttl_seconds)
+        now = utcnow()
+        expires = now + timedelta(seconds=ttl)
+        row = db.scalar(
+            select(WorkerLeaseRow).where(
+                WorkerLeaseRow.scope == scope,
+                WorkerLeaseRow.scope_id == scope_id,
+            )
+        )
+        if row is None:
+            row = WorkerLeaseRow(
+                id=str(uuid4()),
+                scope=scope,
+                scope_id=scope_id,
+                mission_id=mission_id,
+                owner_id=owner_id,
+                status="claimed",
+                expires_at=expires,
+                heartbeat_at=now,
+                created_at=now,
+            )
+            db.add(row)
+            db.flush()
+            return ClaimOutcome(lease=_row_to_lease(row), reclaimed=False)
+        held = row.status == "claimed" and _aware(row.expires_at) > now
+        if held and row.owner_id != owner_id:
+            raise LeaseConflict(f"{scope} {scope_id} is leased by another worker")
+        reclaimed = not held and row.status == "claimed"
+        row.mission_id = mission_id
+        row.owner_id = owner_id
+        row.status = "claimed"
+        row.expires_at = expires
+        row.heartbeat_at = now
+        db.flush()
+        return ClaimOutcome(lease=_row_to_lease(row), reclaimed=reclaimed)
+
     def claim(
         self,
         *,
@@ -106,47 +157,16 @@ class WorkerLeases:
         owner_id: str,
         ttl_seconds: float | None = None,
     ) -> ClaimOutcome:
-        if scope not in LEASE_SCOPES:
-            raise LeaseError(f"Unsupported lease scope: {scope}")
-        if not owner_id:
-            raise LeaseError("Lease owner is required")
-        ttl = self._ttl(ttl_seconds)
-        now = utcnow()
-        expires = now + timedelta(seconds=ttl)
         try:
             with self.store.sessions.begin() as db:
-                row = db.scalar(
-                    select(WorkerLeaseRow).where(
-                        WorkerLeaseRow.scope == scope,
-                        WorkerLeaseRow.scope_id == scope_id,
-                    )
+                return self.claim_in_session(
+                    db,
+                    scope=scope,
+                    scope_id=scope_id,
+                    mission_id=mission_id,
+                    owner_id=owner_id,
+                    ttl_seconds=ttl_seconds,
                 )
-                if row is None:
-                    row = WorkerLeaseRow(
-                        id=str(uuid4()),
-                        scope=scope,
-                        scope_id=scope_id,
-                        mission_id=mission_id,
-                        owner_id=owner_id,
-                        status="claimed",
-                        expires_at=expires,
-                        heartbeat_at=now,
-                        created_at=now,
-                    )
-                    db.add(row)
-                    db.flush()
-                    return ClaimOutcome(lease=_row_to_lease(row), reclaimed=False)
-                held = row.status == "claimed" and _aware(row.expires_at) > now
-                if held and row.owner_id != owner_id:
-                    raise LeaseConflict(f"{scope} {scope_id} is leased by another worker")
-                reclaimed = not held and row.status == "claimed"
-                row.mission_id = mission_id
-                row.owner_id = owner_id
-                row.status = "claimed"
-                row.expires_at = expires
-                row.heartbeat_at = now
-                db.flush()
-                return ClaimOutcome(lease=_row_to_lease(row), reclaimed=reclaimed)
         except IntegrityError as exc:
             existing = self.get(scope, scope_id)
             if existing and not existing.expired() and existing.owner_id != owner_id:
@@ -169,19 +189,22 @@ class WorkerLeases:
             db.flush()
             return _row_to_lease(row)
 
-    def release(self, lease_id: str, owner_id: str) -> WorkerLease:
+    def release_in_session(self, db, lease_id: str, owner_id: str) -> WorkerLease:
         now = utcnow()
+        row = db.get(WorkerLeaseRow, lease_id)
+        if row is None:
+            raise LeaseError("Lease not found")
+        if row.owner_id != owner_id:
+            raise LeaseConflict("Only the claiming worker can release a lease")
+        row.status = "released"
+        row.expires_at = now
+        row.heartbeat_at = now
+        db.flush()
+        return _row_to_lease(row)
+
+    def release(self, lease_id: str, owner_id: str) -> WorkerLease:
         with self.store.sessions.begin() as db:
-            row = db.get(WorkerLeaseRow, lease_id)
-            if row is None:
-                raise LeaseError("Lease not found")
-            if row.owner_id != owner_id:
-                raise LeaseConflict("Only the claiming worker can release a lease")
-            row.status = "released"
-            row.expires_at = now
-            row.heartbeat_at = now
-            db.flush()
-            return _row_to_lease(row)
+            return self.release_in_session(db, lease_id, owner_id)
 
 
 class IdempotencyGuard:

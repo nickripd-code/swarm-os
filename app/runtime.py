@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 from .events import EventType, event_type_for_mission, event_type_for_task
 from .org import OrganizationDesigner, is_org_action
 from .leases import IdempotencyError, IdempotencyGuard, LeaseConflict, LeaseError, WorkerLeases
+from .queue import QueueError, WorkQueue
 from .models import (
     AgentSpec, AgentStatus, FailureClass, Mission, MissionEvent,
     MissionStatus, PaymentIntent, PendingQuestion, Task, TaskStatus, utcnow,
@@ -82,6 +83,7 @@ class SwarmRuntime:
         self.tools = build_tool_provider() if tools is _UNSET else tools
         self.worker_id = uuid4()
         self.leases = WorkerLeases(store)
+        self.queue = WorkQueue(store, leases=self.leases)
         self.idempotency = IdempotencyGuard(store)
         self._held_leases: dict[tuple[str, str], str] = {}
         self.policy = PolicyGate()
@@ -163,6 +165,65 @@ class SwarmRuntime:
             "scope": scope, "scope_id": scope_id, "lease_id": lease.id,
             "owner_id": self._owner(),
         })
+
+    async def enqueue_job(self, mission: Mission, kind: str, payload: dict[str, Any] | None = None):
+        """Persist a durable work item. Does not claim or complete it."""
+        try:
+            item = self.queue.enqueue(mission_id=str(mission.id), kind=kind, payload=payload)
+        except QueueError as exc:
+            raise PolicyError(str(exc), FailureClass.INVALID_OUTPUT) from exc
+        await self.emit(mission.id, EventType.JOB_ENQUEUED, {
+            "id": item.id, "kind": item.kind, "status": item.status, "attempt": item.attempt,
+        })
+        return item
+
+    async def claim_job(self, mission: Mission, job_id: str | None = None,
+                        ttl_seconds: float | None = None):
+        """Claim the next pending (or expired) job, or a specific id. Fail closed on live double-claim."""
+        try:
+            claimed = self.queue.claim(
+                owner_id=self._owner(), mission_id=str(mission.id),
+                item_id=job_id, ttl_seconds=ttl_seconds,
+            )
+        except LeaseConflict as exc:
+            raise PolicyError(str(exc), FailureClass.POLICY_REFUSAL) from exc
+        except (QueueError, LeaseError) as exc:
+            raise PolicyError(str(exc), FailureClass.POLICY_REFUSAL) from exc
+        if claimed is None:
+            return None
+        item = claimed.item
+        self._held_leases[("job", item.id)] = claimed.lease.lease.id
+        if claimed.lease.reclaimed:
+            await self.emit(mission.id, EventType.LEASE_EXPIRED, {
+                "scope": "job", "scope_id": item.id, "lease_id": claimed.lease.lease.id,
+                "owner_id": self._owner(),
+            })
+        await self.emit(mission.id, EventType.LEASE_CLAIMED, {
+            "scope": "job", "scope_id": item.id, "lease_id": claimed.lease.lease.id,
+            "owner_id": self._owner(), "expires_at": claimed.lease.lease.expires_at.isoformat(),
+            "reclaimed": claimed.lease.reclaimed,
+        })
+        return item
+
+    async def complete_job(self, mission: Mission, job_id: str,
+                           result: dict[str, Any] | None = None):
+        """Mark a live claimed job completed. Expired or foreign claims fail closed."""
+        try:
+            item = self.queue.complete(job_id, self._owner(), result=result)
+        except LeaseConflict as exc:
+            raise PolicyError(str(exc), FailureClass.POLICY_REFUSAL) from exc
+        except QueueError as exc:
+            raise PolicyError(str(exc), FailureClass.POLICY_REFUSAL) from exc
+        self._held_leases.pop(("job", job_id), None)
+        await self.emit(mission.id, EventType.JOB_COMPLETED, {
+            "id": item.id, "kind": item.kind, "status": item.status,
+            "attempt": item.attempt, "result": item.result or {},
+        })
+        await self.emit(mission.id, EventType.LEASE_RELEASED, {
+            "scope": "job", "scope_id": item.id, "lease_id": item.lease_id,
+            "owner_id": self._owner(),
+        })
+        return item
 
     async def _emit_planning(self, mission_id: UUID, actor_id: UUID | None):
         planning = getattr(self.controller, "last_planning", None)
