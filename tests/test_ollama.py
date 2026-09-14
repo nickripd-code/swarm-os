@@ -84,6 +84,9 @@ def no_ollama_env(monkeypatch):
     monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
     monkeypatch.delenv("AZURE_OPENAI_DEPLOYMENT", raising=False)
     monkeypatch.delenv("AZURE_OPENAI_API_VERSION", raising=False)
+    monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
+    monkeypatch.delenv("PERPLEXITY_MODEL", raising=False)
+    monkeypatch.delenv("PERPLEXITY_BASE_URL", raising=False)
 
 
 @pytest.mark.asyncio
