@@ -1,8 +1,9 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";`nconst $ = id => document.getElementById(id);
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
 const statusName = status => ({created:"Ready",running:"Thinking",completed:"Done",blocked:"Blocked",failed:"Failed",stopped:"Stopped",pending:"Queued",paused:"Paused",waiting:"Waiting"}[status] || status);
-const symbol = status => ({created:"Â·",running:"",completed:"âœ“",blocked:"?",failed:"!",stopped:"â– "}[status] || "Â·");
+const symbol = status => ({created:"·",running:"",completed:"✓",blocked:"?",failed:"!",stopped:"■"}[status] || "·");
 const colors = ["#c6b4ef","#edbd9e","#aed8cf","#e6cd90","#b5cbe3","#dfb9ca"];
 let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null, hudTick=null, notifyArmed=false, killAvailable=false;
 let eventLog=[], replayCursor=-1, replayLive=true, replayTimer=null, sourceMission=null;
@@ -69,7 +70,7 @@ function renderHud(){
       $("hudElapsed").textContent=formatElapsed(view.elapsedMs);
     }else{
       const start=mission?.created_at?new Date(mission.created_at).getTime():NaN;
-      $("hudElapsed").textContent=Number.isFinite(start)?formatElapsed(Date.now()-start):"â€”";
+      $("hudElapsed").textContent=Number.isFinite(start)?formatElapsed(Date.now()-start):"—";
     }
   }
   if($("replayChip")){
@@ -113,7 +114,7 @@ function considerAlert(e,liveFrom){
 function maybeNotify(alert){
   if(!notifyArmed||typeof Notification==="undefined"||Notification.permission!=="granted"||!document.hidden)return;
   try{
-    const body=[alert.failure_class,alert.detail].filter(Boolean).join(" Â· ").slice(0,140);
+    const body=[alert.failure_class,alert.detail].filter(Boolean).join(" · ").slice(0,140);
     const n=new Notification(alert.title,{body,tag:"swarm-"+(alert.event_type||"alert")});
     n.onclick=()=>{window.focus();n.close();};
   }catch{}
@@ -134,8 +135,8 @@ function render(){
   $("eventCount").textContent=state.seen.size+" events";
   $("emptyMap").hidden=state.agents.size>0;
   $("launch").disabled=!!mission&&!terminal.has(status)&&!state.preview;
-  $("launch").innerHTML=$("launch").disabled?'Mission running <span>âŒ</span>':'Launch mission <span>â†—</span>';
-  $("missionCaption").textContent=state.preview?"Interactive preview Â· no models or tools are running":(!replayLive?"Historical replay Â· recorded events only":mission?.goal||"One mission. As many minds as it needs.");
+  $("launch").innerHTML=$("launch").disabled?'Mission running <span>⌁</span>':'Launch mission <span>↗</span>';
+  $("missionCaption").textContent=state.preview?"Interactive preview · no models or tools are running":(!replayLive?"Historical replay · recorded events only":mission?.goal||"One mission. As many minds as it needs.");
   if(state.preview)connection("Preview");
   else if(!replayLive)connection("Replay");
   else if(terminal.has(status))connection("Mission "+status,status==="completed"?"live":"disconnected");
@@ -164,7 +165,7 @@ function render(){
   let signal=document.getElementById('messageSignal');
   if(!signal){signal=document.createElement('div');signal.id='messageSignal';signal.className='message-signal';$('mapViewport').append(signal);}
   signal.hidden=!recent.length;
-  if(recent.length){const p=recent[0].payload;signal.textContent=label(state.agents.get(p.from_id)?.role)+' â†’ '+label(state.agents.get(p.to_id)?.role)+' Â· '+p.kind;}
+  if(recent.length){const p=recent[0].payload;signal.textContent=label(state.agents.get(p.from_id)?.role)+' → '+label(state.agents.get(p.to_id)?.role)+' · '+p.kind;}
   for(const [id,button] of elements)if(!state.agents.has(id)){button.remove();elements.delete(id);}
   for(const [index,a] of [...state.agents.values()].entries()){
     const pos=graph.positions.get(a.id);if(!pos)continue;
@@ -193,7 +194,7 @@ function render(){
   renderReplayHud();
   $("resultPanel").hidden=!mission?.result||state.preview||!replayLive;
   if(mission?.result){
-    $("resultTitle").textContent=status==="completed"?"Hereâ€™s what the crew delivered.":status==="blocked"?"The mission needs a missing capability.":status==="stopped"?"All execution stopped.":"The mission couldnâ€™t finish.";
+    $("resultTitle").textContent=status==="completed"?"Here’s what the crew delivered.":status==="blocked"?"The mission needs a missing capability.":status==="stopped"?"All execution stopped.":"The mission couldn’t finish.";
     $("resultText").textContent=mission.result.summary||mission.result.reason||mission.result.error||"";
     const meta=resultMetaText(mission);
     if($("resultMeta")){$("resultMeta").hidden=!meta;$("resultMeta").textContent=meta;}
@@ -212,16 +213,16 @@ function renderInspector(){
   const missionLive=replayLive&&!state.preview&&!terminal.has(state.mission?.status||"");
   const canKill=missionLive&&!terminal.has(a.status);
   const html='<div class="agent-detail"><div class="agent-detail-header">'+bot(colorFor(a))+'<div><h2>'+esc(label(a.role))+
-    '</h2><span class="detail-status '+a.status+'">'+esc(statusName(a.status))+' Â· LEVEL '+a.depth+'</span></div></div>'+
+    '</h2><span class="detail-status '+a.status+'">'+esc(statusName(a.status))+' · LEVEL '+a.depth+'</span></div></div>'+
     '<div class="detail-label">CURRENT OBJECTIVE</div><p class="detail-purpose">'+esc(current?.description||a.purpose)+'</p>'+
     '<div class="detail-label">CAPABILITIES</div><div class="access-list">'+(a.capabilities||[]).map(c=>'<span class="access-chip">'+esc(c)+'</span>').join("")+
-    '</div><div class="relationships"><span>Reports to</span>'+(parent?'<button type="button" id="selectParent">'+esc(label(parent.role))+' â†—</button>':'<span>You</span>')+'</div>'+
+    '</div><div class="relationships"><span>Reports to</span>'+(parent?'<button type="button" id="selectParent">'+esc(label(parent.role))+' ↗</button>':'<span>You</span>')+'</div>'+
     '<div class="relationships"><span>Direct reports</span><span>'+children.length+' agents</span></div>'+
     (output?'<div class="detail-label">RESULT</div><div class="detail-output">'+esc(output.finding||JSON.stringify(output))+'</div>':
-    '<div class="detail-label">RIGHT NOW</div><p class="detail-purpose">'+esc(a.status==="running"?a.activity||"Considering the next stepâ€¦":statusName(a.status))+'</p>')+
+    '<div class="detail-label">RIGHT NOW</div><p class="detail-purpose">'+esc(a.status==="running"?a.activity||"Considering the next step…":statusName(a.status))+'</p>')+
     (canKill?'<button type="button" class="kill-agent" id="killAgent">Kill this agent</button>':'')+
-    '<div class="detail-label">COMMUNICATIONS</div>'+state.events.filter(e=>e.event_type==='agent.message'&&(e.payload.from_id===a.id||e.payload.to_id===a.id)).slice(0,3).map(e=>'<p class="detail-purpose message-detail">'+esc(label(state.agents.get(e.payload.from_id)?.role))+' â†’ '+esc(label(state.agents.get(e.payload.to_id)?.role))+'<br><small>'+esc(e.payload.kind)+' Â· '+esc(e.payload.text.slice(0,160))+'</small></p>').join('')+
-    '<div class="detail-usage">'+esc(a.model||health?.openai?.model||"")+(a.tokens?' Â· '+a.tokens.toLocaleString()+' tokens':'')+'</div></div>';
+    '<div class="detail-label">COMMUNICATIONS</div>'+state.events.filter(e=>e.event_type==='agent.message'&&(e.payload.from_id===a.id||e.payload.to_id===a.id)).slice(0,3).map(e=>'<p class="detail-purpose message-detail">'+esc(label(state.agents.get(e.payload.from_id)?.role))+' → '+esc(label(state.agents.get(e.payload.to_id)?.role))+'<br><small>'+esc(e.payload.kind)+' · '+esc(e.payload.text.slice(0,160))+'</small></p>').join('')+
+    '<div class="detail-usage">'+esc(a.model||health?.openai?.model||"")+(a.tokens?' · '+a.tokens.toLocaleString()+' tokens':'')+'</div></div>';
   const inspector=$("inspectorContent");
   if(inspector.innerHTML!==html){const scroll=inspector.querySelector(".detail-output")?.scrollTop||0;inspector.innerHTML=html;
     if(inspector.querySelector(".detail-output"))inspector.querySelector(".detail-output").scrollTop=scroll;
@@ -232,37 +233,37 @@ function renderInspector(){
 function describe(e){
   const p=e.payload||{},a=state.agents.get(e.actor_id),name=label(a?.role);
   switch(e.event_type){
-    case "agent.message":return '<b>'+esc(label(state.agents.get(p.from_id)?.role))+'</b> â†’ '+esc(label(state.agents.get(p.to_id)?.role))+' Â· '+esc(p.kind);
+    case "agent.message":return '<b>'+esc(label(state.agents.get(p.from_id)?.role))+'</b> → '+esc(label(state.agents.get(p.to_id)?.role))+' · '+esc(p.kind);
     case "agent.spawned":return "<b>"+esc(label(p.role))+"</b> joined the crew";
     case "agent.killed":return "<b>"+esc(label(p.role||a?.role))+"</b> was killed";
-    case "controller.decision":return "<b>Controller</b> Â· "+esc(p.action==="spawn"?"delegated to "+label(p.role):p.action==="finish"?"assembled the final answer":p.action==="ask"?"asked the user a question":p.reason||p.action);
-    case "mission.question":return "<b>Waiting for you</b> Â· "+esc(p.question||"A question is unanswered");
-    case "user.answered":return "<b>Answer received</b> Â· "+esc(p.question||p.question_id||"question");
+    case "controller.decision":return "<b>Controller</b> · "+esc(p.action==="spawn"?"delegated to "+label(p.role):p.action==="finish"?"assembled the final answer":p.action==="ask"?"asked the user a question":p.reason||p.action);
+    case "mission.question":return "<b>Waiting for you</b> · "+esc(p.question||"A question is unanswered");
+    case "user.answered":return "<b>Answer received</b> · "+esc(p.question||p.question_id||"question");
     case "llm.started":return "<b>"+esc(name)+"</b> is "+(p.kind==="decision"?"deciding the next move":p.kind==="verification"?"verifying the claimed result":"working");
-    case "llm.completed":return "<b>"+esc(name)+"</b> Â· "+((p.input_tokens||0)+(p.output_tokens||0)+(p.reasoning_tokens||0)).toLocaleString()+" tokens";
+    case "llm.completed":return "<b>"+esc(name)+"</b> · "+((p.input_tokens||0)+(p.output_tokens||0)+(p.reasoning_tokens||0)).toLocaleString()+" tokens";
     case "budget.updated":return p.known===true&&typeof p.token_spent==="number"
-      ?"<b>Spend</b> Â· est. "+esc(formatUsd(p.token_spent)||String(p.token_spent))+(typeof p.token_budget==="number"?" / "+esc(formatUsd(p.token_budget)||String(p.token_budget)):"")
-      :"<b>Spend</b> Â· estimate unavailable";
+      ?"<b>Spend</b> · est. "+esc(formatUsd(p.token_spent)||String(p.token_spent))+(typeof p.token_budget==="number"?" / "+esc(formatUsd(p.token_budget)||String(p.token_budget)):"")
+      :"<b>Spend</b> · estimate unavailable";
     case "budget.warning":return typeof p.token_spent==="number"&&typeof p.token_budget==="number"
-      ?"<b>Budget warning</b> Â· est. "+esc(formatUsd(p.token_spent)||String(p.token_spent))+" / "+esc(formatUsd(p.token_budget)||String(p.token_budget))
-      :"<b>Budget warning</b> Â· estimate unavailable";
+      ?"<b>Budget warning</b> · est. "+esc(formatUsd(p.token_spent)||String(p.token_spent))+" / "+esc(formatUsd(p.token_budget)||String(p.token_budget))
+      :"<b>Budget warning</b> · estimate unavailable";
     case "verification.started":return "<b>Verifier</b> is checking the claimed result";
     case "verification.passed":return "<b>Verifier</b> accepted the claimed result";
-    case "verification.failed":return "<b>Verifier</b> rejected the claim"+(p.failure_class?" Â· "+esc(p.failure_class):"")+(p.rationale?" Â· "+esc(p.rationale):"");
+    case "verification.failed":return "<b>Verifier</b> rejected the claim"+(p.failure_class?" · "+esc(p.failure_class):"")+(p.rationale?" · "+esc(p.rationale):"");
     case "task.completed":return "<b>"+esc(name)+"</b> delivered a result";
     case "task.blocked":return "<b>"+esc(name)+"</b> needs a missing capability";
     case "mission.started":return "The mission is underway";
     case "mission.completed":return "<b>Mission complete.</b> Result ready below";
     case "mission.stopped":return "<b>Execution stopped</b>";
-    case "mission.failed":return "<b>Mission failed</b>"+(p.failure_class?" Â· "+esc(p.failure_class):"")+(p.error?" Â· "+esc(p.error):"");
-    case "mission.blocked":return "<b>Mission blocked</b> Â· "+esc(p.reason||"");
+    case "mission.failed":return "<b>Mission failed</b>"+(p.failure_class?" · "+esc(p.failure_class):"")+(p.error?" · "+esc(p.error):"");
+    case "mission.blocked":return "<b>Mission blocked</b> · "+esc(p.reason||"");
     default:return "";
   }
 }
 function renderActivity(){
   const html=state.events.filter(e=>describe(e)).slice(0,30).map(e=>'<li>'+describe(e)+'<time>'+
     new Date(e.created_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"})+'</time></li>').join("");
-  $("activity").innerHTML=html||'<li class="empty-activity">The missionâ€™s story will appear here.</li>';
+  $("activity").innerHTML=html||'<li class="empty-activity">The mission’s story will appear here.</li>';
 }
 function pendingQuestion(){
   if(state.preview||!replayLive)return null;
@@ -372,7 +373,7 @@ function renderReplayHud(){
   }
   if($("replayCaption"))$("replayCaption").textContent=view.caption;
   if($("replayPosition"))$("replayPosition").textContent=view.positionLabel;
-  if($("replayEvent"))$("replayEvent").textContent=view.eventType||"â€”";
+  if($("replayEvent"))$("replayEvent").textContent=view.eventType||"—";
   const scrub=$("replayScrub");
   if(scrub){
     const max=Math.max(0,view.total-1);
@@ -419,7 +420,7 @@ function connect(id,gen){
     if(gen!==generation)return;
     const status=state.mission?.status||"";
     if(terminal.has(status)){connection("Mission "+status,status==="completed"?"live":"disconnected");return;}
-    connection("Reconnectingâ€¦","disconnected");
+    connection("Reconnecting…","disconnected");
     retry=setTimeout(()=>connect(id,gen),2000);
   };
 }
@@ -440,7 +441,7 @@ async function refreshHistory(){
   try{
     const missions=await request("/api/missions");
     $("history").replaceChildren(new Option("Mission history",""));
-    for(const m of missions)$("history").add(new Option(m.goal.slice(0,60)+" Â· "+m.status,m.id));
+    for(const m of missions)$("history").add(new Option(m.goal.slice(0,60)+" · "+m.status,m.id));
     if(state.mission&&!state.preview)$("history").value=state.mission.id;
     return missions;
   }catch{return [];}
@@ -455,7 +456,7 @@ $("missionForm").addEventListener("submit",async e=>{
   }catch(error){showNotice(error.message);$("launch").disabled=false;}
 });
 $("stopAll").addEventListener("click",async()=>{
-  $("stopAll").disabled=true;$("stopAll").innerHTML="<span>â– </span> STOPPINGâ€¦";
+  $("stopAll").disabled=true;$("stopAll").innerHTML="<span>■</span> STOPPING…";
   try{
     haltPreviewLocally();
     const result=await request("/api/stop-all",{method:"POST"});
@@ -468,7 +469,7 @@ $("stopAll").addEventListener("click",async()=>{
     }
     if(result.active_missions)showNotice("Some executions are still shutting down.");
   }catch(error){showNotice("Shutdown could not be confirmed: "+error.message);}
-  finally{$("stopAll").disabled=false;$("stopAll").innerHTML="<span>â– </span> STOP ALL";refreshHistory();}
+  finally{$("stopAll").disabled=false;$("stopAll").innerHTML="<span>■</span> STOP ALL";refreshHistory();}
 });
 async function killSelectedAgent(){
   const a=state.agents.get(selected);if(!a)return;
@@ -506,7 +507,7 @@ function commandSuccessMessage(resolved,result){
   if(resolved.action==="stop-all"){
     if(!result||result.status!=="stopped"||!Array.isArray(result.mission_ids))return null;
     let message="Stopped "+result.mission_ids.length+" mission(s)";
-    if(result.active_missions)message+=" Â· some executions are still shutting down";
+    if(result.active_missions)message+=" · some executions are still shutting down";
     return message;
   }
   if(resolved.action==="answer"){
@@ -641,7 +642,7 @@ async function initialize(){
     killAvailable=killRoutePresent(spec);
   }catch{killAvailable=false;}
   try{health=await request("/api/health");const o=health.openai;
-    $("brain").innerHTML='<span class="brain-dot"></span><div><strong>'+esc(o.model)+'</strong><small>'+esc(o.reasoning_effort)+' reasoning Â· '+(o.configured?'connected':'key needed')+'</small></div>';
+    $("brain").innerHTML='<span class="brain-dot"></span><div><strong>'+esc(o.model)+'</strong><small>'+esc(o.reasoning_effort)+' reasoning · '+(o.configured?'connected':'key needed')+'</small></div>';
     connection(o.configured?"Ready to think":"API key needed",o.configured?"live":"disconnected");
     if(!o.configured)showNotice("OpenAI is not configured on the server yet.");
   }catch{connection("Server unavailable","disconnected");showNotice("Cannot reach the local server.");}

@@ -3,118 +3,110 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f6f5f2">
-  <title>Swarm · Control room</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='20' fill='%23c5b4f5'/%3E%3Ccircle cx='23' cy='32' r='5'/%3E%3Ccircle cx='41' cy='32' r='5'/%3E%3C/svg%3E">
+  <meta name="theme-color" content="#06111d">
+  <title>Swarm OS · Mission Control</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%230b1f32'/%3E%3Ccircle cx='22' cy='32' r='5' fill='%2368e7ff'/%3E%3Ccircle cx='42' cy='32' r='5' fill='%2368e7ff'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/control.css">
   <script type="module" src="/static/control.js"></script>
 </head>
 <body>
   <header class="app-header">
-    <a class="brand" href="/" aria-label="Swarm control room"><span class="brand-mark" aria-hidden="true"><i></i><i></i></span><strong>swarm<span>®</span></strong><span class="brand-divider"></span><span class="eyebrow">CONTROL ROOM</span></a>
-    <div class="header-actions"><span class="connection" id="connection"><i></i>Connecting</span><button class="stop-button" id="stopAll" type="button"><span aria-hidden="true">■</span> STOP ALL</button></div>
+    <a class="brand" href="/" aria-label="Swarm OS Mission Control">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i></span>
+      <span><strong>SWARM OS</strong><small>MISSION CONTROL</small></span>
+    </a>
+    <div class="header-actions">
+      <span class="connection" id="connection"><i></i>Connecting</span>
+      <button class="stop-button" id="stopAll" type="button"><span aria-hidden="true">■</span> STOP ALL</button>
+    </div>
   </header>
+
   <main class="app-shell">
-    <section class="command-section" aria-label="Mission command">
-      <div class="command-heading"><div><span class="eyebrow">YOU SET THE DESTINATION.</span><h1>Let the crew figure it out.</h1></div><div id="brain" class="brain"><span class="brain-dot"></span><div><strong>Connecting to the brain</strong><small>Checking model configuration</small></div></div></div>
-      <form id="missionForm" class="mission-form"><label class="sr-only" for="goal">Your mission</label><span class="command-prompt" aria-hidden="true">↗</span><input id="goal" name="goal" required minlength="3" maxlength="4000" placeholder="Give the swarm a goal…" autocomplete="off"><button id="launch" type="submit">Launch mission <span aria-hidden="true">↗</span></button></form>
-      <div class="command-footer"><span id="missionCaption">One mission. As many minds as it needs.</span><div class="mission-tools"><button id="preview" type="button" class="text-button">Explore a preview</button><label class="sr-only" for="history">Mission history</label><select id="history"><option value="">Mission history</option></select></div></div>
+    <section class="mission-dock" aria-label="Mission command">
+      <form id="missionForm" class="mission-form">
+        <label class="sr-only" for="goal">Your objective</label>
+        <span class="command-prompt" aria-hidden="true">›</span>
+        <input id="goal" name="goal" required minlength="3" maxlength="4000" placeholder="What should the swarm accomplish?" autocomplete="off">
+        <button id="launch" type="submit">Launch <span aria-hidden="true">↗</span></button>
+      </form>
+      <div class="dock-meta">
+        <div id="brain" class="brain"><span class="brain-dot"></span><div><strong>Connecting</strong><small>Checking model gateway</small></div></div>
+        <span id="missionCaption">One objective. A team built around it.</span>
+        <div class="mission-tools">
+          <button id="preview" type="button" class="text-button">Preview</button>
+          <label class="sr-only" for="history">Mission history</label>
+          <select id="history"><option value="">Mission history</option></select>
+        </div>
+      </div>
     </section>
+
+    <div class="notice" id="notice" role="alert" hidden></div>
+
     <section class="objective-hud" id="objectiveHud" aria-label="Mission status">
-      <div class="hud-row">
-        <div class="hud-objective">
-          <span class="eyebrow">OBJECTIVE</span>
-          <p id="objectiveText">Awaiting a mission.</p>
-        </div>
-        <div class="hud-chips">
-          <span id="missionMode" class="hud-chip mode standby">STANDBY</span>
-          <span id="missionStatus" class="hud-chip status idle">IDLE</span>
-          <span id="replayChip" class="hud-chip mode replay-live" hidden>LIVE</span>
-        </div>
+      <div class="hud-objective"><span class="eyebrow">CURRENT OBJECTIVE</span><p id="objectiveText">Awaiting a mission.</p></div>
+      <div class="hud-chips">
+        <span id="missionMode" class="hud-chip mode standby">STANDBY</span>
+        <span id="missionStatus" class="hud-chip status idle">IDLE</span>
+        <span id="replayChip" class="hud-chip mode replay-live" hidden>LIVE</span>
       </div>
       <dl class="hud-stats">
-        <div><dt>Elapsed</dt><dd id="hudElapsed">—</dd></div>
-        <div><dt>Agents</dt><dd id="hudAgents">0</dd></div>
-        <div><dt>Tasks done</dt><dd id="hudTasks">0</dd></div>
-        <div><dt>Tokens</dt><dd id="hudTokens">0</dd></div>
-        <div><dt>Est. spend</dt><dd id="hudSpend">estimate unavailable</dd></div>
+        <div><dt>Elapsed</dt><dd id="hudElapsed">—</dd></div><div><dt>Agents</dt><dd id="hudAgents">0</dd></div>
+        <div><dt>Done</dt><dd id="hudTasks">0</dd></div><div><dt>Tokens</dt><dd id="hudTokens">0</dd></div>
+        <div><dt>Spend</dt><dd id="hudSpend">estimate unavailable</dd></div>
       </dl>
-      <aside class="cost-hud" id="costHud" aria-label="Token cost">
-        <div class="cost-hud-heading">
-          <span class="eyebrow">TOKEN COST</span>
-          <span id="costHudNote" class="cost-hud-note">estimate unavailable</span>
-        </div>
-        <dl class="cost-hud-stats">
-          <div><dt>Tokens</dt><dd id="costHudTokens">0</dd></div>
-          <div><dt>Est. spend</dt><dd id="costHudSpend">estimate unavailable</dd></div>
-          <div><dt>Token budget</dt><dd id="costHudBudget">estimate unavailable</dd></div>
-        </dl>
-      </aside>
-      <aside class="replay-hud" id="replayHud" aria-label="Historical replay" hidden>
-        <div class="replay-hud-heading">
-          <span class="eyebrow">HISTORICAL REPLAY</span>
-          <span id="replayMode" class="hud-chip mode replay-live">LIVE</span>
-        </div>
-        <p id="replayCaption" class="replay-caption">Recorded events only · not a simulation</p>
-        <div class="replay-controls">
-          <button id="replayPlay" type="button">Play</button>
-          <button id="replayPrev" type="button" aria-label="Previous recorded event">Prev</button>
-          <label class="sr-only" for="replayScrub">Scrub recorded events</label>
-          <input id="replayScrub" type="range" min="0" max="0" value="0" step="1" disabled>
-          <button id="replayNext" type="button" aria-label="Next recorded event">Next</button>
-          <button id="replayLiveBtn" type="button">Live now</button>
-        </div>
-        <div class="replay-meta">
-          <span id="replayPosition">0 / 0</span>
-          <span id="replayEvent">—</span>
-        </div>
-      </aside>
+      <details class="telemetry-drawer">
+        <summary>Budget &amp; replay controls</summary>
+        <aside class="cost-hud" id="costHud" aria-label="Token cost">
+          <div class="cost-hud-heading"><span class="eyebrow">TOKEN COST</span><span id="costHudNote" class="cost-hud-note">estimate unavailable</span></div>
+          <dl class="cost-hud-stats"><div><dt>Tokens</dt><dd id="costHudTokens">0</dd></div><div><dt>Est. spend</dt><dd id="costHudSpend">estimate unavailable</dd></div><div><dt>Token budget</dt><dd id="costHudBudget">estimate unavailable</dd></div></dl>
+        </aside>
+        <aside class="replay-hud" id="replayHud" aria-label="Historical replay" hidden>
+          <div class="replay-hud-heading"><span class="eyebrow">HISTORICAL REPLAY</span><span id="replayMode" class="hud-chip mode replay-live">LIVE</span></div>
+          <p id="replayCaption" class="replay-caption">Recorded events only · not a simulation</p>
+          <div class="replay-controls"><button id="replayPlay" type="button">Play</button><button id="replayPrev" type="button" aria-label="Previous recorded event">Prev</button><label class="sr-only" for="replayScrub">Scrub recorded events</label><input id="replayScrub" type="range" min="0" max="0" value="0" step="1" disabled><button id="replayNext" type="button" aria-label="Next recorded event">Next</button><button id="replayLiveBtn" type="button">Live now</button></div>
+          <div class="replay-meta"><span id="replayPosition">0 / 0</span><span id="replayEvent">—</span></div>
+        </aside>
+      </details>
     </section>
-    <section class="command-bar" id="commandBar" aria-label="Mission command bar">
-      <div class="command-bar-heading">
-        <span class="eyebrow">COMMAND BAR</span>
-        <span id="commandBarHint" class="command-bar-hint">stop · stop-all · kill &lt;agent&gt; · answer &lt;text&gt;</span>
-      </div>
-      <form id="commandForm" class="command-bar-form">
-        <label class="sr-only" for="commandInput">Command</label>
-        <span class="command-prompt" aria-hidden="true">›</span>
-        <input id="commandInput" name="command" maxlength="4000" placeholder="Type a command…" autocomplete="off" spellcheck="false">
-        <button id="commandSend" type="submit">Run</button>
-      </form>
-      <p id="commandBarStatus" class="command-bar-status" role="status" hidden></p>
-    </section>
-    <div class="notice" id="notice" role="alert" hidden></div>
+
     <section class="question-panel" id="questionPanel" hidden>
-      <div class="question-heading">
-        <div>
-          <span class="eyebrow">WAITING FOR YOU</span>
-          <h2>The swarm needs an answer.</h2>
-        </div>
-      </div>
-      <p id="questionText"></p>
-      <form id="answerForm" class="answer-form">
-        <label class="sr-only" for="answerText">Your answer</label>
-        <textarea id="answerText" name="answer" required minlength="1" maxlength="4000" rows="3" placeholder="Type an answer…"></textarea>
-        <button id="answerSend" type="submit">Send answer <span aria-hidden="true">↗</span></button>
-      </form>
+      <div><span class="eyebrow">AUTHORIZATION REQUIRED</span><h2>The swarm needs your answer.</h2></div><p id="questionText"></p>
+      <form id="answerForm" class="answer-form"><label class="sr-only" for="answerText">Your answer</label><textarea id="answerText" name="answer" required minlength="1" maxlength="4000" rows="2" placeholder="Type an answer…"></textarea><button id="answerSend" type="submit">Send <span aria-hidden="true">↗</span></button></form>
     </section>
+
     <section class="workspace">
       <div class="map-panel">
-        <div class="map-heading"><div class="map-title"><h2>The agent tree</h2><span id="modeLabel" class="mode-tag">STANDBY</span></div><div class="map-stats"><span><b id="agentCount">0</b> agents</span><span><b id="taskCount">0</b> done</span><span><b id="tokenCount">0</b> tokens</span></div></div>
+        <div class="map-heading"><div class="map-title"><span class="live-pulse" aria-hidden="true"></span><h2>Agent organization</h2><span id="modeLabel" class="mode-tag">STANDBY</span></div><div class="map-stats"><span><b id="agentCount">0</b> agents</span><span><b id="taskCount">0</b> done</span><span><b id="tokenCount">0</b> tokens</span></div></div>
         <div id="mapViewport" class="map-viewport" aria-label="Scrollable agent hierarchy">
           <div id="mapSpacer"><div id="world" class="world"><svg id="connections" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"></svg><div id="nodes"></div></div></div>
-          <div id="emptyMap" class="empty-map"><div class="empty-orb bot"><i></i><i></i></div><h3>A whole crew, on your command.</h3><p>Launch a mission and watch it branch.<br>Click any agent to see what it’s doing.</p><button id="emptyPreview" class="secondary-button" type="button">See how it looks <span aria-hidden="true">↗</span></button></div>
+          <div id="emptyMap" class="empty-map">
+            <div class="empty-orb bot"><span class="visor"><i></i><i></i></span><span class="mouth"></span><span class="ear ear-left"></span><span class="ear ear-right"></span></div>
+            <h3>Your organization appears here.</h3><p>Agents spawn top-to-bottom. Select one to inspect its task, model, capabilities and communications.</p>
+            <button id="emptyPreview" class="secondary-button" type="button">Explore a recorded-style preview <span aria-hidden="true">↗</span></button>
+          </div>
         </div>
-        <div class="map-footer"><div class="legend"><span><i class="legend-working"></i>Thinking</span><span><i class="legend-done"></i>Done</span><span><i class="legend-blocked">!</i>Blocked</span></div><div class="map-controls"><span class="pan-hint">Drag to pan · Scroll to explore</span><button id="zoomOut" type="button" aria-label="Zoom out">−</button><output id="zoomValue">100%</output><button id="zoomIn" type="button" aria-label="Zoom in">+</button><button id="fit" type="button">Fit</button></div></div>
+        <div class="map-footer"><div class="legend"><span><i class="legend-working"></i>Thinking</span><span><i class="legend-done"></i>Done</span><span><i class="legend-blocked">!</i>Blocked</span></div><div class="map-controls"><span class="pan-hint">Drag · scroll</span><button id="zoomOut" type="button" aria-label="Zoom out">−</button><output id="zoomValue">100%</output><button id="zoomIn" type="button" aria-label="Zoom in">+</button><button id="fit" type="button">Fit</button></div></div>
       </div>
+
       <aside class="inspector" aria-label="Selected agent details">
-        <div class="inspector-heading"><span class="eyebrow">AGENT INTEL</span><span class="mini-signal" aria-hidden="true">⌁</span></div>
-        <div id="inspectorContent"><div class="inspector-empty"><span class="selection-icon" aria-hidden="true">↖</span><h2>Meet your crew.</h2><p>Select an agent to inspect its task, connections and results.</p></div></div>
-        <section class="activity-section"><div class="activity-heading"><h2>Activity</h2><span id="eventCount">0 events</span></div><ol id="activity"><li class="empty-activity">The mission’s story will appear here.</li></ol></section>
+        <div class="inspector-heading"><span class="eyebrow">SELECTED AGENT</span><span class="mini-signal" aria-hidden="true">⌁</span></div>
+        <div id="inspectorContent"><div class="inspector-empty"><span class="selection-icon" aria-hidden="true">↖</span><h2>Select an agent</h2><p>See exactly what it is doing, what it can access and who it talks to.</p></div></div>
+        <section class="activity-section"><div class="activity-heading"><h2>Live activity</h2><span id="eventCount">0 events</span></div><ol id="activity"><li class="empty-activity">Durable mission events appear here.</li></ol></section>
       </aside>
     </section>
-    <section class="result-panel" id="resultPanel" hidden><div class="result-heading"><div><span class="eyebrow">MISSION OUTPUT</span><h2 id="resultTitle">The result</h2><p id="resultMeta" class="result-meta" hidden></p></div><button class="text-button" id="copyResult" type="button">Copy result</button></div><div id="resultText"></div></section>
+
+    <details class="command-drawer">
+      <summary>Direct controls <span>stop · stop-all · kill · answer</span></summary>
+      <section class="command-bar" id="commandBar" aria-label="Mission command bar">
+        <div class="command-bar-heading"><span class="eyebrow">COMMAND BAR</span><span id="commandBarHint" class="command-bar-hint">stop · stop-all · kill &lt;agent&gt; · answer &lt;text&gt;</span></div>
+        <form id="commandForm" class="command-bar-form"><label class="sr-only" for="commandInput">Command</label><span class="command-prompt" aria-hidden="true">›</span><input id="commandInput" name="command" maxlength="4000" placeholder="Type a control command…" autocomplete="off" spellcheck="false"><button id="commandSend" type="submit">Run</button></form>
+        <p id="commandBarStatus" class="command-bar-status" role="status" hidden></p>
+      </section>
+    </details>
+
+    <section class="result-panel" id="resultPanel" hidden><div class="result-heading"><div><span class="eyebrow">MISSION OUTPUT</span><h2 id="resultTitle">The result</h2><p id="resultMeta" class="result-meta" hidden></p></div><button class="text-button" id="copyResult" type="button">Copy</button></div><div id="resultText"></div></section>
   </main>
+
   <div id="alerts" class="alert-stack" role="region" aria-label="Critical alerts" aria-live="assertive"></div>
   <div id="announcement" class="sr-only" aria-live="polite"></div>
 </body>
