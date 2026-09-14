@@ -156,7 +156,7 @@ Nothing in the current test suite is known red. UI preview is synthetic by desig
 
 ## NEXT PRIORITY
 
-**This slice:** `PaymentProvider` seam behind existing `WalletAdapter`. Simulated remains the production default. `live_payments=True` fails closed (`AUTHORIZATION_REQUIRED`) via `UnconfiguredLivePaymentProvider`. Factory never enables live spend and does not read payment secrets. Rebased onto main after llama.cpp (`#17`); llama.cpp modules were not rewritten. No OrganizationDesigner. No answers / Anthropic / React/Pixi / LangGraph edits. Tests: recorded after rebase.
+**This slice:** `PaymentProvider` seam behind existing `WalletAdapter`. Simulated remains the production default. `live_payments=True` fails closed (`AUTHORIZATION_REQUIRED`) via `UnconfiguredLivePaymentProvider`. Factory never enables live spend and does not read payment secrets. Rebased onto main after llama.cpp (`#17`); llama.cpp modules were not rewritten. No OrganizationDesigner. No answers / Anthropic / React/Pixi / LangGraph edits. Tests: `python3 -m pytest tests/ -q` → **191 passed**.
 
 **Landed on main (keep):** llama.cpp OpenAI-compatible adapter (`LlamaCppModelProvider`, `#17`). Opt-in via `LLAMACPP_MODEL` / `LLAMACPP_BASE_URL`. Fail-closed when unconfigured/unavailable.
 
