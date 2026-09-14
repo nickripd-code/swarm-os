@@ -20,8 +20,8 @@ This is an early FastAPI Mission Control MVP. Most of the north star is not buil
 
 - FastAPI process with lifespan, static Mission Control UI, REST + WebSocket (`app/main.py`).
 - SQLite persistence for missions, durable agent/task rows, and append-only mission events (`app/store.py`). Legacy or partially missing graph rows are backfilled from events without destroying existing data.
-- In-process `SwarmRuntime`: spawn agents, assign one task per new specialist, call the controller, stop a mission or all missions, simulate payments (`app/runtime.py`).
-- Mission safety limits: depth, agents, tasks, runtime seconds, payment cap (`MissionLimits`). Spawn/task/runtime/payment caps are enforced.
+- In-process `SwarmRuntime`: spawn agents, assign one pending task per new specialist, call the controller, run those tasks when the controller `wait`s with in-flight work, stop a mission or all missions, simulate payments (`app/runtime.py`). `MissionStatus.WAITING` is persisted and emitted as `mission.waiting` while that work runs, then `mission.running` before the next decide. `wait` with no pending/running tasks still raises `PolicyError` (`INVALID_OUTPUT`).
+- Mission safety limits: depth, agents, tasks, tool calls, runtime seconds, payment cap (`MissionLimits`). Spawn/task/tool-call/runtime/payment caps are enforced. `max_tool_calls` is a real budget: `SwarmRuntime.invoke_tool` / `consume_tool_call` raise classified `PolicyError` (`RESOURCE_EXHAUSTED`) when exceeded. With no ToolProvider connected (`external_tools: []`), an invoke fails closed as `TOOL_MISSING` and does not charge the budget or emit `tool.started`.
 - Fail-closed live payments: `WalletAdapter` simulates unless `live_payments` is set, then raises; no private keys in the agent process (`app/credentials.py`, `WalletAdapter`).
 - Credential isolation: OpenAI key from `OPENAI_API_KEY` or Windows Credential Manager; never returned over HTTP.
 - OpenAI Responses adapter (`OpenAIResponsesModelProvider` / `OpenAIProvider`) with structured JSON schema, usage metadata, no response-body leakage on errors.
@@ -33,7 +33,7 @@ This is an early FastAPI Mission Control MVP. Most of the north star is not buil
 - Structured **failure classification** on the main provider/runtime failure paths:
   - `FailureClass` enum in `app/models.py` (north-star names: `RATE_LIMIT`, `PROVIDER_OUTAGE`, `TIMEOUT`, `CONTEXT_LIMIT`, `POLICY_REFUSAL`, `INVALID_OUTPUT`, `AUTHORIZATION_REQUIRED`, `CAPABILITY_MISMATCH`, `RESOURCE_EXHAUSTED`, `MODEL_FAILURE`, `UNKNOWN_FAILURE`, plus unused-for-now classes).
   - `ProviderError.failure_class` set at each OpenAI raise site (HTTP map, timeout, connect failure, incomplete, refusal, invalid JSON, missing key).
-  - `PolicyError.failure_class` set on spawn/task/budget/invalid-model-output paths.
+  - `PolicyError.failure_class` set on spawn/task/tool-budget/budget/invalid-model-output/invalid-wait paths.
   - Mission `result` includes `{error, failure_class}`. The same payload is on `mission.failed`. Provider errors also emit `llm.failed`.
   - Runtime deadline → `TIMEOUT`. Unexpected exceptions → `UNKNOWN_FAILURE`. Stop/cancel stays `stopped` (not a fake success).
 - Bounded **retry/backoff** on the runtime `model_call` path for `RATE_LIMIT` and `TIMEOUT` only:
@@ -46,7 +46,7 @@ This is an early FastAPI Mission Control MVP. Most of the north star is not buil
 - Unfinished missions resume when a configured runtime restarts. Graceful shutdown emits `mission.suspended` without fabricating STOP; interrupted text-only attempts remain `stopped` and retry under a new task ID; the original runtime deadline remains in force.
 - Vanilla JS control room: live event stream, agent tree, inspector, activity, result panel, explicit **preview** mode labeled as non-running, **objective HUD** (`#objectiveHud`) with truthful mode/status chips, and a critical **alert stack** (`#alerts`) for real terminal events (`mission.failed` including `failure_class`, `mission.completed`, blocked, stop/stop-all). Optional Notification API only after a launch gesture, and only when the tab is hidden.
 - High-stakes controller `decide` can run independent multi-planner proposals plus judge/synthesis (`app/planning.py`) through `ModelRouter` when two or more providers exist. Default N is 3 (`SWARM_PLANNER_COUNT`, clamped 2–4). OpenAI-only catalogs, trivial goals, mid-flight decides, and `SWARM_MULTI_PLANNER=0` stay single-planner. Emits real `planner.proposal` / `judge.decision` events. All-planner or judge failure stays fail-closed; no `FallbackController`. Durable recovery APIs unchanged.
-- Tests: runtime completion/replay, spawn limits, simulated payments, provider failure stays failed with class, stop-all, runtime deadline/`TIMEOUT`, OpenAI usage + classified HTTP/timeout/outage errors, retry-then-success and retry-exhausted for `RATE_LIMIT`/`TIMEOUT`, non-retryable classes fail immediately, OpenRouter adapter contract + classified errors, Ollama adapter contract + daemon-down health/outage, outage failover to secondary, both-down fail closed, OpenAI-only factory path, durable graph migration/partial backfill, crash/graceful restart, attempt history, original deadline, ModelRouter capability ranking + fallback chain with fakes, local_only routing to Ollama, multi-planner + judge with fakes (OpenAI-only single path, trivial skip, fail-closed).
+- Tests: runtime completion/replay, spawn limits, simulated payments, provider failure stays failed with class, stop-all, runtime deadline/`TIMEOUT`, OpenAI usage + classified HTTP/timeout/outage errors, retry-then-success and retry-exhausted for `RATE_LIMIT`/`TIMEOUT`, non-retryable classes fail immediately, OpenRouter adapter contract + classified errors, Ollama adapter contract + daemon-down health/outage, outage failover to secondary, both-down fail closed, OpenAI-only factory path, durable graph migration/partial backfill, crash/graceful restart, attempt history, original deadline, ModelRouter capability ranking + fallback chain with fakes, local_only routing to Ollama, multi-planner + judge with fakes (OpenAI-only single path, trivial skip, fail-closed), `max_tool_calls` exhausted/`TOOL_MISSING` when no provider, controller `wait` with in-flight work (`WAITING`) vs invalid wait (`PolicyError`).
 
 ---
 
@@ -58,7 +58,7 @@ This is an early FastAPI Mission Control MVP. Most of the north star is not buil
 | AgentSpec | Pydantic `AgentSpec` (id, parent, role, purpose, capabilities, depth, status) | No model selection, budgets, TTL, tools, workspace, permissions, fallback models, success criteria. |
 | Agent factory | `SwarmRuntime.spawn` | Controller may spawn specialists; no runtime factory API, no replace/clone/merge/kill-as-reorg. |
 | Model provider | `ModelProvider` contract + OpenAI Responses + OpenRouter Chat Completions + local Ollama + `ModelRouter` scored selection + outage failover | Not full north-star routing (no historical success, latency SLOs, or cached-context affinity). Streaming still explicit `CAPABILITY_MISMATCH`. vLLM / llama.cpp adapters are not in the catalog. |
-| Events | Typed-ish string events + WebSocket replay of history; additive `planner.proposal` / `judge.decision` when multi-planner actually runs | Missing most north-star event types (verification, replan, org change, self-mod, budget warning). |
+| Events | Typed-ish string events + WebSocket replay of history; additive `planner.proposal` / `judge.decision` when multi-planner actually runs; additive `mission.waiting` / `mission.running`, `task.pending`, `tool.started` / `tool.failed` | Missing most north-star event types (verification, replan, org change, self-mod, budget warning). HUD still applies only existing event names; waiting is truthful on the mission record and event log. |
 | Observability | Events, token usage on `llm.completed`, `llm.retry` on transient provider errors, activity feed | No cost, verification traces, “why this agent”, burn rate. |
 | Persistence | Missions, agents, tasks, and events survive restart; unfinished text-only attempts are explicitly stopped/retried and graceful shutdown is resumable | Execution is still in-process `asyncio`; no durable queue/worker lease or idempotency keys for future external side effects. |
 | Policy | Limits + capability allowlist + fail-closed wallet | Not an external Policy Engine. LLM can still choose actions inside the allowlist; no human-approval gate for irreversible acts beyond payments. |
@@ -68,7 +68,7 @@ This is an early FastAPI Mission Control MVP. Most of the north star is not buil
 | Memory | Mission JSON + event log | No scoped memory, retrieval, or learned strategy store. Each model call gets a dump of current agents/tasks. |
 | Cost | `budget` / `spent` on payments only | No token-cost accounting, estimates, or ResourceScheduler. Token counts are usage telemetry, not money. |
 | Verification | Controller prompt says not to claim undone work; workers can `blocked` | No independent verifier, no external success criteria, finish = model `summary`. |
-| Tools | Capability strings `reason`/`write`/`review` | No ToolProvider, MCP, browser, shell, filesystem, HTTP. `external_tools: []`. |
+| Tools | Capability strings `reason`/`write`/`review`; `max_tool_calls` enforced at `invoke_tool` / `consume_tool_call` | No ToolProvider, MCP, browser, shell, filesystem, HTTP. Production `external_tools: []` — invoke fails `TOOL_MISSING` (no fake tool success). |
 | Failure recovery | Classified failures; bounded `RATE_LIMIT`/`TIMEOUT` retry; capability-based routing; `PROVIDER_OUTAGE` may fail over along the router chain including local Ollama; durable restart recovery | Exhausted retries or every configured provider down still kill the mission. No replan. |
 
 ---
@@ -102,8 +102,6 @@ North-star systems with no implementation to extend yet:
 Not “crashes on boot”, but incorrect or misleading relative to claims or unused surface:
 
 - **README previously said** the UI falls back to an offline controller without a key, and that the default model is `gpt-5`. Code: launch returns **503** if the key is missing; default model is **`gpt-6-astra`**. README is corrected in this slice. Do not reintroduce a silent demo fallback.
-- **`MissionLimits.max_tool_calls` is never enforced** (no tool calls exist).
-- **`MissionStatus.WAITING` is unused.** Controller `wait` with no in-flight work raises `PolicyError`.
 - **`POST /api/missions/{id}/answers/{question_id}`** accepts answers; nothing in the runtime asks questions or consumes them.
 - **Finish is not verification:** `action == "finish"` plus a summary completes the mission. An LLM saying done is treated as done.
 - **`FallbackController`** would request capabilities `project_work`/`report` which the live OpenAI path would reject; it is tests-only and must stay that way.
@@ -155,9 +153,9 @@ Nothing in the current test suite is known red. UI preview is synthetic by desig
 
 ## NEXT PRIORITY
 
-**This slice:** multi-planner + judge/synthesis on the high-stakes controller `decide` path (mission start plan and finish verification). N independent `ModelRouter` proposals (default 3, `SWARM_PLANNER_COUNT`) when multiple providers exist; judge merges into the existing spawn/finish/blocked/wait schema. OpenAI-only and trivial goals stay single-planner. Fail closed if every planner or the judge fails. Observable `planner.proposal` / `judge.decision` only for real model calls. Do not edit `app/static/*`. Durable recovery APIs (`hydrate`, `resume_incomplete`, `suspend_all`) stay unchanged.
+**This slice:** honesty for `MissionLimits.max_tool_calls` and `MissionStatus.WAITING`. Tool-call budget is enforced (`RESOURCE_EXHAUSTED` when exceeded; `TOOL_MISSING` when no provider is connected). Controller `wait` with pending/running tasks persists `WAITING` and emits `mission.waiting` / `mission.running`; invalid wait stays `PolicyError`. Do not edit `app/static/*`. Durable recovery APIs (`hydrate`, `resume_incomplete`, `suspend_all`) stay unchanged. Multi-planner/judge is not rewritten. Tests: `python3 -m pytest tests/ -q` → **128 passed**.
 
-**Recommended next backend slice:** OrganizationDesigner (mutable org topology from the judged plan) or an independent Verifier so `finish` is not “the model said done.” Still fail closed. Still no game-world UI rewrite.
+**Recommended next backend slice:** OrganizationDesigner (mutable org topology from the judged plan) **or** an independent Verifier so `finish` is not “the model said done.” Either is a valid next claim; this repo does not reserve one. Still fail closed. Still no game-world UI rewrite.
 
 **Explicitly not next:** game-world UI, self-modification, PaymentProvider, Playwright.
 

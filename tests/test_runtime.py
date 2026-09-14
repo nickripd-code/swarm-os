@@ -24,7 +24,10 @@ async def test_project_launch_completes_and_replays(tmp_path):
     await runtime.run(mission)
     assert store.get_mission(mission.id).status == "completed"
     assert len(store.events(mission.id)) >= 10
-    assert any(e.event_type == "mission.completed" for e in store.events(mission.id))
+    events = store.events(mission.id)
+    assert any(e.event_type == "mission.completed" for e in events)
+    assert any(e.event_type == "mission.waiting" for e in events)
+    assert any(e.event_type == "mission.running" for e in events)
     assert len(runtime.tasks[mission.id]) == 4
     assert len({t.agent_id for t in runtime.tasks[mission.id]}) == 4
     assert all(a.status == "completed" for a in runtime.agents[mission.id])
@@ -38,7 +41,9 @@ async def test_spawn_limits_are_enforced(tmp_path):
     mission = Mission(goal="x", limits={"max_agents": 1})
     store.save_mission(mission)
     await runtime.spawn(mission, "root", "root")
-    with pytest.raises(PolicyError): await runtime.spawn(mission, "child", "child")
+    with pytest.raises(PolicyError) as exc:
+        await runtime.spawn(mission, "child", "child")
+    assert exc.value.failure_class == FailureClass.RESOURCE_EXHAUSTED
 
 
 @pytest.mark.asyncio
@@ -189,6 +194,8 @@ class SlowProvider(LLMProvider):
         self.cancelled = False
 
     async def decide(self, state):
+        if any(task.get("status") in {"pending", "running"} for task in state.get("tasks", [])):
+            return {"action": "wait", "reason": "worker running"}
         return {"action": "spawn", "role": "analyst", "purpose": "Analyze", "capabilities": ["reason"]}
 
     async def work(self, state, agent):
@@ -234,3 +241,131 @@ async def test_runtime_deadline_cancels_worker(tmp_path):
     assert saved.result["failure_class"] == "TIMEOUT"
     assert any(e.event_type == "mission.failed" and e.payload.get("failure_class") == "TIMEOUT"
                for e in store.events(mission.id))
+
+
+class SpawnWaitFinishProvider(LLMProvider):
+    def __init__(self):
+        self.seen_status = None
+
+    async def decide(self, state):
+        if not any(agent.get("role") == "analyst" for agent in state.get("agents", [])):
+            return {"action": "spawn", "role": "analyst", "purpose": "Analyze", "capabilities": ["reason"]}
+        if any(task.get("status") in {"pending", "running"} for task in state.get("tasks", [])):
+            return {"action": "wait", "reason": "worker running"}
+        return {"action": "finish", "summary": "Analyst finished"}
+
+    async def work(self, state, agent):
+        self.seen_status = state.get("status")
+        return {"status": "completed", "finding": "analysis done"}
+
+
+class WaitOnlyProvider(LLMProvider):
+    async def decide(self, state):
+        return {"action": "wait", "reason": "nothing is pending"}
+
+
+class SpawnThenFinishProvider(LLMProvider):
+    async def decide(self, state):
+        if not any(agent.get("role") == "analyst" for agent in state.get("agents", [])):
+            return {"action": "spawn", "role": "analyst", "purpose": "Analyze", "capabilities": ["reason"]}
+        return {"action": "finish", "summary": "Skipped waiting"}
+
+
+@pytest.mark.asyncio
+async def test_wait_with_inflight_work_uses_waiting_status(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    provider = SpawnWaitFinishProvider()
+    runtime = SwarmRuntime(store, controller=provider)
+    mission = Mission(goal="Wait for the analyst")
+    store.save_mission(mission)
+    await runtime.run(mission)
+    saved = store.get_mission(mission.id)
+    assert saved.status == "completed"
+    assert saved.result["summary"] == "Analyst finished"
+    assert provider.seen_status == "waiting"
+    events = store.events(mission.id)
+    waiting = [e for e in events if e.event_type == "mission.waiting"]
+    assert waiting and waiting[0].payload["reason"] == "worker running"
+    assert waiting[0].payload["pending_tasks"]
+    assert any(e.event_type == "mission.running" for e in events)
+    assert any(e.event_type == "task.pending" for e in events)
+    assert not any(e.event_type == "mission.failed" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_wait_without_inflight_work_is_policy_error(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(store, controller=WaitOnlyProvider())
+    mission = Mission(goal="Invalid wait")
+    store.save_mission(mission)
+    await runtime.run(mission)
+    saved = store.get_mission(mission.id)
+    assert saved.status == "failed"
+    assert saved.result["failure_class"] == "INVALID_OUTPUT"
+    assert "no work in flight" in saved.result["error"]
+    events = store.events(mission.id)
+    assert not any(e.event_type == "mission.waiting" for e in events)
+    assert not any(e.event_type == "mission.completed" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_finish_while_tasks_pending_fails_closed(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(store, controller=SpawnThenFinishProvider())
+    mission = Mission(goal="Cannot skip wait")
+    store.save_mission(mission)
+    await runtime.run(mission)
+    saved = store.get_mission(mission.id)
+    assert saved.status == "failed"
+    assert saved.result["failure_class"] == "INVALID_OUTPUT"
+    assert "tasks are active" in saved.result["error"]
+
+
+@pytest.mark.asyncio
+async def test_max_tool_calls_enforced_when_exceeded(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(store)
+    runtime.external_tools = ["echo"]
+    mission = Mission(goal="Budget tools", limits={"max_tool_calls": 2})
+    store.save_mission(mission)
+    assert await runtime.invoke_tool(mission, "echo") == 1
+    assert await runtime.invoke_tool(mission, "echo") == 2
+    with pytest.raises(PolicyError) as exc:
+        await runtime.invoke_tool(mission, "echo")
+    assert exc.value.failure_class == FailureClass.RESOURCE_EXHAUSTED
+    assert runtime.tool_calls_used(mission.id) == 2
+    failed = [e for e in store.events(mission.id) if e.event_type == "tool.failed"]
+    assert failed and failed[-1].payload["failure_class"] == "RESOURCE_EXHAUSTED"
+    started = [e for e in store.events(mission.id) if e.event_type == "tool.started"]
+    assert len(started) == 2
+
+
+@pytest.mark.asyncio
+async def test_tool_call_without_provider_fails_closed_and_does_not_charge(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(store)
+    mission = Mission(goal="No tools connected")
+    store.save_mission(mission)
+    state = runtime._state(mission)
+    assert state["external_tools"] == []
+    assert state["tool_calls"] == {"used": 0, "max": mission.limits.max_tool_calls}
+    with pytest.raises(PolicyError) as exc:
+        await runtime.invoke_tool(mission, "search")
+    assert exc.value.failure_class == FailureClass.TOOL_MISSING
+    assert runtime.tool_calls_used(mission.id) == 0
+    failed = [e for e in store.events(mission.id) if e.event_type == "tool.failed"]
+    assert failed and failed[-1].payload["failure_class"] == "TOOL_MISSING"
+    assert not any(e.event_type == "tool.started" for e in store.events(mission.id))
+
+
+@pytest.mark.asyncio
+async def test_exhausted_tool_budget_wins_even_when_tools_are_absent(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(store)
+    mission = Mission(goal="Budget first", limits={"max_tool_calls": 1})
+    store.save_mission(mission)
+    assert runtime.consume_tool_call(mission) == 1
+    with pytest.raises(PolicyError) as exc:
+        await runtime.invoke_tool(mission, "search")
+    assert exc.value.failure_class == FailureClass.RESOURCE_EXHAUSTED
+    assert runtime.tool_calls_used(mission.id) == 1
