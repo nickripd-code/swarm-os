@@ -33,6 +33,7 @@ def _expire(store: Store, item_id: str) -> None:
 def test_process_worker_spawns_claims_and_completes(tmp_path):
     path = tmp_path / "swarm.db"
     queue = WorkQueue(Store(str(path)))
+    unsupported = queue.enqueue(mission_id="m1", kind="other", payload={"text": "skip"})
     item = queue.enqueue(mission_id="m1", kind="echo", payload={"text": "hello"})
     pool = ProcessWorkerPool(path, {"echo": "tests.worker_handlers:echo"})
     try:
@@ -47,6 +48,7 @@ def test_process_worker_spawns_claims_and_completes(tmp_path):
             "pid": workers[0].pid,
             "attempt": 1,
         }
+        assert queue.get(unsupported.id).status == "pending"
     finally:
         pool.stop()
 
@@ -124,5 +126,27 @@ def test_process_worker_reclaims_expired_job(tmp_path):
         assert completed.owner_id == worker.owner_id
         assert completed.attempt == 2
         assert completed.result["attempt"] == 2
+    finally:
+        pool.stop()
+
+
+def test_process_worker_records_real_handler_failure(tmp_path):
+    path = tmp_path / "swarm.db"
+    queue = WorkQueue(Store(str(path)))
+    item = queue.enqueue(
+        mission_id="m1",
+        kind="fail",
+        payload={"error": "real worker failure"},
+    )
+    pool = ProcessWorkerPool(path, {"fail": "tests.worker_handlers:fail"})
+    try:
+        worker = pool.start()[0]
+        failed = _wait_for(queue, item.id, "failed")
+        assert failed.owner_id == worker.owner_id
+        assert failed.attempt == 1
+        assert failed.result == {
+            "error": "real worker failure",
+            "failure_class": "TOOL_FAILURE",
+        }
     finally:
         pool.stop()

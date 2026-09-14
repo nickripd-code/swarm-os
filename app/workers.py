@@ -1,7 +1,7 @@
 """Spawn-safe OS worker processes backed by the durable :mod:`app.queue`.
 
-Handlers are configured as ``"module.path:callable"`` references so the
-configuration can cross Python's ``spawn`` boundary on every supported OS.
+Trusted host code configures handlers as ``"module.path:callable"`` references
+so the configuration can cross Python's ``spawn`` boundary on every supported OS.
 Each child opens its own Store/WorkQueue and owns only the leases it claims.
 """
 
@@ -60,9 +60,12 @@ def _load_handler(reference: str) -> WorkHandler:
         raise WorkerPoolError(
             f"Handler reference {reference!r} must use 'module.path:callable'"
         )
-    value: Any = importlib.import_module(module_name)
-    for name in attribute_path.split("."):
-        value = getattr(value, name)
+    try:
+        value: Any = importlib.import_module(module_name)
+        for name in attribute_path.split("."):
+            value = getattr(value, name)
+    except (AttributeError, ImportError) as exc:
+        raise WorkerPoolError(f"Handler reference {reference!r} cannot be loaded") from exc
     if not callable(value):
         raise WorkerPoolError(f"Handler reference {reference!r} is not callable")
     return value
@@ -80,18 +83,10 @@ def _invoke_handler(handler: WorkHandler, item: WorkItem) -> dict[str, Any]:
 
 
 def _report_failure(queue: WorkQueue, item: WorkItem, owner_id: str, exc: BaseException) -> None:
-    """Persist a real failure when the owner still holds a live lease.
-
-    WorkQueue failure reporting is deliberately resolved at runtime so this
-    worker module can remain isolated from the queue failure/retry slice while
-    that prerequisite is being developed on a separate branch.
-    """
-    fail = getattr(queue, "fail", None)
-    if fail is None:
-        return
+    """Persist a real failure when the owner still holds a live lease."""
     error = str(exc).strip() or type(exc).__name__
     try:
-        fail(
+        queue.fail(
             item.id,
             owner_id,
             {
@@ -123,13 +118,12 @@ def _execute_claimed(
                 break
             except FutureTimeout:
                 try:
-                    renewed = queue.claim(
-                        owner_id=owner_id,
-                        mission_id=item.mission_id,
-                        item_id=item.id,
+                    renewed = queue.heartbeat(
+                        item.id,
+                        owner_id,
                         ttl_seconds=config.lease_ttl_seconds,
                     )
-                    if renewed is None or renewed.item.owner_id != owner_id:
+                    if renewed.owner_id != owner_id:
                         lease_live = False
                         break
                 except (LeaseConflict, LeaseError, QueueError, OperationalError):
@@ -164,6 +158,7 @@ def _worker_main(config: _WorkerConfig, stop_event: Any, ready_queue: Any) -> No
                 claimed = queue.claim(
                     owner_id=owner_id,
                     mission_id=config.mission_id,
+                    kinds=handlers,
                     ttl_seconds=config.lease_ttl_seconds,
                 )
             except (LeaseConflict, OperationalError):
