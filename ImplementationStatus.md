@@ -160,7 +160,11 @@ Nothing in the current test suite is known red. UI preview is synthetic by desig
 
 ## NEXT PRIORITY
 
+<<<<<<< HEAD
 **This slice:** xAI OpenAI-compatible Chat Completions adapter (`XAIModelProvider`). Opt-in via `XAI_API_KEY`; registered in `ModelRouter` when configured; OpenAI-only catalogs stay one-entry. Fail-closed unconfigured complete (`AUTHORIZATION_REQUIRED`); classified HTTP/timeout/outage errors; no fake completions; keys never in responses or error strings. Health reports configured/model/`fallback: false` without probing the live API. Rebased onto main after typed events (`#20`) and ToolProvider (`#21`). Did not rewrite EventType, ToolProvider/MCP, OrganizationDesigner, worker leases, PolicyGate/Gemini, SQLite migrations, Cohere, React/Pixi, or LangGraph. Tests: `python3 -m pytest tests/ -q` — recorded after this slice.
+=======
+**This slice:** xAI OpenAI-compatible Chat Completions adapter (`XAIModelProvider`). Opt-in via `XAI_API_KEY`; registered in `ModelRouter` when configured; OpenAI-only catalogs stay one-entry. Fail-closed unconfigured complete (`AUTHORIZATION_REQUIRED`); classified HTTP/timeout/outage errors; no fake completions; keys never in responses or error strings. Health reports configured/model/`fallback: false` without probing the live API. Rebased onto main after ToolProvider (`#21`) and answers (`#19`). Did not rewrite ToolProvider/MCP, OrganizationDesigner, typed events, worker leases, PolicyGate/Gemini, SQLite migrations, Cohere, React/Pixi, or LangGraph. Tests: `python3 -m pytest tests/ -q` → **235 passed**.
+>>>>>>> 225d34c (Record pytest results for the xAI ModelProvider adapter.)
 
 **Landed on main (keep):** typed `EventType` catalog (`#20`); ToolProvider / MCP seam (`#21`); mission answers path (`#19`); `PaymentProvider` behind `WalletAdapter` (`#18`); llama.cpp (`#17`); vLLM (`#16`); verifier seed (`#15`).
 
