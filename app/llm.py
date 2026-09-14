@@ -20,6 +20,20 @@ class ProviderError(RuntimeError):
         self.failure_class = failure_class
 
 
+# Bounded retry is applied by SwarmRuntime.model_call (events + mission deadline).
+# The adapter still raises immediately so classification stays at the HTTP seam.
+RETRYABLE_FAILURE_CLASSES = frozenset({FailureClass.RATE_LIMIT, FailureClass.TIMEOUT})
+DEFAULT_MAX_RETRIES = 3  # retries after the first attempt; 4 attempts total
+DEFAULT_RETRY_BASE_SECONDS = 0.5
+RETRY_BACKOFF_CAP_SECONDS = 8.0
+
+
+def retry_delay_seconds(attempt: int, base: float = DEFAULT_RETRY_BASE_SECONDS,
+                        cap: float = RETRY_BACKOFF_CAP_SECONDS) -> float:
+    """Exponential backoff for the failed attempt that is about to be retried (1-based)."""
+    return min(base * (2 ** max(attempt - 1, 0)), cap)
+
+
 _OPENAI_HTTP_ERRORS = {
     401: ("OpenAI rejected the API key", FailureClass.AUTHORIZATION_REQUIRED),
     403: ("OpenAI denied model/project access", FailureClass.AUTHORIZATION_REQUIRED),

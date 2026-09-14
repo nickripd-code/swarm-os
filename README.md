@@ -16,7 +16,7 @@ Open http://127.0.0.1:8000. The mission controller uses the OpenAI Responses API
 
 ## Safety defaults
 
-The runtime enforces mission-wide depth, agent, task, tool-call, runtime, and payment limits. Payments are simulated by default. Live mainnet settlement intentionally fails closed until a real wallet adapter is configured; private keys must remain outside the agent process. Provider and policy failures are recorded with a structured `failure_class` on the mission result and events; they still fail the mission.
+The runtime enforces mission-wide depth, agent, task, tool-call, runtime, and payment limits. Payments are simulated by default. Live mainnet settlement intentionally fails closed until a real wallet adapter is configured; private keys must remain outside the agent process. Transient `RATE_LIMIT` and `TIMEOUT` provider errors are retried with bounded exponential backoff (3 retries, 0.5s / 1s / 2s) against the same OpenAI adapter. If retries exhaust, the mission fails closed with `{error, failure_class}` — no demo fallback.
 
 ## Next integration seams
 
