@@ -77,6 +77,9 @@ def no_local_env(monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     monkeypatch.delenv("GROQ_MODEL", raising=False)
     monkeypatch.delenv("GROQ_BASE_URL", raising=False)
+    monkeypatch.delenv("FIREWORKS_API_KEY", raising=False)
+    monkeypatch.delenv("FIREWORKS_MODEL", raising=False)
+    monkeypatch.delenv("FIREWORKS_BASE_URL", raising=False)
 
 
 @pytest.mark.asyncio
