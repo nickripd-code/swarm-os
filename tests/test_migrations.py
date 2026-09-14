@@ -55,9 +55,9 @@ def test_fresh_database_reaches_current_schema(tmp_path):
     store = Store(str(tmp_path / "fresh.db"))
     names = set(inspect(store.engine).get_table_names())
     assert {"missions", "mission_events", "agents", "tasks", "schema_migrations",
-            "worker_leases", "idempotency_keys", "work_items"} <= names
+            "worker_leases", "idempotency_keys", "work_items", "memory_notes"} <= names
     assert _version(store.engine) == CURRENT_SCHEMA_VERSION
-    assert CURRENT_SCHEMA_VERSION == 3
+    assert CURRENT_SCHEMA_VERSION == 4
     mission = Mission(goal="fresh schema", status=MissionStatus.COMPLETED)
     store.save_mission(mission)
     store.append(MissionEvent(mission_id=mission.id, event_type="mission.completed",
@@ -98,7 +98,7 @@ def test_legacy_create_all_database_upgrades_without_losing_rows(tmp_path):
     assert events[0].event_type == "mission.completed"
     names = set(inspect(store.engine).get_table_names())
     assert {"missions", "mission_events", "agents", "tasks", "schema_migrations",
-            "worker_leases", "idempotency_keys", "work_items"} <= names
+            "worker_leases", "idempotency_keys", "work_items", "memory_notes"} <= names
     assert _version(store.engine) == CURRENT_SCHEMA_VERSION
     assert store.load_agents(mission.id) == []
     assert store.load_tasks(mission.id) == []
@@ -259,7 +259,7 @@ def test_v1_database_upgrades_to_lease_tables_without_losing_rows(tmp_path):
     store = Store(str(path))
     assert _version(store.engine) == CURRENT_SCHEMA_VERSION
     names = set(inspect(store.engine).get_table_names())
-    assert {"worker_leases", "idempotency_keys", "work_items"} <= names
+    assert {"worker_leases", "idempotency_keys", "work_items", "memory_notes"} <= names
     loaded = store.get_mission(mission.id)
     assert loaded is not None
     assert loaded.goal == "keep through v2"
@@ -284,9 +284,34 @@ def test_v2_database_upgrades_to_work_items_without_losing_rows(tmp_path):
     assert _version(store.engine) == CURRENT_SCHEMA_VERSION
     names = set(inspect(store.engine).get_table_names())
     assert "work_items" in names
+    assert "memory_notes" in names
     loaded = store.get_mission(mission.id)
     assert loaded is not None
     assert loaded.goal == "keep through v3"
+
+
+def test_v3_database_upgrades_to_memory_notes_without_losing_rows(tmp_path):
+    path = tmp_path / "v3.db"
+    engine = _engine(path)
+    assert apply_migrations(engine, MIGRATIONS[:3]) == 3
+    mission = Mission(goal="keep through v4", status=MissionStatus.COMPLETED)
+    with engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO missions (id, payload, updated_at) VALUES (:id, :payload, :updated_at)"),
+            {"id": str(mission.id), "payload": mission.model_dump_json(),
+             "updated_at": datetime.now(timezone.utc)},
+        )
+        names = {row[0] for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))}
+    assert "memory_notes" not in names
+    assert "work_items" in names
+
+    store = Store(str(path))
+    assert _version(store.engine) == CURRENT_SCHEMA_VERSION
+    names = set(inspect(store.engine).get_table_names())
+    assert "memory_notes" in names
+    loaded = store.get_mission(mission.id)
+    assert loaded is not None
+    assert loaded.goal == "keep through v4"
 
 
 def test_newer_database_fails_closed(tmp_path):

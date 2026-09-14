@@ -18,6 +18,7 @@ from .models import (
 from .policy import PolicyError, PolicyGate, PolicyRequest
 from .resources import ResourceScheduler, listed_prices_from_meta, usage_from_meta
 from .store import AnswerStateError, Store
+from .memory import MemoryError, MemoryProvider, StoreMemoryProvider
 from .llm import (
     DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BASE_SECONDS, LLMProvider, build_controller,
     ProviderError, RETRYABLE_FAILURE_CLASSES, retry_delay_seconds,
@@ -64,7 +65,8 @@ class SwarmRuntime:
                  max_retries: int = DEFAULT_MAX_RETRIES, retry_base_seconds: float = DEFAULT_RETRY_BASE_SECONDS,
                  tools: ToolProvider | None | object = _UNSET,
                  resources: ResourceScheduler | None = None,
-                 workspaces: WorkspaceProvider | None | object = _UNSET):
+                 workspaces: WorkspaceProvider | None | object = _UNSET,
+                 memory: MemoryProvider | None | object = _UNSET):
         self.store, self.sink = store, sink
         self.agents: dict[UUID, list[AgentSpec]] = defaultdict(list)
         self.tasks: dict[UUID, list[Task]] = defaultdict(list)
@@ -93,6 +95,7 @@ class SwarmRuntime:
         self.resources = resources or ResourceScheduler(policy=self.policy)
         self.org = OrganizationDesigner()
         self.workspaces = build_workspace_provider() if workspaces is _UNSET else workspaces
+        self.memory = StoreMemoryProvider(store) if memory is _UNSET else memory
 
     def _owner(self) -> str:
         return str(self.worker_id)
@@ -1023,7 +1026,26 @@ class SwarmRuntime:
             )
             await self.emit(mission_id, event, run, actor_id)
 
-    def _state(self, mission: Mission) -> dict[str, Any]:
+    def remember(self, mission: Mission, body: str, *, agent_id: UUID | None = None):
+        """Persist a short scoped note. Fail closed on oversize/invalid input."""
+        if self.memory is None:
+            raise PolicyError("Memory provider is not configured", FailureClass.TOOL_MISSING)
+        try:
+            return self.memory.remember(mission.id, body, agent_id=agent_id)
+        except MemoryError as exc:
+            raise PolicyError(str(exc), exc.failure_class) from exc
+
+    def _memory_for_context(self, mission_id: UUID, agent_id: UUID | None = None) -> list[dict[str, Any]]:
+        """Bounded recall for model context. Empty storage is []. Corrupt/oversize fails closed."""
+        if self.memory is None:
+            return []
+        try:
+            notes = self.memory.recall(mission_id, agent_id=agent_id)
+        except MemoryError as exc:
+            raise PolicyError(str(exc), exc.failure_class) from exc
+        return [note.public_dict() for note in notes]
+
+    def _state(self, mission: Mission, agent_id: UUID | None = None) -> dict[str, Any]:
         used = self.tool_calls_used(mission.id)
         return {"goal": mission.goal, "status": mission.status,
                 "agents": [a.model_dump(mode="json") for a in self.agents[mission.id]],
@@ -1036,7 +1058,8 @@ class SwarmRuntime:
                 "pending_question": (mission.pending_question.model_dump(mode="json")
                                      if mission.pending_question else None),
                 "answers": [item.model_dump(mode="json") for item in mission.answers],
-                "privacy": mission.privacy}
+                "privacy": mission.privacy,
+                "memory": self._memory_for_context(mission.id, agent_id)}
 
     def _tool_call_from_model(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         """Parse a controller or worker tool request. Never invent a name or arguments."""
@@ -1062,7 +1085,7 @@ class SwarmRuntime:
             self.check_agent(mission.id, agent.id)
             result = await self.model_call(
                 mission, agent, "work",
-                lambda: self.controller.work(self._state(mission), agent.model_dump(mode="json")),
+                lambda: self.controller.work(self._state(mission, agent.id), agent.model_dump(mode="json")),
             )
             status = result.get("status")
             if status == "use_tool":
