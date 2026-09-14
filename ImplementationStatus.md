@@ -12,7 +12,7 @@ This is an early FastAPI Mission Control MVP. Most of the north star is not buil
 - **PARTIAL** means a real seed exists but is far from the north-star behavior.
 - **MISSING** means not present in a form that can be extended without new work.
 - **BROKEN** means present but incorrect, unused, or actively misleading.
-- Classification records *what* failed. `RATE_LIMIT` and `TIMEOUT` are retried with bounded backoff against the same provider. Exhausted retries still fail closed. No second provider yet.
+- Classification records *what* failed. `RATE_LIMIT` and `TIMEOUT` are retried with bounded backoff against the same provider. `PROVIDER_OUTAGE` (or an unconfigured/unavailable primary) may use the OpenRouter adapter when `OPENROUTER_API_KEY` is set. Exhausted retries or a failed failover still fail closed.
 
 ---
 
@@ -24,7 +24,9 @@ This is an early FastAPI Mission Control MVP. Most of the north star is not buil
 - Mission safety limits: depth, agents, tasks, runtime seconds, payment cap (`MissionLimits`). Spawn/task/runtime/payment caps are enforced.
 - Fail-closed live payments: `WalletAdapter` simulates unless `live_payments` is set, then raises; no private keys in the agent process (`app/credentials.py`, `WalletAdapter`).
 - Credential isolation: OpenAI key from `OPENAI_API_KEY` or Windows Credential Manager; never returned over HTTP.
-- Single OpenAI Responses adapter (`OpenAIProvider`) with structured JSON schema, usage metadata, no response-body leakage on errors.
+- OpenAI Responses adapter (`OpenAIResponsesModelProvider` / `OpenAIProvider`) with structured JSON schema, usage metadata, no response-body leakage on errors.
+- OpenRouter / OpenAI-compatible Chat Completions adapter (`OpenRouterModelProvider`) behind the same `ModelProvider` contract. Key from `OPENROUTER_API_KEY` only.
+- Minimal outage routing (`FailoverModelProvider`): on `PROVIDER_OUTAGE` or unconfigured/unavailable primary, try the configured secondary once. Emits `llm.failover`. Does **not** fail over on auth, policy, invalid output, `RATE_LIMIT`, or `TIMEOUT`. OpenAI-only when only `OPENAI_API_KEY` is set.
 - Explicit `ProviderError` / `PolicyError` paths. Provider failure does **not** swap in `FallbackController` or mark the mission completed.
 - Structured **failure classification** on the main provider/runtime failure paths:
   - `FailureClass` enum in `app/models.py` (north-star names: `RATE_LIMIT`, `PROVIDER_OUTAGE`, `TIMEOUT`, `CONTEXT_LIMIT`, `POLICY_REFUSAL`, `INVALID_OUTPUT`, `AUTHORIZATION_REQUIRED`, `CAPABILITY_MISMATCH`, `RESOURCE_EXHAUSTED`, `MODEL_FAILURE`, `UNKNOWN_FAILURE`, plus unused-for-now classes).
@@ -37,11 +39,11 @@ This is an early FastAPI Mission Control MVP. Most of the north star is not buil
   - **3 retries** (4 attempts total); exponential delays **0.5s, 1s, 2s** (cap 8s).
   - Retry is skipped if remaining mission runtime would not cover the next backoff, so a rate-limit near the deadline stays `RATE_LIMIT` instead of becoming a deadline `TIMEOUT`.
   - Each retry emits `llm.retry` (`attempt`, `max_attempts`, `delay_seconds`, `failure_class`, `error`). Final failure still emits `llm.failed` and `mission.failed` with `failure_class`. `mission.result` stays `{error, failure_class}`.
-- Health endpoint reports OpenAI configured/model/reasoning, `fallback: false`.
+- Health endpoint reports OpenAI and OpenRouter configured/model status, `fallback: false`. Does not expose keys.
 - Human stop: per-mission stop and global STOP ALL; in-flight workers are cancelled.
 - Server restart marks leftover pending/running/waiting missions `stopped` (does not resume).
 - Vanilla JS control room: live event stream, agent tree, inspector, activity, result panel, explicit **preview** mode labeled as non-running, **objective HUD** (`#objectiveHud`) with truthful mode/status chips, and a critical **alert stack** (`#alerts`) for real terminal events (`mission.failed` including `failure_class`, `mission.completed`, blocked, stop/stop-all). Optional Notification API only after a launch gesture, and only when the tab is hidden.
-- Tests: runtime completion/replay, spawn limits, simulated payments, provider failure stays failed with class, stop-all, runtime deadline/`TIMEOUT`, OpenAI usage + classified HTTP/timeout/outage errors, retry-then-success and retry-exhausted for `RATE_LIMIT`/`TIMEOUT`, non-retryable classes fail immediately.
+- Tests: runtime completion/replay, spawn limits, simulated payments, provider failure stays failed with class, stop-all, runtime deadline/`TIMEOUT`, OpenAI usage + classified HTTP/timeout/outage errors, retry-then-success and retry-exhausted for `RATE_LIMIT`/`TIMEOUT`, non-retryable classes fail immediately, OpenRouter adapter contract + classified errors, outage failover to secondary, both-down fail closed, OpenAI-only factory path.
 
 ---
 
@@ -52,7 +54,7 @@ This is an early FastAPI Mission Control MVP. Most of the north star is not buil
 | Objective engine | `Mission` + `SwarmRuntime.run` loop | One controller LLM decides spawn/finish/blocked/wait. No independent planners, judge, or organization designer. |
 | AgentSpec | Pydantic `AgentSpec` (id, parent, role, purpose, capabilities, depth, status) | No model selection, budgets, TTL, tools, workspace, permissions, fallback models, success criteria. |
 | Agent factory | `SwarmRuntime.spawn` | Controller may spawn specialists; no runtime factory API, no replace/clone/merge/kill-as-reorg. |
-| Model provider | `LLMProvider` with `decide`/`work` | Not the north-star `ModelProvider` (list/stream/health/cost/capabilities). OpenAI-only. |
+| Model provider | `ModelProvider` contract + OpenAI Responses + OpenRouter Chat Completions + outage failover | Not a full ModelRouter (capability/cost/local routing). Streaming still explicit `CAPABILITY_MISMATCH`. |
 | Events | Typed-ish string events + WebSocket replay of history | Missing most north-star event types (verification, replan, org change, self-mod, budget warning). |
 | Observability | Events, token usage on `llm.completed`, `llm.retry` on transient provider errors, activity feed | No cost, verification traces, “why this agent”, burn rate. |
 | Persistence | Missions + events survive process restart | Agents/tasks are in-memory during a run; restart **stops** work instead of resuming. No checkpoints, no org graph table. |
@@ -64,7 +66,7 @@ This is an early FastAPI Mission Control MVP. Most of the north star is not buil
 | Cost | `budget` / `spent` on payments only | No token-cost accounting, estimates, or ResourceScheduler. Token counts are usage telemetry, not money. |
 | Verification | Controller prompt says not to claim undone work; workers can `blocked` | No independent verifier, no external success criteria, finish = model `summary`. |
 | Tools | Capability strings `reason`/`write`/`review` | No ToolProvider, MCP, browser, shell, filesystem, HTTP. `external_tools: []`. |
-| Failure recovery | Classified failures; `RATE_LIMIT`/`TIMEOUT` retry with backoff | Exhausted retries still kill the mission. No other provider, no replan. `PROVIDER_OUTAGE` is not retried here (next slice). |
+| Failure recovery | Classified failures; `RATE_LIMIT`/`TIMEOUT` retry; `PROVIDER_OUTAGE` may fail over to OpenRouter | Exhausted retries or both providers down still kill the mission. No replan, no local model, no capability-based routing. |
 
 ---
 
@@ -72,8 +74,8 @@ This is an early FastAPI Mission Control MVP. Most of the north star is not buil
 
 North-star systems with no implementation to extend yet:
 
-- Multi-provider adapters (Anthropic, Gemini, xAI, Mistral, DeepSeek, Cohere, OpenRouter, Ollama, vLLM, llama.cpp).
-- ModelRouter / capability-based routing / fallback chains.
+- Additional provider adapters (Anthropic, Gemini, xAI, Mistral, DeepSeek, Cohere, Ollama, vLLM, llama.cpp) beyond OpenAI + OpenRouter.
+- ModelRouter / capability-based routing / cost-aware fallback chains.
 - Multi-planner + judge/synthesis.
 - OrganizationDesigner, authority/delegation graph, dynamic reorg (replace/clone/merge).
 - Verifier agents and mandatory external evidence.
@@ -154,20 +156,9 @@ Nothing in the current test suite is known red. UI preview is synthetic by desig
 
 **Parallel UI slice (this change):** Mission Control now shows truthful mode/status, `failure_class` on failed results, and critical alerts for real websocket/stop events. That does **not** replace the provider lane.
 
-**Recommended next backend slice:** provider-independent `ModelProvider` contract (health, model id, complete) + **OpenRouter** as a second adapter behind the same `LLMProvider.decide/work` used today, so classified `PROVIDER_OUTAGE` has a real alternative. Still fail closed if every provider is down. Still no game-world UI rewrite.
+**This slice:** OpenRouter (OpenAI-compatible Chat Completions) behind `ModelProvider`, plus `FailoverModelProvider` for `PROVIDER_OUTAGE` / unconfigured primary. OpenAI-only path unchanged when only `OPENAI_API_KEY` is set. Fail closed if neither provider works. No `FallbackController` in production.
 
-Why OpenRouter next, not a game-world rewrite or full ModelRouter:
-
-1. Retries now absorb transient `RATE_LIMIT` / `TIMEOUT` on the current OpenAI path. A true outage still kills the objective.
-2. A second adapter is the smallest way to act on `PROVIDER_OUTAGE` without inventing a routing framework.
-3. Keep OpenAI as the first adapter; do not sprinkle provider `if` branches through the runtime.
-
-**Smallest steps for slice 3 (keep the app runnable):**
-
-1. Extract a thin `ModelProvider` (or extend `LLMProvider`) with health + complete; wrap existing `OpenAIProvider`.
-2. Add an OpenRouter adapter that raises the same `ProviderError` / `failure_class` taxonomy.
-3. On `PROVIDER_OUTAGE` (not on auth/policy/invalid output), try the second provider once the first is down; emit an event when switching; if both fail, `mission.result` stays `{error, failure_class}`.
-4. Tests: OpenAI outage then OpenRouter success; both down → failed + `PROVIDER_OUTAGE`; never `FallbackController`.
+**Recommended next backend slice:** capability-based ModelRouter (pick model by task, not only outage failover) or a third local adapter (Ollama / vLLM). Still fail closed. Still no game-world UI rewrite.
 
 **Explicitly not next:** game-world UI, self-modification, PaymentProvider, Playwright, OrganizationDesigner.
 
@@ -177,7 +168,7 @@ Why OpenRouter next, not a game-world rewrite or full ModelRouter:
 
 - Tree: `app/` (runtime, llm, store, models, main, health, credentials, static UI), `tests/`, `scripts/check_openai.py`, `NORTH_STAR.md`, this file. No CI, no Docker, no `.env.example`.
 - Dependencies: FastAPI, uvicorn, SQLAlchemy, pydantic, httpx; pytest in `dev`; `pywin32` on Windows only.
-- Single production provider: `OpenAIProvider` → `https://api.openai.com/v1/responses`. `FallbackController` is a test fixture (`mode = "demo"`). Retry/backoff for `RATE_LIMIT`/`TIMEOUT` lives in `SwarmRuntime.model_call`, not inside the HTTP adapter (so events and the mission deadline apply).
+- Production providers: `OpenAIResponsesModelProvider` → `https://api.openai.com/v1/responses`; `OpenRouterModelProvider` → `{OPENROUTER_BASE_URL}/chat/completions`. `build_controller()` wraps them in `FailoverModelProvider` only when both keys are set. `FallbackController` is a test fixture (`mode = "demo"`). Retry/backoff for `RATE_LIMIT`/`TIMEOUT` lives in `SwarmRuntime.model_call`; outage failover lives in `FailoverModelProvider`.
 - Tests are extended in this slice rather than replaced.
 - No TODOs in application code.
-- Hypotheses checked: OpenAI-only in `app/llm.py`; classified `RATE_LIMIT`/`TIMEOUT` now retry then fail closed; SQLite missions+events; agents/tasks in-memory / event-projected; UI vanilla JS with objective HUD + critical alerts wired to existing events.
+- Hypotheses checked: OpenAI + optional OpenRouter behind `ModelProvider`; classified `RATE_LIMIT`/`TIMEOUT` retry then fail closed; `PROVIDER_OUTAGE` may fail over; SQLite missions+events+agents/tasks; UI vanilla JS with objective HUD + critical alerts wired to existing events.

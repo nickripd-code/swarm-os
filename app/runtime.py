@@ -11,7 +11,7 @@ from .models import (
 )
 from .store import Store
 from .llm import (
-    DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BASE_SECONDS, LLMProvider, OpenAIProvider,
+    DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BASE_SECONDS, LLMProvider, build_controller,
     ProviderError, RETRYABLE_FAILURE_CLASSES, retry_delay_seconds,
 )
 
@@ -50,7 +50,7 @@ class SwarmRuntime:
         self.stopped: set[UUID] = set()
         self.runs: dict[UUID, asyncio.Task] = {}
         self.wallet = WalletAdapter()
-        self.controller = controller or OpenAIProvider()
+        self.controller = controller or build_controller()
         self.lock = asyncio.Lock()
         self.max_retries = max_retries
         self.retry_base_seconds = retry_base_seconds
@@ -161,6 +161,14 @@ class SwarmRuntime:
         assert response is not None
         metadata = response.pop("_meta", None)
         if metadata:
+            if metadata.get("failover_from"):
+                await self.emit(mission.id, "llm.failover", {
+                    "kind": kind,
+                    "from_provider": metadata["failover_from"],
+                    "to_provider": metadata.get("provider"),
+                    "reason": metadata.get("failover_reason"),
+                    "model": metadata.get("model", model),
+                }, actor.id)
             await self.emit(mission.id, "llm.completed", {"kind": kind, **metadata}, actor.id)
         return response
 

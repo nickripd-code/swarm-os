@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from .models import AnswerRequest, Mission, MissionCreate, PaymentIntent
 from .runtime import PolicyError, SwarmRuntime
 from .store import Store
-from .health import openai_status
+from .health import openai_status, openrouter_status
 
 BASE = Path(__file__).parent
 
@@ -45,7 +45,8 @@ async def index(): return FileResponse(BASE / "static" / "index.html")
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "openai": openai_status(), "active_missions": len(runtime.runs)}
+    return {"ok": True, "openai": openai_status(), "openrouter": openrouter_status(),
+            "active_missions": len(runtime.runs)}
 
 
 @app.get("/api/missions")
@@ -62,7 +63,7 @@ async def stop_all():
 @app.post("/api/missions", response_model=Mission, status_code=201)
 async def create_mission(request: MissionCreate):
     if not runtime.controller.configured():
-        raise HTTPException(503, "OpenAI key is not configured. Set it on the server before launching.")
+        raise HTTPException(503, "No model provider is configured. Set OPENAI_API_KEY or OPENROUTER_API_KEY on the server before launching.")
     mission = Mission(goal=request.goal, budget=request.budget, live_payments=request.live_payments, limits=request.limits)
     store.save_mission(mission)
     await runtime.start(mission)
