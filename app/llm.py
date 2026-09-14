@@ -12,7 +12,8 @@ from .credentials import (
     get_cerebras_api_key, get_cohere_api_key,
     get_deepseek_api_key, get_fireworks_api_key, get_gemini_api_key, get_groq_api_key,
     get_huggingface_api_key, get_mistral_api_key, get_openrouter_api_key,
-    get_perplexity_api_key, get_sambanova_api_key, get_together_api_key, get_xai_api_key,
+    get_perplexity_api_key, get_sambanova_api_key, get_together_api_key, get_vertex_api_key,
+    get_vertex_project, get_xai_api_key,
 )
 from .models import FailureClass
 from .providers import (
@@ -67,6 +68,8 @@ DEFAULT_CEREBRAS_MODEL = "llama-3.3-70b"
 DEFAULT_CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
 DEFAULT_SAMBANOVA_MODEL = "Meta-Llama-3.3-70B-Instruct"
 DEFAULT_SAMBANOVA_BASE_URL = "https://api.sambanova.ai/v1"
+DEFAULT_VERTEX_MODEL = "gemini-2.0-flash"
+DEFAULT_VERTEX_LOCATION = "us-central1"
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
 DEFAULT_VLLM_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_LLAMACPP_BASE_URL = "http://127.0.0.1:8080/v1"
@@ -436,6 +439,48 @@ def sambanova_http_error(status_code: int) -> ProviderError:
     return ProviderError(f"SambaNova service error (HTTP {status_code})", failure_class)
 
 
+_VERTEX_HTTP_ERRORS = {
+    401: ("Vertex AI rejected the API key", FailureClass.AUTHORIZATION_REQUIRED),
+    402: ("Vertex AI credits are exhausted", FailureClass.RESOURCE_EXHAUSTED),
+    403: ("Vertex AI denied model/project access", FailureClass.AUTHORIZATION_REQUIRED),
+    408: ("Vertex AI request timed out; no demo result was substituted", FailureClass.TIMEOUT),
+    413: ("Vertex AI request exceeded the context limit", FailureClass.CONTEXT_LIMIT),
+    422: ("Vertex AI rejected the model request", FailureClass.MODEL_FAILURE),
+    429: ("Vertex AI quota or rate limit reached", FailureClass.RATE_LIMIT),
+    400: ("Vertex AI rejected the model request", FailureClass.MODEL_FAILURE),
+    404: ("The configured Vertex AI model is unavailable", FailureClass.CAPABILITY_MISMATCH),
+}
+
+_VERTEX_POLICY_FINISH = frozenset({
+    "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII",
+})
+_VERTEX_CONTEXT_FINISH = frozenset({"MAX_TOKENS"})
+
+
+def vertex_http_error(status_code: int) -> ProviderError:
+    if status_code in _VERTEX_HTTP_ERRORS:
+        message, failure_class = _VERTEX_HTTP_ERRORS[status_code]
+        return ProviderError(message, failure_class)
+    failure_class = FailureClass.PROVIDER_OUTAGE if status_code >= 500 else FailureClass.MODEL_FAILURE
+    return ProviderError(f"Vertex AI service error (HTTP {status_code})", failure_class)
+
+
+def vertex_opted_in() -> bool:
+    """Cloud Vertex requires VERTEX_API_KEY and VERTEX_PROJECT (or GOOGLE_CLOUD_PROJECT).
+
+    VERTEX_MODEL, VERTEX_LOCATION, VERTEX_BASE_URL, GEMINI_API_KEY, and ambient ADC
+    do not opt in.
+    """
+    return bool(get_vertex_api_key() and get_vertex_project())
+
+
+def default_vertex_base_url(location: str) -> str:
+    loc = (location or DEFAULT_VERTEX_LOCATION).strip() or DEFAULT_VERTEX_LOCATION
+    if loc == "global":
+        return "https://aiplatform.googleapis.com"
+    return f"https://{loc}-aiplatform.googleapis.com"
+
+
 _OLLAMA_HTTP_ERRORS = {
     401: ("Ollama rejected the request credentials", FailureClass.AUTHORIZATION_REQUIRED),
     403: ("Ollama denied model access", FailureClass.AUTHORIZATION_REQUIRED),
@@ -662,6 +707,67 @@ def _converse_usage(result: dict) -> ModelUsage:
         input_tokens=raw_usage.get("inputTokens", raw_usage.get("input_tokens", 0)) or 0,
         output_tokens=raw_usage.get("outputTokens", raw_usage.get("output_tokens", 0)) or 0,
         reasoning_tokens=raw_usage.get("reasoningTokens", raw_usage.get("reasoning_tokens", 0)) or 0,
+    )
+
+
+def generate_content_schema_from_format(schema: dict | None) -> dict | None:
+    """Map a Responses/Chat json_schema format onto Vertex generationConfig.responseSchema."""
+    formatted = chat_response_format(schema)
+    if not formatted or formatted.get("type") != "json_schema":
+        return None
+    inner = formatted.get("json_schema") if isinstance(formatted.get("json_schema"), dict) else formatted
+    json_schema = inner.get("schema") if isinstance(inner.get("schema"), dict) else {"type": "object"}
+    return json_schema
+
+
+def generate_content_completion_output(result: dict, *, label: str) -> tuple[dict, ModelUsage]:
+    """Parse a Vertex generateContent body into structured JSON + usage."""
+    feedback = result.get("promptFeedback") or result.get("prompt_feedback") or {}
+    if isinstance(feedback, dict) and (feedback.get("blockReason") or feedback.get("block_reason")):
+        raise ProviderError("The model declined the request", FailureClass.POLICY_REFUSAL)
+    candidates = result.get("candidates") or []
+    if not isinstance(candidates, list) or not candidates:
+        raise ValueError()
+    candidate = candidates[0]
+    finish = candidate.get("finishReason") or candidate.get("finish_reason")
+    if finish in _VERTEX_CONTEXT_FINISH:
+        raise ProviderError(
+            f"{label} response was incomplete; increase the output limit or simplify the task",
+            FailureClass.CONTEXT_LIMIT)
+    if finish in _VERTEX_POLICY_FINISH:
+        raise ProviderError("The model declined the request", FailureClass.POLICY_REFUSAL)
+    content = candidate.get("content") or {}
+    parts = content.get("parts") or []
+    if not isinstance(parts, list) or not parts:
+        raise ValueError()
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        call = part.get("functionCall") or part.get("function_call")
+        if isinstance(call, dict):
+            args = call.get("args")
+            if isinstance(args, dict):
+                return args, _generate_content_usage(result)
+            raise ValueError()
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        text = part.get("text")
+        if not isinstance(text, str) or not text:
+            continue
+        parsed = json.loads(text)
+        if not isinstance(parsed, dict):
+            raise ValueError()
+        return parsed, _generate_content_usage(result)
+    raise ValueError()
+
+
+def _generate_content_usage(result: dict) -> ModelUsage:
+    raw_usage = result.get("usageMetadata") or result.get("usage_metadata") or {}
+    return ModelUsage(
+        input_tokens=raw_usage.get("promptTokenCount", raw_usage.get("prompt_token_count", 0)) or 0,
+        output_tokens=raw_usage.get("candidatesTokenCount", raw_usage.get("candidates_token_count", 0)) or 0,
+        reasoning_tokens=raw_usage.get("thoughtsTokenCount", raw_usage.get("thoughts_token_count", 0)) or 0,
     )
 
 
@@ -2506,6 +2612,141 @@ class CerebrasModelProvider(ModelProvider):
             usage=usage,
         )
 
+class VertexAIModelProvider(ModelProvider):
+    """Vertex AI Gemini generateContent adapter. Distinct from consumer Gemini Chat Completions.
+
+    Opt-in via VERTEX_API_KEY and VERTEX_PROJECT (or GOOGLE_CLOUD_PROJECT).
+    """
+
+    provider_id = "vertex"
+
+    def __init__(self, model: str | None = None, api_key: str | None = None,
+                 transport=None, project: str | None = None, location: str | None = None,
+                 base_url: str | None = None):
+        self.model = model or os.getenv("VERTEX_MODEL", DEFAULT_VERTEX_MODEL)
+        self._api_key = api_key
+        self.transport = transport
+        self.project = (project if project is not None else get_vertex_project() or "").strip()
+        self.location = (
+            location if location is not None
+            else os.getenv("VERTEX_LOCATION") or DEFAULT_VERTEX_LOCATION
+        ).strip() or DEFAULT_VERTEX_LOCATION
+        explicit_base = base_url if base_url is not None else os.getenv("VERTEX_BASE_URL")
+        self.base_url = (explicit_base or default_vertex_base_url(self.location)).rstrip("/")
+        self.max_output_tokens = int(os.getenv("SWARM_MAX_OUTPUT_TOKENS", "8192"))
+        self._usage = ModelUsage()
+
+    def configured(self) -> bool:
+        return bool((self._api_key or get_vertex_api_key()) and self.project)
+
+    def _generate_content_url(self, model: str) -> str:
+        project = quote(self.project, safe="")
+        location = quote(self.location, safe="")
+        encoded_model = quote(model, safe=".-")
+        return (
+            f"{self.base_url}/v1/projects/{project}/locations/{location}"
+            f"/publishers/google/models/{encoded_model}:generateContent"
+        )
+
+    async def list_models(self) -> list[ModelDescriptor]:
+        return [ModelDescriptor(
+            provider=self.provider_id,
+            model=self.model,
+            capabilities=self.capabilities(self.model),
+            context_limits=self.context_limits(self.model),
+        )]
+
+    def capabilities(self, model: str) -> ModelCapabilities:
+        del model
+        return ModelCapabilities(
+            reasoning="unknown",
+            coding="unknown",
+            vision=None,
+            tool_use=True,
+            structured_outputs=True,
+            streaming=False,
+        )
+
+    def context_limits(self, model: str) -> ContextLimits:
+        del model
+        return ContextLimits(max_output_tokens=self.max_output_tokens)
+
+    async def health(self) -> ProviderHealth:
+        return ProviderHealth(
+            provider=self.provider_id,
+            status="healthy" if self.configured() else "unconfigured",
+            detail=("credential available" if self.configured()
+                    else "API key and project are required"),
+        )
+
+    def estimate_cost(self, request: ModelRequest) -> CostEstimate:
+        return CostEstimate(
+            provider=self.provider_id,
+            model=request.model,
+            estimated_cost=None,
+            known=False,
+            reason="Pricing metadata is not configured for this model",
+        )
+
+    def usage(self) -> ModelUsage:
+        return self._usage.model_copy()
+
+    def _require_key(self) -> str:
+        key = self._api_key or get_vertex_api_key()
+        if not key:
+            raise ProviderError("Vertex AI API key is not configured",
+                                FailureClass.AUTHORIZATION_REQUIRED)
+        if not self.project:
+            raise ProviderError("Vertex AI project is not configured",
+                                FailureClass.AUTHORIZATION_REQUIRED)
+        return key
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        key = self._require_key()
+        payload = request.input if isinstance(request.input, str) else json.dumps(request.input, default=str)
+        model = request.model or self.model
+        body: dict[str, Any] = {
+            "systemInstruction": {"parts": [{"text": request.instructions}]},
+            "contents": [{"role": "user", "parts": [{"text": payload}]}],
+            "generationConfig": {
+                "maxOutputTokens": request.max_output_tokens or self.max_output_tokens,
+            },
+        }
+        schema = generate_content_schema_from_format(request.response_format)
+        if schema is not None:
+            body["generationConfig"]["responseMimeType"] = "application/json"
+            body["generationConfig"]["responseSchema"] = schema
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=10),
+                                         trust_env=False, transport=self.transport) as client:
+                response = await client.post(
+                    self._generate_content_url(model),
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json=body,
+                )
+        except httpx.TimeoutException:
+            raise ProviderError("Vertex AI request timed out; no demo result was substituted",
+                                FailureClass.TIMEOUT) from None
+        except httpx.RequestError:
+            raise ProviderError("Could not reach Vertex AI", FailureClass.PROVIDER_OUTAGE) from None
+        if response.is_error:
+            raise vertex_http_error(response.status_code)
+        try:
+            result = response.json()
+            output, usage = generate_content_completion_output(result, label="Vertex AI")
+        except ProviderError:
+            raise
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+            raise ProviderError("Vertex AI returned an invalid structured response",
+                                FailureClass.INVALID_OUTPUT) from None
+        self._usage = self._usage.plus(usage)
+        return ModelResponse(
+            provider=self.provider_id,
+            model=result.get("modelVersion", request.model),
+            output=output,
+            response_id=result.get("responseId"),
+            usage=usage,
+        )
 
 class SambaNovaModelProvider(ModelProvider):
     """OpenAI-compatible Chat Completions adapter for SambaNova Cloud. Opt-in via SAMBANOVA_API_KEY only."""
@@ -3282,6 +3523,7 @@ def build_model_provider(primary: ModelProvider | None = None,
                          huggingface: ModelProvider | None = None,
                          cerebras: ModelProvider | None = None,
                          sambanova: ModelProvider | None = None,
+                         vertex: ModelProvider | None = None,
                          local: ModelProvider | None = None,
                          vllm: ModelProvider | None = None,
                          llamacpp: ModelProvider | None = None,
@@ -3302,8 +3544,9 @@ def build_model_provider(primary: ModelProvider | None = None,
                          huggingface_api_key: str | None = None,
                          cerebras_api_key: str | None = None,
                          sambanova_api_key: str | None = None,
+                         vertex_api_key: str | None = None,
                          transport=None) -> ModelProvider:
-    """Cloud OpenAI + optional OpenRouter/xAI/Anthropic/Mistral/Gemini/Cohere/DeepSeek/Together/Groq/Fireworks/Azure/Perplexity/Bedrock/Hugging Face/Cerebras/SambaNova, locals last.
+    """Cloud OpenAI + optional OpenRouter/xAI/Anthropic/Mistral/Gemini/Cohere/DeepSeek/Together/Groq/Fireworks/Azure/Perplexity/Bedrock/Hugging Face/Cerebras/SambaNova/Vertex, locals last.
 
     OpenAI-only (or a single opted-in cloud) is unchanged when no extra adapter is set.
     Two cloud keys wrap as Failover(first, second); the router registers remaining
@@ -3326,12 +3569,13 @@ def build_model_provider(primary: ModelProvider | None = None,
     huggingface = huggingface or HuggingFaceModelProvider(api_key=huggingface_api_key, transport=transport)
     cerebras = cerebras or CerebrasModelProvider(api_key=cerebras_api_key, transport=transport)
     sambanova = sambanova or SambaNovaModelProvider(api_key=sambanova_api_key, transport=transport)
+    vertex = vertex or VertexAIModelProvider(api_key=vertex_api_key, transport=transport)
     local = local or OllamaModelProvider(transport=transport)
     vllm = vllm or VllmModelProvider(transport=transport)
     llamacpp = llamacpp or LlamaCppModelProvider(transport=transport)
     clouds = [item for item in (
         primary, secondary, xai, anthropic, mistral, gemini, cohere, deepseek, together, groq, fireworks,
-        azure, perplexity, bedrock, huggingface, cerebras, sambanova,
+        azure, perplexity, bedrock, huggingface, cerebras, sambanova, vertex,
     ) if provider_configured(item)]
     first_local = _first_configured_local(local, vllm, llamacpp)
     if len(clouds) >= 2:
@@ -3361,6 +3605,7 @@ def build_router(model_provider: ModelProvider | None = None,
                  huggingface: ModelProvider | None = None,
                  cerebras: ModelProvider | None = None,
                  sambanova: ModelProvider | None = None,
+                 vertex: ModelProvider | None = None,
                  local: ModelProvider | None = None,
                  vllm: ModelProvider | None = None,
                  llamacpp: ModelProvider | None = None, **kwargs) -> ModelRouter:
@@ -3369,9 +3614,7 @@ def build_router(model_provider: ModelProvider | None = None,
         xai=xai, anthropic=anthropic, mistral=mistral, gemini=gemini, cohere=cohere,
         deepseek=deepseek, together=together, groq=groq, fireworks=fireworks, azure=azure,
         perplexity=perplexity, bedrock=bedrock, huggingface=huggingface, cerebras=cerebras,
-        sambanova=sambanova,
-        local=local, vllm=vllm,
-        llamacpp=llamacpp, **kwargs)
+        sambanova=sambanova, vertex=vertex, local=local, vllm=vllm, llamacpp=llamacpp, **kwargs)
     providers = registered_providers(provider)
     extra_xai = xai or next((item for item in providers if item.provider_id == "xai"), None)
     if extra_xai is None:
@@ -3433,6 +3676,10 @@ def build_router(model_provider: ModelProvider | None = None,
     if extra_sambanova is None:
         extra_sambanova = SambaNovaModelProvider(
             api_key=kwargs.get("sambanova_api_key"), transport=kwargs.get("transport"))
+    extra_vertex = vertex or next((item for item in providers if item.provider_id == "vertex"), None)
+    if extra_vertex is None:
+        extra_vertex = VertexAIModelProvider(
+            api_key=kwargs.get("vertex_api_key"), transport=kwargs.get("transport"))
     ollama = local or next((item for item in providers if item.provider_id == "ollama"), None)
     if ollama is None:
         ollama = OllamaModelProvider(transport=kwargs.get("transport"))
@@ -3457,6 +3704,7 @@ def build_router(model_provider: ModelProvider | None = None,
     _register_if_configured(providers, extra_huggingface)
     _register_if_configured(providers, extra_cerebras)
     _register_if_configured(providers, extra_sambanova)
+    _register_if_configured(providers, extra_vertex)
     _register_if_configured(providers, ollama)
     _register_if_configured(providers, extra_vllm)
     _register_if_configured(providers, extra_llamacpp)

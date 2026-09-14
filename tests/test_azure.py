@@ -126,6 +126,12 @@ def no_extra_providers(monkeypatch):
     monkeypatch.delenv("SAMBANOVA_API_KEY", raising=False)
     monkeypatch.delenv("SAMBANOVA_MODEL", raising=False)
     monkeypatch.delenv("SAMBANOVA_BASE_URL", raising=False)
+    monkeypatch.delenv("VERTEX_API_KEY", raising=False)
+    monkeypatch.delenv("VERTEX_PROJECT", raising=False)
+    monkeypatch.delenv("VERTEX_LOCATION", raising=False)
+    monkeypatch.delenv("VERTEX_MODEL", raising=False)
+    monkeypatch.delenv("VERTEX_BASE_URL", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
 
 
 @pytest.mark.asyncio

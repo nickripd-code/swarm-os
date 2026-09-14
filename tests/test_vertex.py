@@ -3,17 +3,21 @@ import json
 import httpx
 import pytest
 
-from app.health import sambanova_status
+from app.health import vertex_status
 from app.llm import (
-    OllamaModelProvider, OpenAIResponsesModelProvider, SambaNovaModelProvider,
-    build_controller, build_model_provider, build_router,
+    DEFAULT_VERTEX_LOCATION, DEFAULT_VERTEX_MODEL, GeminiModelProvider, OllamaModelProvider,
+    OpenAIResponsesModelProvider, VertexAIModelProvider, build_controller, build_model_provider,
+    build_router, default_vertex_base_url,
 )
 from app.models import FailureClass
 from app.providers import FailoverModelProvider, ModelProvider, ModelRequest, ProviderError
 from app.router import CapabilityRequest, ModelRouter
 
 
-DEFAULT_MODEL = "Meta-Llama-3.3-70B-Instruct"
+DEFAULT_MODEL = DEFAULT_VERTEX_MODEL
+VERTEX_PROJECT = "swarm-test"
+VERTEX_LOCATION = DEFAULT_VERTEX_LOCATION
+VERTEX_BASE_URL = default_vertex_base_url(VERTEX_LOCATION)
 REQUEST = ModelRequest(
     model=DEFAULT_MODEL,
     instructions="Return JSON",
@@ -25,24 +29,48 @@ REQUEST = ModelRequest(
 )
 
 
-def completed_chat(output=None, model=DEFAULT_MODEL):
+def completed_generate_content(output=None, model=DEFAULT_MODEL, as_text=False, as_function=False):
+    body = output if output is not None else {"answer": "ok"}
+    if as_function:
+        parts = [{"functionCall": {"name": "answer", "args": body}}]
+    elif as_text and isinstance(output, str):
+        parts = [{"text": output}]
+    else:
+        parts = [{"text": json.dumps(body)}]
     return httpx.Response(200, json={
-        "id": "sambanova_contract",
-        "model": model,
-        "choices": [{"finish_reason": "stop", "message": {
-            "role": "assistant",
-            "content": json.dumps(output or {"answer": "ok"}),
-        }}],
-        "usage": {
-            "prompt_tokens": 11,
-            "completion_tokens": 7,
-            "completion_tokens_details": {"reasoning_tokens": 3},
+        "responseId": "vertex_contract",
+        "modelVersion": model,
+        "candidates": [{
+            "finishReason": "STOP",
+            "content": {"role": "model", "parts": parts},
+        }],
+        "usageMetadata": {
+            "promptTokenCount": 11,
+            "candidatesTokenCount": 7,
+            "thoughtsTokenCount": 3,
         },
     })
 
 
-def sambanova_transport(handler):
+def vertex_transport(handler):
     return httpx.MockTransport(handler)
+
+
+def vertex_provider(**kwargs):
+    defaults = dict(api_key="vertex-secret", project=VERTEX_PROJECT, location=VERTEX_LOCATION,
+                    model=DEFAULT_MODEL)
+    defaults.update(kwargs)
+    return VertexAIModelProvider(**defaults)
+
+
+def opt_in_vertex(monkeypatch, **overrides):
+    values = {"VERTEX_API_KEY": "vertex-test", "VERTEX_PROJECT": VERTEX_PROJECT}
+    values.update(overrides)
+    for name, value in values.items():
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
 
 
 @pytest.fixture
@@ -97,22 +125,23 @@ def no_extra_providers(monkeypatch):
     monkeypatch.delenv("HUGGINGFACE_API_KEY", raising=False)
     monkeypatch.delenv("HUGGINGFACE_MODEL", raising=False)
     monkeypatch.delenv("HUGGINGFACE_BASE_URL", raising=False)
-    monkeypatch.delenv("SAMBANOVA_API_KEY", raising=False)
-    monkeypatch.delenv("SAMBANOVA_MODEL", raising=False)
-    monkeypatch.delenv("SAMBANOVA_BASE_URL", raising=False)
-    monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
-    monkeypatch.delenv("CEREBRAS_MODEL", raising=False)
-    monkeypatch.delenv("CEREBRAS_BASE_URL", raising=False)
     monkeypatch.delenv("VERTEX_API_KEY", raising=False)
     monkeypatch.delenv("VERTEX_PROJECT", raising=False)
     monkeypatch.delenv("VERTEX_LOCATION", raising=False)
     monkeypatch.delenv("VERTEX_MODEL", raising=False)
     monkeypatch.delenv("VERTEX_BASE_URL", raising=False)
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
+    monkeypatch.delenv("CEREBRAS_MODEL", raising=False)
+    monkeypatch.delenv("CEREBRAS_BASE_URL", raising=False)
+    monkeypatch.delenv("SAMBANOVA_API_KEY", raising=False)
+    monkeypatch.delenv("SAMBANOVA_MODEL", raising=False)
+    monkeypatch.delenv("SAMBANOVA_BASE_URL", raising=False)
 
 
 @pytest.mark.asyncio
-async def test_sambanova_adapter_implements_provider_contract_and_tracks_usage(no_extra_providers):
+async def test_vertex_adapter_implements_provider_contract_and_tracks_usage(no_extra_providers):
     captured = {}
 
     def handler(request):
@@ -120,81 +149,103 @@ async def test_sambanova_adapter_implements_provider_contract_and_tracks_usage(n
         captured["method"] = request.method
         captured["body"] = json.loads(request.content)
         captured["authorization"] = request.headers["Authorization"]
-        return completed_chat()
+        return completed_generate_content()
 
-    provider = SambaNovaModelProvider(api_key="sambanova-secret", transport=sambanova_transport(handler))
+    provider = vertex_provider(transport=vertex_transport(handler))
     assert isinstance(provider, ModelProvider)
     models = await provider.list_models()
-    assert models[0].provider == "sambanova"
+    assert models[0].provider == "vertex"
     assert models[0].model == DEFAULT_MODEL
     assert models[0].local is False
     assert models[0].capabilities.structured_outputs is True
 
     response = await provider.complete(REQUEST)
     assert response.output == {"answer": "ok"}
-    assert response.provider == "sambanova"
+    assert response.provider == "vertex"
     assert response.usage.model_dump() == {
         "input_tokens": 11,
         "output_tokens": 7,
         "reasoning_tokens": 3,
     }
-    assert captured["url"] == "https://api.sambanova.ai/v1/chat/completions"
-    assert captured["authorization"] == "Bearer sambanova-secret"
-    assert captured["body"]["model"] == DEFAULT_MODEL
-    assert captured["body"]["response_format"]["type"] == "json_schema"
-    assert "json_schema" in captured["body"]["response_format"]
-    assert "provider" not in captured["body"]
-    assert "sambanova-secret" not in json.dumps(response.model_dump())
+    assert captured["url"] == (
+        f"{VERTEX_BASE_URL}/v1/projects/{VERTEX_PROJECT}/locations/{VERTEX_LOCATION}"
+        f"/publishers/google/models/{DEFAULT_MODEL}:generateContent"
+    )
+    assert captured["authorization"] == "Bearer vertex-secret"
+    assert "vertex-secret" not in captured["url"]
+    assert captured["body"]["contents"][0]["parts"][0]["text"]
+    assert captured["body"]["generationConfig"]["responseMimeType"] == "application/json"
+    assert captured["body"]["generationConfig"]["responseSchema"]["properties"]["answer"]["type"] == "string"
+    dumped = json.dumps(response.model_dump())
+    assert "vertex-secret" not in dumped
     assert (await provider.health()).status == "healthy"
     assert provider.estimate_cost(REQUEST).known is False
 
 
 @pytest.mark.asyncio
+async def test_vertex_accepts_text_json_fallback(no_extra_providers):
+    provider = vertex_provider(transport=vertex_transport(
+        lambda _: completed_generate_content(as_text=True)))
+    response = await provider.complete(REQUEST)
+    assert response.output == {"answer": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_vertex_accepts_function_call_args(no_extra_providers):
+    provider = vertex_provider(transport=vertex_transport(
+        lambda _: completed_generate_content(output={"answer": "tool"}, as_function=True)))
+    response = await provider.complete(REQUEST)
+    assert response.output == {"answer": "tool"}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("response,expected,failure_class", [
-    (httpx.Response(401, json={"error": {"message": "sambanova-secret"}}),
+    (httpx.Response(401, json={"error": {"message": "vertex-secret"}}),
      "rejected the API key", FailureClass.AUTHORIZATION_REQUIRED),
     (httpx.Response(402, json={"error": {}}), "credits are exhausted", FailureClass.RESOURCE_EXHAUSTED),
     (httpx.Response(429, json={"error": {}}), "quota or rate limit", FailureClass.RATE_LIMIT),
     (httpx.Response(503, json={"error": {}}), "HTTP 503", FailureClass.PROVIDER_OUTAGE),
     (httpx.Response(404, json={"error": {}}), "model is unavailable", FailureClass.CAPABILITY_MISMATCH),
     (httpx.Response(422, json={"error": {}}), "rejected the model request", FailureClass.MODEL_FAILURE),
-    (httpx.Response(200, json={"choices": [{"finish_reason": "length", "message": {"content": "{}"}}]}),
+    (httpx.Response(200, json={"candidates": [{"finishReason": "MAX_TOKENS",
+                                              "content": {"parts": [{"text": "{}"}]}}]}),
      "incomplete", FailureClass.CONTEXT_LIMIT),
-    (httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": "not-json"}}]}),
+    (httpx.Response(200, json={"candidates": [{"finishReason": "STOP",
+                                              "content": {"parts": [{"text": "not-json"}]}}]}),
      "invalid structured", FailureClass.INVALID_OUTPUT),
-    (httpx.Response(200, json={"choices": [{"finish_reason": "content_filter", "message": {"content": ""}}]}),
+    (httpx.Response(200, json={"candidates": [{"finishReason": "SAFETY",
+                                              "content": {"parts": []}}]}),
+     "declined", FailureClass.POLICY_REFUSAL),
+    (httpx.Response(200, json={"promptFeedback": {"blockReason": "SAFETY"}, "candidates": []}),
      "declined", FailureClass.POLICY_REFUSAL),
 ])
-async def test_sambanova_errors_are_classified_and_do_not_leak(
+async def test_vertex_errors_are_classified_and_do_not_leak(
         no_extra_providers, response, expected, failure_class):
-    provider = SambaNovaModelProvider(
-        api_key="sambanova-secret", transport=sambanova_transport(lambda _: response))
+    provider = vertex_provider(transport=vertex_transport(lambda _: response))
     with pytest.raises(ProviderError, match=expected) as error:
         await provider.complete(REQUEST)
-    assert "sambanova-secret" not in str(error.value)
+    assert "vertex-secret" not in str(error.value)
     assert error.value.failure_class == failure_class
 
 
 @pytest.mark.asyncio
-async def test_sambanova_timeout_and_outage_are_classified(no_extra_providers):
-    timeout_provider = SambaNovaModelProvider(
-        api_key="sambanova-secret",
-        transport=sambanova_transport(lambda _: (_ for _ in ()).throw(httpx.ReadTimeout("timed out"))))
+async def test_vertex_timeout_and_outage_are_classified(no_extra_providers):
+    timeout_provider = vertex_provider(
+        transport=vertex_transport(lambda _: (_ for _ in ()).throw(httpx.ReadTimeout("timed out"))))
     with pytest.raises(ProviderError, match="timed out") as timeout_error:
         await timeout_provider.complete(REQUEST)
     assert timeout_error.value.failure_class == FailureClass.TIMEOUT
 
-    outage_provider = SambaNovaModelProvider(
-        api_key="sambanova-secret",
-        transport=sambanova_transport(lambda _: (_ for _ in ()).throw(httpx.ConnectError("offline"))))
-    with pytest.raises(ProviderError, match="Could not reach SambaNova") as outage_error:
+    outage_provider = vertex_provider(
+        transport=vertex_transport(lambda _: (_ for _ in ()).throw(httpx.ConnectError("offline"))))
+    with pytest.raises(ProviderError, match="Could not reach Vertex AI") as outage_error:
         await outage_provider.complete(REQUEST)
     assert outage_error.value.failure_class == FailureClass.PROVIDER_OUTAGE
 
 
 @pytest.mark.asyncio
 async def test_health_unconfigured_when_key_missing(no_extra_providers):
-    provider = SambaNovaModelProvider()
+    provider = VertexAIModelProvider()
     assert provider.configured() is False
     health = await provider.health()
     assert health.status == "unconfigured"
@@ -204,55 +255,113 @@ async def test_health_unconfigured_when_key_missing(no_extra_providers):
 
 
 @pytest.mark.asyncio
-async def test_sambanova_model_env_does_not_opt_in(monkeypatch, no_extra_providers):
-    monkeypatch.setenv("SAMBANOVA_MODEL", "Llama-4-Maverick-17B-128E-Instruct")
-    provider = SambaNovaModelProvider()
+@pytest.mark.parametrize("env", [
+    {"VERTEX_API_KEY": "vertex-secret"},
+    {"VERTEX_PROJECT": VERTEX_PROJECT},
+    {"VERTEX_MODEL": "gemini-2.5-flash"},
+    {"VERTEX_LOCATION": "us-west1"},
+    {"VERTEX_BASE_URL": "https://vertex.internal"},
+    {"GOOGLE_CLOUD_PROJECT": "ambient-project"},
+    {"GEMINI_API_KEY": "gemini-secret", "VERTEX_PROJECT": VERTEX_PROJECT},
+    {"GOOGLE_APPLICATION_CREDENTIALS": "/tmp/fake.json",
+     "GOOGLE_CLOUD_PROJECT": "ambient-project"},
+])
+async def test_partial_vertex_env_does_not_opt_in(monkeypatch, no_extra_providers, env):
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    provider = VertexAIModelProvider()
     assert provider.configured() is False
-    assert provider.model == "Llama-4-Maverick-17B-128E-Instruct"
     health = await provider.health()
     assert health.status == "unconfigured"
     with pytest.raises(ProviderError, match="not configured") as error:
         await provider.complete(REQUEST)
     assert error.value.failure_class == FailureClass.AUTHORIZATION_REQUIRED
+    assert "vertex-secret" not in str(error.value)
+    assert "gemini-secret" not in str(error.value)
 
 
 @pytest.mark.asyncio
-async def test_custom_base_url_is_used(no_extra_providers):
+async def test_google_cloud_project_alias_opts_in(monkeypatch, no_extra_providers):
+    monkeypatch.setenv("VERTEX_API_KEY", "vertex-alias")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "alias-project")
     captured = {}
 
     def handler(request):
         captured["url"] = str(request.url)
-        return completed_chat(model="Llama-4-Maverick-17B-128E-Instruct")
+        captured["authorization"] = request.headers.get("Authorization")
+        return completed_generate_content()
 
-    provider = SambaNovaModelProvider(
-        model="Llama-4-Maverick-17B-128E-Instruct",
-        api_key="sambanova-secret",
-        base_url="https://sambanova.internal/v1",
-        transport=sambanova_transport(handler),
+    provider = VertexAIModelProvider(transport=vertex_transport(handler))
+    assert provider.configured() is True
+    assert (await provider.health()).status == "healthy"
+    await provider.complete(REQUEST)
+    assert captured["authorization"] == "Bearer vertex-alias"
+    assert "/projects/alias-project/" in captured["url"]
+    assert "vertex-alias" not in captured["url"]
+
+
+@pytest.mark.asyncio
+async def test_custom_location_and_base_url_are_used(no_extra_providers):
+    captured = {}
+
+    def handler(request):
+        captured["url"] = str(request.url)
+        return completed_generate_content()
+
+    provider = vertex_provider(
+        location="europe-west1",
+        base_url="https://vpce.vertex.internal",
+        transport=vertex_transport(handler),
     )
-    await provider.complete(REQUEST.model_copy(update={"model": "Llama-4-Maverick-17B-128E-Instruct"}))
-    assert captured["url"] == "https://sambanova.internal/v1/chat/completions"
+    await provider.complete(REQUEST)
+    assert captured["url"] == (
+        "https://vpce.vertex.internal/v1/projects/swarm-test/locations/europe-west1"
+        f"/publishers/google/models/{DEFAULT_MODEL}:generateContent"
+    )
 
 
-def test_sambanova_health_status_is_truthful_and_does_not_expose_key(monkeypatch, no_extra_providers):
-    status = sambanova_status()
+@pytest.mark.asyncio
+async def test_location_selects_regional_host(monkeypatch, no_extra_providers):
+    captured = {}
+
+    def handler(request):
+        captured["url"] = str(request.url)
+        return completed_generate_content()
+
+    monkeypatch.setenv("VERTEX_API_KEY", "vertex-secret")
+    monkeypatch.setenv("VERTEX_PROJECT", VERTEX_PROJECT)
+    monkeypatch.setenv("VERTEX_LOCATION", "us-west1")
+    provider = VertexAIModelProvider(transport=vertex_transport(handler))
+    await provider.complete(REQUEST)
+    assert captured["url"].startswith("https://us-west1-aiplatform.googleapis.com/")
+    assert "/locations/us-west1/" in captured["url"]
+
+
+def test_vertex_health_status_is_truthful_and_does_not_expose_key(monkeypatch, no_extra_providers):
+    status = vertex_status()
     assert status == {
         "configured": False,
         "model": DEFAULT_MODEL,
-        "base_url": "https://api.sambanova.ai/v1",
-        "provider": "sambanova",
+        "project": None,
+        "location": VERTEX_LOCATION,
+        "base_url": VERTEX_BASE_URL,
+        "provider": "vertex",
         "fallback": False,
     }
-    monkeypatch.setenv("SAMBANOVA_API_KEY", "sambanova-secret")
-    monkeypatch.setenv("SAMBANOVA_MODEL", "Llama-4-Maverick-17B-128E-Instruct")
-    configured = sambanova_status()
+    opt_in_vertex(monkeypatch, VERTEX_API_KEY="vertex-secret",
+                  VERTEX_MODEL="gemini-2.5-flash", VERTEX_LOCATION="us-west1")
+    configured = vertex_status()
     assert configured["configured"] is True
-    assert configured["model"] == "Llama-4-Maverick-17B-128E-Instruct"
+    assert configured["model"] == "gemini-2.5-flash"
+    assert configured["project"] == VERTEX_PROJECT
+    assert configured["location"] == "us-west1"
+    assert configured["base_url"] == default_vertex_base_url("us-west1")
     assert configured["fallback"] is False
-    assert "sambanova-secret" not in json.dumps(configured)
+    dumped = json.dumps(configured)
+    assert "vertex-secret" not in dumped
 
 
-def test_build_model_provider_openai_only_ignores_unconfigured_sambanova(monkeypatch, no_extra_providers):
+def test_build_model_provider_openai_only_ignores_unconfigured_vertex(monkeypatch, no_extra_providers):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     provider = build_model_provider()
     assert isinstance(provider, OpenAIResponsesModelProvider)
@@ -261,18 +370,18 @@ def test_build_model_provider_openai_only_ignores_unconfigured_sambanova(monkeyp
     assert [item.provider_id for item in router.providers] == ["openai"]
 
 
-def test_build_router_registers_sambanova_when_key_set(monkeypatch, no_extra_providers):
+def test_build_router_registers_vertex_when_configured(monkeypatch, no_extra_providers):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("SAMBANOVA_API_KEY", "sambanova-test")
+    opt_in_vertex(monkeypatch)
     stacked = build_model_provider()
     assert isinstance(stacked, FailoverModelProvider)
     assert stacked.primary.provider_id == "openai"
-    assert stacked.secondary.provider_id == "sambanova"
+    assert stacked.secondary.provider_id == "vertex"
     router = build_router()
-    assert [item.provider_id for item in router.providers] == ["openai", "sambanova"]
+    assert [item.provider_id for item in router.providers] == ["openai", "vertex"]
 
 
-def test_build_router_cloud_plus_sambanova_and_ollama(monkeypatch, no_extra_providers):
+def test_build_router_cloud_plus_vertex_and_ollama(monkeypatch, no_extra_providers):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-test")
     monkeypatch.setenv("XAI_API_KEY", "xai-test")
@@ -292,6 +401,7 @@ def test_build_router_cloud_plus_sambanova_and_ollama(monkeypatch, no_extra_prov
     monkeypatch.setenv("HUGGINGFACE_API_KEY", "huggingface-test")
     monkeypatch.setenv("CEREBRAS_API_KEY", "cerebras-test")
     monkeypatch.setenv("SAMBANOVA_API_KEY", "sambanova-test")
+    opt_in_vertex(monkeypatch)
     monkeypatch.setenv("OLLAMA_MODEL", "llama3.2")
     stacked = build_model_provider()
     assert isinstance(stacked, FailoverModelProvider)
@@ -301,84 +411,95 @@ def test_build_router_cloud_plus_sambanova_and_ollama(monkeypatch, no_extra_prov
     assert [item.provider_id for item in router.providers] == [
         "openai", "openrouter", "xai", "anthropic", "mistral", "gemini", "cohere", "deepseek",
         "together", "groq", "fireworks", "azure", "perplexity", "bedrock", "huggingface",
-        "cerebras", "sambanova", "ollama",
+        "cerebras", "sambanova", "vertex", "ollama",
     ]
     controller = build_controller()
     assert [item.provider_id for item in controller.router.providers] == [
         "openai", "openrouter", "xai", "anthropic", "mistral", "gemini", "cohere", "deepseek",
         "together", "groq", "fireworks", "azure", "perplexity", "bedrock", "huggingface",
-        "cerebras", "sambanova", "ollama",
+        "cerebras", "sambanova", "vertex", "ollama",
     ]
 
 
-def test_build_model_provider_sambanova_only(monkeypatch, no_extra_providers):
-    monkeypatch.setenv("SAMBANOVA_API_KEY", "sambanova-test")
+def test_build_model_provider_vertex_only(monkeypatch, no_extra_providers):
+    opt_in_vertex(monkeypatch)
     monkeypatch.setattr("app.llm.get_api_key", lambda: None)
     primary = OpenAIResponsesModelProvider(api_key="unused")
     monkeypatch.setattr(primary, "configured", lambda: False)
     provider = build_model_provider(primary=primary)
-    assert isinstance(provider, SambaNovaModelProvider)
+    assert isinstance(provider, VertexAIModelProvider)
     router = build_router(model_provider=provider)
-    assert [item.provider_id for item in router.providers] == ["sambanova"]
+    assert [item.provider_id for item in router.providers] == ["vertex"]
 
 
-def test_openai_plus_openrouter_still_failover_when_sambanova_set(monkeypatch, no_extra_providers):
+def test_openai_plus_openrouter_still_failover_when_vertex_set(monkeypatch, no_extra_providers):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-test")
-    monkeypatch.setenv("SAMBANOVA_API_KEY", "sambanova-test")
+    opt_in_vertex(monkeypatch)
     stacked = build_model_provider()
     assert isinstance(stacked, FailoverModelProvider)
     assert stacked.primary.provider_id == "openai"
     assert stacked.secondary.provider_id == "openrouter"
     router = build_router()
-    assert [item.provider_id for item in router.providers] == ["openai", "openrouter", "sambanova"]
+    assert [item.provider_id for item in router.providers] == ["openai", "openrouter", "vertex"]
+
+
+def test_gemini_and_vertex_are_distinct_catalog_entries(monkeypatch, no_extra_providers):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test")
+    opt_in_vertex(monkeypatch)
+    router = build_router()
+    assert [item.provider_id for item in router.providers] == ["openai", "gemini", "vertex"]
+    gemini = next(item for item in router.providers if item.provider_id == "gemini")
+    vertex = next(item for item in router.providers if item.provider_id == "vertex")
+    assert isinstance(gemini, GeminiModelProvider)
+    assert isinstance(vertex, VertexAIModelProvider)
 
 
 @pytest.mark.asyncio
-async def test_router_outage_walks_to_sambanova(no_extra_providers):
+async def test_router_outage_walks_to_vertex(no_extra_providers):
     from tests.test_router import openai_like, openrouter_like
 
     def handler(_request):
-        return completed_chat(output={"answer": "from sambanova"})
+        return completed_generate_content(output={"answer": "from vertex"})
 
     openai = openai_like(error=ProviderError("Could not reach OpenAI", FailureClass.PROVIDER_OUTAGE))
     openrouter = openrouter_like(
         error=ProviderError("Could not reach OpenRouter", FailureClass.PROVIDER_OUTAGE),
     )
-    sambanova = SambaNovaModelProvider(
-        api_key="sambanova-secret", transport=sambanova_transport(handler))
-    router = ModelRouter([openai, openrouter, sambanova])
+    vertex = vertex_provider(transport=vertex_transport(handler))
+    router = ModelRouter([openai, openrouter, vertex])
     response = await router.complete(CapabilityRequest(reasoning="high"), REQUEST)
     assert openai.calls == 1
     assert openrouter.calls == 1
-    assert response.provider == "sambanova"
-    assert response.output == {"answer": "from sambanova"}
+    assert response.provider == "vertex"
+    assert response.output == {"answer": "from vertex"}
     assert response.failover_from == "openai"
     assert response.failover_reason == "PROVIDER_OUTAGE"
 
 
 @pytest.mark.asyncio
-async def test_local_only_does_not_select_sambanova(no_extra_providers):
+async def test_local_only_does_not_select_vertex(no_extra_providers):
     from tests.test_router import openai_like, openrouter_like
 
-    sambanova = SambaNovaModelProvider(
-        api_key="sambanova-secret", transport=sambanova_transport(lambda _: completed_chat()))
-    ollama = OllamaModelProvider(model="llama3.2", transport=sambanova_transport(lambda _: completed_chat()))
-    router = ModelRouter([openai_like(), openrouter_like(), sambanova, ollama])
+    vertex = vertex_provider(transport=vertex_transport(lambda _: completed_generate_content()))
+    ollama = OllamaModelProvider(model="llama3.2", transport=vertex_transport(
+        lambda _: completed_generate_content()))
+    router = ModelRouter([openai_like(), openrouter_like(), vertex, ollama])
     decision = await router.select(CapabilityRequest(privacy="local_only"))
     assert decision.selected.provider_id == "ollama"
-    assert all(candidate.provider_id != "sambanova" for candidate in decision.chain)
+    assert all(candidate.provider_id != "vertex" for candidate in decision.chain)
 
 
 @pytest.mark.asyncio
-async def test_unconfigured_sambanova_is_skipped_and_cloud_still_serves(no_extra_providers):
+async def test_unconfigured_vertex_is_skipped_and_cloud_still_serves(no_extra_providers):
     from tests.test_router import openai_like
 
-    sambanova = SambaNovaModelProvider()
+    vertex = VertexAIModelProvider()
     openai = openai_like(output={"answer": "cloud"})
-    router = ModelRouter([openai, sambanova])
+    router = ModelRouter([openai, vertex])
     response = await router.complete(CapabilityRequest(reasoning="high"), REQUEST)
     assert response.provider == "openai"
     assert openai.calls == 1
     with pytest.raises(ProviderError, match="not configured"):
-        await sambanova.complete(REQUEST)
+        await vertex.complete(REQUEST)

@@ -94,6 +94,22 @@ def get_sambanova_api_key() -> str | None:
     return key.strip() if key else None
 
 
+def get_vertex_api_key() -> str | None:
+    """Vertex AI bearer token. VERTEX_API_KEY only.
+
+    GEMINI_API_KEY is the consumer Gemini adapter. Ambient ADC /
+    GOOGLE_APPLICATION_CREDENTIALS do not opt in.
+    """
+    key = os.getenv("VERTEX_API_KEY")
+    return key.strip() if key else None
+
+
+def get_vertex_project() -> str | None:
+    """Vertex project. Prefer VERTEX_PROJECT; GOOGLE_CLOUD_PROJECT is the GCP alias."""
+    project = os.getenv("VERTEX_PROJECT") or os.getenv("GOOGLE_CLOUD_PROJECT")
+    return project.strip() if project else None
+
+
 def get_api_key() -> str | None:
     if os.getenv("OPENAI_API_KEY"):
         return os.environ["OPENAI_API_KEY"].strip()
