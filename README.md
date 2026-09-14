@@ -34,6 +34,8 @@ With only `OPENAI_API_KEY`, behavior matches the previous OpenAI-only wiring. `R
 
 The runtime enforces mission-wide depth, agent, task, tool-call, runtime, and payment limits. Payments are simulated by default. Live mainnet settlement intentionally fails closed until a real wallet adapter is configured; private keys must remain outside the agent process. Transient `RATE_LIMIT` and `TIMEOUT` provider errors are retried with bounded exponential backoff (3 retries, 0.5s / 1s / 2s) against the same adapter. Classified `PROVIDER_OUTAGE` (or an unconfigured primary) may use OpenRouter when `OPENROUTER_API_KEY` is set. Exhausted retries or a failed failover still fail closed with `{error, failure_class}`.
 
+Mission, agent, task, and event state is durable in SQLite. A graceful server shutdown suspends active execution without converting it into a user stop; the next configured runtime resumes it against the original mission deadline. An interrupted text-only task is retained as a stopped attempt and retried under a new task ID. External tools are not connected yet, so side-effect idempotency is not claimed.
+
 ## Next integration seams
 
 - Add a fuller provider registry and capability-based routing beyond outage failover.

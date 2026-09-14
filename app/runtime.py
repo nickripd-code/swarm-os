@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from datetime import datetime
 from typing import Any, Awaitable, Callable
 from uuid import UUID
 
@@ -48,6 +49,8 @@ class SwarmRuntime:
         self.agents: dict[UUID, list[AgentSpec]] = defaultdict(list)
         self.tasks: dict[UUID, list[Task]] = defaultdict(list)
         self.stopped: set[UUID] = set()
+        self.suspending: set[UUID] = set()
+        self.started_at: dict[UUID, datetime] = {}
         self.runs: dict[UUID, asyncio.Task] = {}
         self.wallet = WalletAdapter()
         self.controller = controller or build_controller()
@@ -88,16 +91,13 @@ class SwarmRuntime:
     def hydrate(self, mission_id: UUID) -> None:
         if self.agents[mission_id] or self.tasks[mission_id]:
             return
-        agents = self.store.load_agents(mission_id)
-        tasks = self.store.load_tasks(mission_id)
-        if not agents and not tasks:
-            projected = self.store.project_events(mission_id)
-            agents = [AgentSpec.model_validate(item) for item in projected["agents"]]
-            tasks = [Task.model_validate(item) for item in projected["tasks"]]
-            for agent in agents:
-                self.store.save_agent(agent)
-            for task in tasks:
-                self.store.save_task(task)
+        projection = self.store.project(mission_id)
+        agents = [AgentSpec.model_validate(item) for item in projection["agents"]]
+        tasks = [Task.model_validate(item) for item in projection["tasks"]]
+        for agent in agents:
+            self.store.save_agent(agent)
+        for task in tasks:
+            self.store.save_task(task)
         self.agents[mission_id] = agents
         self.tasks[mission_id] = tasks
 
@@ -123,7 +123,8 @@ class SwarmRuntime:
             job.add_done_callback(lambda done: self.runs.pop(mission.id, None) if self.runs.get(mission.id) is done else None)
 
     def remaining_runtime(self, mission: Mission) -> float:
-        return mission.limits.max_runtime_seconds - (utcnow() - mission.updated_at).total_seconds()
+        started = self.started_at.get(mission.id, mission.updated_at)
+        return mission.limits.max_runtime_seconds - (utcnow() - started).total_seconds()
 
     async def _sleep(self, seconds: float):
         if seconds > 0:
@@ -174,19 +175,43 @@ class SwarmRuntime:
 
     async def run(self, mission: Mission):
         root = None
+        suspended = False
         try:
             self.check_stopped(mission.id)
             self.hydrate(mission.id)
             existing = list(self.agents[mission.id])
+            history = self.store.events(mission.id)
+            started = next((event.created_at for event in history
+                            if event.event_type in {"mission.started", "mission.resumed"}), None)
+            execution_anchor = started or (mission.updated_at if existing else utcnow())
             mission.status, mission.updated_at = MissionStatus.RUNNING, utcnow()
+            self.started_at[mission.id] = execution_anchor
             self.store.save_mission(mission)
-            async with asyncio.timeout(mission.limits.max_runtime_seconds):
+            remaining = self.remaining_runtime(mission)
+            if remaining <= 0:
+                raise TimeoutError("Mission runtime limit reached before recovery")
+            async with asyncio.timeout(remaining):
                 if existing:
                     root = next((a for a in existing if a.parent_id is None), existing[0])
                     await self.emit(mission.id, "mission.resumed", {
                         "goal": mission.goal, "mode": self.controller.mode,
                         "agents": len(existing), "tasks": len(self.tasks[mission.id]),
                     })
+                    interrupted_agents: set[UUID] = set()
+                    for task in self.tasks[mission.id]:
+                        if task.status not in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+                            continue
+                        task.status = TaskStatus.STOPPED
+                        self.store.save_task(task)
+                        interrupted_agents.add(task.agent_id)
+                        payload = task.model_dump(mode="json")
+                        payload["reason"] = "Interrupted by process restart; a new safe attempt will be created"
+                        await self.emit(mission.id, "task.stopped", payload, task.agent_id)
+                    for agent in existing:
+                        if agent.id in interrupted_agents:
+                            agent.status = AgentStatus.CREATED
+                            agent.output = None
+                            await self.agent_status(agent, AgentStatus.CREATED)
                     if root.status in {AgentStatus.CREATED, AgentStatus.RUNNING, AgentStatus.BLOCKED}:
                         await self.agent_status(root, AgentStatus.RUNNING)
                     await self._run_tasks(mission)
@@ -242,8 +267,13 @@ class SwarmRuntime:
                 if root:
                     await self.agent_status(root, AgentStatus.COMPLETED if mission.status == MissionStatus.COMPLETED else AgentStatus.BLOCKED)
         except asyncio.CancelledError:
-            mission.status = MissionStatus.STOPPED
-            mission.result = {"reason": "Execution stopped"}
+            if mission.id in self.suspending:
+                suspended = True
+                mission.status = MissionStatus.RUNNING
+                mission.result = None
+            else:
+                mission.status = MissionStatus.STOPPED
+                mission.result = {"reason": "Execution stopped"}
         except TimeoutError:
             mission.status = MissionStatus.FAILED
             mission.result = failure_payload("Mission runtime limit reached", FailureClass.TIMEOUT)
@@ -254,18 +284,26 @@ class SwarmRuntime:
             mission.status = MissionStatus.FAILED
             mission.result = failure_payload("Unexpected runtime error", FailureClass.UNKNOWN_FAILURE)
         finally:
-            for task in self.tasks[mission.id]:
-                if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
-                    task.status = TaskStatus.STOPPED if mission.status == MissionStatus.STOPPED else TaskStatus.FAILED
-                    self.store.save_task(task)
-                    await self.emit(mission.id, "task." + task.status, task.model_dump(mode="json"), task.agent_id)
-            for agent in self.agents[mission.id]:
-                if agent.status in {AgentStatus.CREATED, AgentStatus.RUNNING}:
-                    status = AgentStatus.STOPPED if mission.status == MissionStatus.STOPPED else AgentStatus.FAILED
-                    await self.agent_status(agent, status)
-            mission.updated_at = utcnow()
-            self.store.save_mission(mission)
-            await self.emit(mission.id, "mission." + mission.status, mission.result or {})
+            if suspended:
+                self.store.save_mission(mission)
+                await self.emit(mission.id, "mission.suspended", {
+                    "reason": "Runtime is shutting down; unfinished work remains recoverable",
+                    "mode": self.controller.mode,
+                })
+                self.suspending.discard(mission.id)
+            else:
+                for task in self.tasks[mission.id]:
+                    if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+                        task.status = TaskStatus.STOPPED if mission.status == MissionStatus.STOPPED else TaskStatus.FAILED
+                        self.store.save_task(task)
+                        await self.emit(mission.id, "task." + task.status, task.model_dump(mode="json"), task.agent_id)
+                for agent in self.agents[mission.id]:
+                    if agent.status in {AgentStatus.CREATED, AgentStatus.RUNNING}:
+                        status = AgentStatus.STOPPED if mission.status == MissionStatus.STOPPED else AgentStatus.FAILED
+                        await self.agent_status(agent, status)
+                mission.updated_at = utcnow()
+                self.store.save_mission(mission)
+                await self.emit(mission.id, "mission." + mission.status, mission.result or {})
 
     def _state(self, mission: Mission) -> dict[str, Any]:
         return {"goal": mission.goal, "status": mission.status,
@@ -304,7 +342,8 @@ class SwarmRuntime:
             if agent is None:
                 raise PolicyError("Persisted task references an unknown agent", FailureClass.INVALID_OUTPUT)
             await self._execute_task(mission, task, agent)
-        assigned = {t.agent_id for t in self.tasks[mission.id]}
+        assigned = {t.agent_id for t in self.tasks[mission.id]
+                    if t.status not in {TaskStatus.STOPPED, TaskStatus.FAILED}}
         for agent in list(self.agents[mission.id]):
             if agent.parent_id is None or agent.id in assigned:
                 continue
@@ -341,8 +380,23 @@ class SwarmRuntime:
 
     async def stop_all(self) -> list[UUID]:
         async with self.lock:
-            ids = list(self.runs)
+            ids = list(dict.fromkeys([
+                *(mid for mid, job in self.runs.items() if not job.done()),
+                *(mission.id for mission in self.store.list_missions()
+                  if mission.status in RESUMABLE),
+            ]))
             await asyncio.gather(*(self.stop(mid) for mid in ids))
+        return ids
+
+    async def suspend_all(self) -> list[UUID]:
+        """Cancel local jobs during shutdown without turning a restart into user STOP."""
+        async with self.lock:
+            ids = [mid for mid, job in self.runs.items() if not job.done()]
+            self.suspending.update(ids)
+            jobs = [self.runs[mid] for mid in ids]
+            for job in jobs:
+                job.cancel()
+            await asyncio.gather(*jobs, return_exceptions=True)
         return ids
 
     async def create_payment(self, mission: Mission, recipient: str, amount: float, reason: str) -> PaymentIntent:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -113,12 +113,18 @@ class Store:
             return [Task.model_validate_json(row.payload) for row in rows]
 
     def project(self, mission_id: UUID) -> dict:
-        agents = self.load_agents(mission_id)
-        tasks = self.load_tasks(mission_id)
-        if agents or tasks:
-            return {"agents": [a.model_dump(mode="json") for a in agents],
-                    "tasks": [t.model_dump(mode="json") for t in tasks]}
-        return self.project_events(mission_id)
+        agents = {str(agent.id): agent.model_dump(mode="json")
+                  for agent in self.load_agents(mission_id)}
+        tasks = {str(task.id): task.model_dump(mode="json")
+                 for task in self.load_tasks(mission_id)}
+        projected = self.project_events(mission_id)
+        for item in projected["agents"]:
+            key = str(item["id"])
+            agents.setdefault(key, item)
+        for item in projected["tasks"]:
+            key = str(item["id"])
+            tasks.setdefault(key, item)
+        return {"agents": list(agents.values()), "tasks": list(tasks.values())}
 
     def project_events(self, mission_id: UUID) -> dict:
         agents, tasks = {}, {}
@@ -153,4 +159,7 @@ class Store:
             rows = db.scalars(select(EventRow).where(EventRow.mission_id == str(mission_id)).order_by(EventRow.id)).all()
             return [MissionEvent(id=r.id, mission_id=UUID(r.mission_id), event_type=r.event_type,
                                  actor_id=UUID(r.actor_id) if r.actor_id else None,
-                                 payload=json.loads(r.payload), created_at=r.created_at) for r in rows]
+                                 payload=json.loads(r.payload),
+                                 created_at=(r.created_at.replace(tzinfo=timezone.utc)
+                                             if r.created_at.tzinfo is None else r.created_at))
+                    for r in rows]
