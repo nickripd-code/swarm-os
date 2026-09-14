@@ -164,3 +164,19 @@ async def browser_health_status() -> dict:
         "tools": health.tools,
         "fallback": False,
     }
+
+
+async def selfmod_health_status() -> dict:
+    from .selfmod import SelfModToolProvider, selfmod_production_write_opted_in, selfmod_write_opted_in
+    provider = SelfModToolProvider()
+    health = await provider.health()
+    return {
+        "configured": provider.configured(),
+        "provider": "selfmod",
+        "status": health.status,
+        "detail": health.detail,
+        "tools": health.tools,
+        "write_enabled": selfmod_write_opted_in(),
+        "production_write": selfmod_production_write_opted_in(),
+        "fallback": False,
+    }

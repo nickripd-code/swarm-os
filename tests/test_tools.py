@@ -200,6 +200,8 @@ def test_build_tool_provider_empty_without_env(monkeypatch):
     monkeypatch.delenv("MCP_SERVER_URL", raising=False)
     monkeypatch.delenv("MCP_API_KEY", raising=False)
     monkeypatch.delenv("SWARM_BROWSER", raising=False)
+    monkeypatch.delenv("SWARM_SELFMOD", raising=False)
+    monkeypatch.delenv("SWARM_SELFMOD_WRITE", raising=False)
     assert build_tool_provider() is None
 
 
@@ -207,6 +209,8 @@ def test_build_tool_provider_local_allowlist(monkeypatch):
     monkeypatch.setenv("SWARM_LOCAL_TOOLS", "echo,not-a-tool,hash.sha256")
     monkeypatch.delenv("MCP_SERVER_URL", raising=False)
     monkeypatch.delenv("SWARM_BROWSER", raising=False)
+    monkeypatch.delenv("SWARM_SELFMOD", raising=False)
+    monkeypatch.delenv("SWARM_SELFMOD_WRITE", raising=False)
     provider = build_tool_provider()
     assert [spec.name for spec in provider.list_tools()] == ["echo", "hash.sha256"]
     assert "not-a-tool" not in LOCAL_TOOL_CATALOG
