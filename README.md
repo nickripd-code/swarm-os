@@ -12,15 +12,31 @@ py -m venv .venv
 .\.venv\Scripts\python -m uvicorn app.main:app --reload
 ```
 
-Open http://127.0.0.1:8000. The mission controller uses the OpenAI Responses API through the provider-independent contract in `app/providers.py` when `OPENAI_API_KEY` is configured and fails closed when it is not (no demo substitute). The default model is `gpt-6-astra`; override it with `SWARM_MODEL` when needed.
+Open http://127.0.0.1:8000. The mission controller talks to models through the provider-independent contract in `app/providers.py`. There is no demo substitute: if no provider is configured or every configured provider fails, the mission fails closed.
+
+## Model providers
+
+Set keys in the environment only. Never commit them, log them, or return them over HTTP.
+
+| Variable | Role |
+| --- | --- |
+| `OPENAI_API_KEY` | Primary provider. Existing OpenAI Responses path when this is the only key set. |
+| `SWARM_MODEL` | OpenAI model id (default `gpt-6-astra`). |
+| `SWARM_REASONING_EFFORT` | Reasoning effort for both adapters (default `high`). |
+| `OPENROUTER_API_KEY` | Secondary OpenAI-compatible gateway (OpenRouter). Used when the primary is unconfigured/unavailable or raises `PROVIDER_OUTAGE`. |
+| `OPENROUTER_MODEL` | OpenRouter model id (default `openai/gpt-4o`). |
+| `OPENROUTER_BASE_URL` | Optional Chat Completions base URL (default `https://openrouter.ai/api/v1`). |
+| `OPENROUTER_SITE_URL` / `OPENROUTER_TITLE` | Optional OpenRouter attribution headers. |
+
+With only `OPENAI_API_KEY`, behavior matches the previous OpenAI-only wiring. `RATE_LIMIT` and `TIMEOUT` still retry on the same adapter; they do not fail over. Auth, policy, and invalid-output errors also stay on the provider that raised them. If both providers are down or neither is configured, the result is `{error, failure_class}` — never `FallbackController`.
 
 ## Safety defaults
 
-The runtime enforces mission-wide depth, agent, task, tool-call, runtime, and payment limits. Payments are simulated by default. Live mainnet settlement intentionally fails closed until a real wallet adapter is configured; private keys must remain outside the agent process. Transient `RATE_LIMIT` and `TIMEOUT` provider errors are retried with bounded exponential backoff (3 retries, 0.5s / 1s / 2s) against the same OpenAI adapter. If retries exhaust, the mission fails closed with `{error, failure_class}` — no demo fallback.
+The runtime enforces mission-wide depth, agent, task, tool-call, runtime, and payment limits. Payments are simulated by default. Live mainnet settlement intentionally fails closed until a real wallet adapter is configured; private keys must remain outside the agent process. Transient `RATE_LIMIT` and `TIMEOUT` provider errors are retried with bounded exponential backoff (3 retries, 0.5s / 1s / 2s) against the same adapter. Classified `PROVIDER_OUTAGE` (or an unconfigured primary) may use OpenRouter when `OPENROUTER_API_KEY` is set. Exhausted retries or a failed failover still fail closed with `{error, failure_class}`.
 
 ## Next integration seams
 
-- Add a provider registry/router and a real second provider adapter behind the existing model contract.
+- Add a fuller provider registry and capability-based routing beyond outage failover.
 - Add concrete research, code, messaging, and HTTP tool adapters.
 - Implement an isolated EVM wallet service behind `WalletAdapter` with recipient/asset/amount policy checks.
 

@@ -10,6 +10,11 @@ import sys
 TARGET = "AgentSwarm/OpenAI/" + hashlib.sha256(str(Path(__file__).resolve().parent.parent).lower().encode()).hexdigest()[:20]
 
 
+def get_openrouter_api_key() -> str | None:
+    key = os.getenv("OPENROUTER_API_KEY")
+    return key.strip() if key else None
+
+
 def get_api_key() -> str | None:
     if os.getenv("OPENAI_API_KEY"):
         return os.environ["OPENAI_API_KEY"].strip()
