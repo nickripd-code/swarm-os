@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID
@@ -21,6 +22,7 @@ from .health import (
     workspace_health_status, xai_status,
 )
 from .tools import tools_status
+from .mission_jobs import build_mission_worker_pool
 
 BASE = Path(__file__).parent
 
@@ -28,13 +30,24 @@ BASE = Path(__file__).parent
 @asynccontextmanager
 async def lifespan(app):
     await runtime.resume_incomplete()
-    yield
-    await runtime.suspend_all()
+    try:
+        if process_pool is not None:
+            await asyncio.to_thread(process_pool.start)
+    except BaseException:
+        await runtime.suspend_all()
+        raise
+    try:
+        yield
+    finally:
+        await runtime.suspend_all()
+        if process_pool is not None:
+            await asyncio.to_thread(process_pool.stop)
 
 
 app = FastAPI(title="Agent Swarm", version="0.2.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
-store = Store(str(BASE.parent / "swarm.db"))
+database_path = Path(os.environ.get("SWARM_DATABASE_PATH", BASE.parent / "swarm.db")).resolve()
+store = Store(str(database_path))
 clients: dict[UUID, set[WebSocket]] = {}
 
 
@@ -44,7 +57,8 @@ async def broadcast(event):
         except Exception: clients[event.mission_id].discard(ws)
 
 
-runtime = SwarmRuntime(store, broadcast)
+process_pool = build_mission_worker_pool(database_path)
+runtime = SwarmRuntime(store, broadcast, process_tasks=process_pool is not None)
 
 
 @app.get("/", include_in_schema=False)
@@ -70,6 +84,11 @@ async def health():
             "browser": await browser_health_status(),
             "selfmod": await selfmod_health_status(),
             "workspace": await workspace_health_status(),
+            "process_workers": {
+                "enabled": process_pool is not None,
+                "running": bool(process_pool and process_pool.running),
+                "workers": len(process_pool.workers) if process_pool else 0,
+            },
             "active_missions": len(runtime.runs)}
 
 

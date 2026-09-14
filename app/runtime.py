@@ -11,6 +11,12 @@ from .events import EventType, event_type_for_mission, event_type_for_task
 from .org import OrganizationDesigner, is_org_action
 from .leases import IdempotencyError, IdempotencyGuard, LeaseConflict, LeaseError, WorkerLeases
 from .queue import QueueError, WorkQueue
+from .mission_jobs import (
+    MISSION_AGENT_TASK_KIND,
+    mission_task_job_id,
+    mission_task_payload,
+    parse_mission_task_item,
+)
 from .models import (
     AgentSpec, AgentStatus, FailureClass, Mission, MissionEvent,
     MissionStatus, PaymentIntent, PendingQuestion, Task, TaskStatus, utcnow,
@@ -28,6 +34,7 @@ from .evidence import public_evidence_runs
 from .verifier import public_verification, verification_accepted
 from .payments import PaymentError, PaymentProvider, resolve_payment_provider
 from .workspace import WorkspaceError, WorkspaceProvider, build_workspace_provider
+from .workers import WorkerPoolError
 
 TERMINAL = {MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.STOPPED, MissionStatus.BLOCKED}
 RESUMABLE = {MissionStatus.PENDING, MissionStatus.RUNNING, MissionStatus.WAITING}
@@ -66,7 +73,10 @@ class SwarmRuntime:
                  tools: ToolProvider | None | object = _UNSET,
                  resources: ResourceScheduler | None = None,
                  workspaces: WorkspaceProvider | None | object = _UNSET,
-                 memory: MemoryProvider | None | object = _UNSET):
+                 memory: MemoryProvider | None | object = _UNSET,
+                 process_tasks: bool = False,
+                 durable_controls: bool = False,
+                 durable_task_id: UUID | None = None):
         self.store, self.sink = store, sink
         self.agents: dict[UUID, list[AgentSpec]] = defaultdict(list)
         self.tasks: dict[UUID, list[Task]] = defaultdict(list)
@@ -96,6 +106,10 @@ class SwarmRuntime:
         self.org = OrganizationDesigner()
         self.workspaces = build_workspace_provider() if workspaces is _UNSET else workspaces
         self.memory = StoreMemoryProvider(store) if memory is _UNSET else memory
+        self.process_tasks = process_tasks
+        self.durable_controls = durable_controls
+        self.durable_task_id = durable_task_id
+        self._observed_process_jobs: set[str] = set()
 
     def _owner(self) -> str:
         return str(self.worker_id)
@@ -172,10 +186,13 @@ class SwarmRuntime:
             "owner_id": self._owner(),
         })
 
-    async def enqueue_job(self, mission: Mission, kind: str, payload: dict[str, Any] | None = None):
+    async def enqueue_job(self, mission: Mission, kind: str, payload: dict[str, Any] | None = None,
+                          *, item_id: str | None = None):
         """Persist a durable work item. Does not claim or complete it."""
         try:
-            item = self.queue.enqueue(mission_id=str(mission.id), kind=kind, payload=payload)
+            item = self.queue.enqueue(
+                mission_id=str(mission.id), kind=kind, payload=payload, item_id=item_id,
+            )
         except QueueError as exc:
             raise PolicyError(str(exc), FailureClass.INVALID_OUTPUT) from exc
         await self.emit(mission.id, EventType.JOB_ENQUEUED, {
@@ -300,6 +317,30 @@ class SwarmRuntime:
             await self.emit(mission_id, EventType.JUDGE_DECISION, judge, actor_id)
 
     def check_stopped(self, mission_id: UUID):
+        if self.durable_controls:
+            saved = self.store.get_mission(mission_id)
+            if saved is None:
+                raise PolicyError("Mission disappeared during worker execution",
+                                  FailureClass.INVALID_OUTPUT)
+            latest_control = None
+            for event in reversed(self.store.events(mission_id)):
+                if event.event_type in {
+                    EventType.MISSION_STOPPED,
+                    EventType.MISSION_FAILED,
+                    EventType.MISSION_COMPLETED,
+                    EventType.MISSION_BLOCKED,
+                }:
+                    raise asyncio.CancelledError()
+                if event.event_type in {
+                    EventType.MISSION_PAUSED,
+                    EventType.MISSION_RESUMED,
+                }:
+                    latest_control = event.event_type
+                    break
+            if saved.status == MissionStatus.PAUSED or latest_control == EventType.MISSION_PAUSED:
+                raise PauseRequested()
+            if saved.status in TERMINAL:
+                raise asyncio.CancelledError()
         if mission_id in self.stopped:
             raise asyncio.CancelledError()
         if mission_id in self.pausing:
@@ -307,6 +348,33 @@ class SwarmRuntime:
 
     def check_agent(self, mission_id: UUID, agent_id: UUID):
         self.check_stopped(mission_id)
+        if self.durable_controls:
+            if any(
+                event.event_type == EventType.AGENT_KILLED
+                and str(event.payload.get("agent_id") or event.payload.get("id")) == str(agent_id)
+                for event in self.store.events(mission_id)
+            ):
+                raise asyncio.CancelledError()
+            saved = next((agent for agent in self.store.load_agents(mission_id)
+                          if agent.id == agent_id), None)
+            if saved is None:
+                raise PolicyError("Agent disappeared during worker execution",
+                                  FailureClass.INVALID_OUTPUT)
+            if saved.status == AgentStatus.PAUSED:
+                raise PauseRequested()
+            if saved.status in {AgentStatus.COMPLETED, AgentStatus.FAILED, AgentStatus.STOPPED}:
+                raise asyncio.CancelledError()
+            if self.durable_task_id is not None:
+                saved_task = next(
+                    (task for task in self.store.load_tasks(mission_id)
+                     if task.id == self.durable_task_id),
+                    None,
+                )
+                if saved_task is None:
+                    raise PolicyError("Task disappeared during worker execution",
+                                      FailureClass.INVALID_OUTPUT)
+                if saved_task.status not in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+                    raise asyncio.CancelledError()
         if agent_id in self.killed_agents[mission_id]:
             raise asyncio.CancelledError()
 
@@ -1259,6 +1327,108 @@ class SwarmRuntime:
         finally:
             await self.release_work(mission, "task", str(task.id))
 
+    def _refresh_process_task(self, mission_id: UUID, task_id: UUID,
+                              agent_id: UUID) -> tuple[Task, AgentSpec]:
+        saved_task = next((task for task in self.store.load_tasks(mission_id)
+                           if task.id == task_id), None)
+        saved_agent = next((agent for agent in self.store.load_agents(mission_id)
+                            if agent.id == agent_id), None)
+        if saved_task is None or saved_agent is None:
+            raise PolicyError("Process worker result references missing durable state",
+                              FailureClass.INVALID_OUTPUT)
+        for index, task in enumerate(self.tasks[mission_id]):
+            if task.id == task_id:
+                self.tasks[mission_id][index] = saved_task
+                break
+        for index, agent in enumerate(self.agents[mission_id]):
+            if agent.id == agent_id:
+                self.agents[mission_id][index] = saved_agent
+                break
+        return saved_task, saved_agent
+
+    async def _emit_process_job_terminal(self, mission: Mission, item) -> None:
+        if item.id in self._observed_process_jobs:
+            return
+        self._observed_process_jobs.add(item.id)
+        event_type = EventType.JOB_COMPLETED if item.status == "completed" else EventType.JOB_FAILED
+        payload = {
+            "id": item.id,
+            "kind": item.kind,
+            "status": item.status,
+            "attempt": item.attempt,
+            "result": item.result or {},
+        }
+        if item.status == "failed":
+            payload.update(item.result or {})
+        await self.emit(mission.id, event_type, payload)
+        if item.lease_id and item.owner_id:
+            await self.emit(mission.id, EventType.LEASE_RELEASED, {
+                "scope": "job",
+                "scope_id": item.id,
+                "lease_id": item.lease_id,
+                "owner_id": item.owner_id,
+            })
+
+    async def _execute_process_task(self, mission: Mission, task: Task, agent: AgentSpec) -> None:
+        try:
+            payload = mission_task_payload(mission, task, agent)
+        except WorkerPoolError as exc:
+            raise PolicyError(str(exc), FailureClass.INVALID_OUTPUT) from exc
+        item_id = mission_task_job_id(task.id)
+        item = self.queue.get(item_id)
+        if item is None:
+            item = await self.enqueue_job(
+                mission,
+                MISSION_AGENT_TASK_KIND,
+                payload,
+                item_id=item_id,
+            )
+        else:
+            try:
+                ids = parse_mission_task_item(item)
+            except WorkerPoolError as exc:
+                raise PolicyError(str(exc), FailureClass.INVALID_OUTPUT) from exc
+            if ids.task_id != task.id or ids.agent_id != agent.id:
+                raise PolicyError("Durable process job does not match the requested task",
+                                  FailureClass.INVALID_OUTPUT)
+
+        while item.status in {"pending", "claimed"}:
+            self.check_agent(mission.id, agent.id)
+            await asyncio.sleep(0.05)
+            item = self.queue.get(item_id)
+            if item is None:
+                raise PolicyError("Durable process job disappeared",
+                                  FailureClass.INVALID_OUTPUT)
+
+        saved_task, _ = self._refresh_process_task(mission.id, task.id, agent.id)
+        await self._emit_process_job_terminal(mission, item)
+        if item.status == "failed":
+            result = item.result or {}
+            try:
+                failure_class = FailureClass(result.get("failure_class"))
+            except (TypeError, ValueError):
+                failure_class = FailureClass.UNKNOWN_FAILURE
+            raise PolicyError(
+                str(result.get("error") or "Process worker failed the mission task"),
+                failure_class,
+            )
+        if item.status != "completed" or not isinstance(item.result, dict):
+            raise PolicyError("Process worker job ended in an invalid state",
+                              FailureClass.INVALID_OUTPUT)
+        expected = {
+            "mission_id": str(mission.id),
+            "task_id": str(task.id),
+            "agent_id": str(agent.id),
+            "status": str(saved_task.status),
+            "output": saved_task.output or {},
+        }
+        if item.result != expected or saved_task.status not in {
+            TaskStatus.COMPLETED,
+            TaskStatus.BLOCKED,
+        }:
+            raise PolicyError("Process worker result does not match durable task state",
+                              FailureClass.INVALID_OUTPUT)
+
     async def _run_tasks(self, mission: Mission):
         await self._assign_unassigned_tasks(mission)
         by_id = {a.id: a for a in self.agents[mission.id]}
@@ -1270,7 +1440,12 @@ class SwarmRuntime:
             agent = by_id.get(task.agent_id)
             if agent is None:
                 raise PolicyError("Persisted task references an unknown agent", FailureClass.INVALID_OUTPUT)
-            job = asyncio.create_task(self._execute_task(mission, task, agent))
+            execution = (
+                self._execute_process_task(mission, task, agent)
+                if self.process_tasks
+                else self._execute_task(mission, task, agent)
+            )
+            job = asyncio.create_task(execution)
             self.agent_jobs[(mission.id, agent.id)] = job
             try:
                 await job

@@ -23,6 +23,7 @@ from uuid import uuid4
 from sqlalchemy.exc import OperationalError
 
 from .leases import LeaseConflict, LeaseError
+from .models import FailureClass
 from .queue import QueueError, WorkItem, WorkQueue
 from .store import Store
 
@@ -31,7 +32,7 @@ DEFAULT_POLL_INTERVAL_SECONDS = 0.05
 DEFAULT_LEASE_TTL_SECONDS = 30.0
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 5.0
 
-WorkHandler = Callable[[WorkItem], dict[str, Any] | None]
+WorkHandler = Callable[..., dict[str, Any] | None]
 
 
 class WorkerPoolError(RuntimeError):
@@ -42,6 +43,16 @@ class WorkerPoolError(RuntimeError):
 class WorkerIdentity:
     pid: int
     owner_id: str
+
+
+@dataclass(frozen=True)
+class WorkerContext:
+    """Trusted process configuration available to handlers, never job payload data."""
+
+    store: Store
+    queue: WorkQueue
+    owner_id: str
+    database_path: str
 
 
 @dataclass(frozen=True)
@@ -71,8 +82,24 @@ def _load_handler(reference: str) -> WorkHandler:
     return value
 
 
-def _invoke_handler(handler: WorkHandler, item: WorkItem) -> dict[str, Any]:
-    result = handler(item)
+def _invoke_handler(
+    handler: WorkHandler,
+    item: WorkItem,
+    context: WorkerContext,
+) -> dict[str, Any]:
+    signature = inspect.signature(handler)
+    try:
+        signature.bind(item, context)
+    except TypeError:
+        try:
+            signature.bind(item)
+        except TypeError as exc:
+            raise WorkerPoolError(
+                "Work handler must accept (item) or (item, context)"
+            ) from exc
+        result = handler(item)
+    else:
+        result = handler(item, context)
     if inspect.isawaitable(result):
         result = asyncio.run(result)
     if result is None:
@@ -85,13 +112,18 @@ def _invoke_handler(handler: WorkHandler, item: WorkItem) -> dict[str, Any]:
 def _report_failure(queue: WorkQueue, item: WorkItem, owner_id: str, exc: BaseException) -> None:
     """Persist a real failure when the owner still holds a live lease."""
     error = str(exc).strip() or type(exc).__name__
+    raw_class = getattr(exc, "failure_class", FailureClass.TOOL_FAILURE)
+    try:
+        failure_class = str(FailureClass(raw_class))
+    except (TypeError, ValueError):
+        failure_class = str(FailureClass.UNKNOWN_FAILURE)
     try:
         queue.fail(
             item.id,
             owner_id,
             {
                 "error": error[:1000],
-                "failure_class": "TOOL_FAILURE",
+                "failure_class": failure_class,
             },
             mission_id=item.mission_id,
         )
@@ -106,12 +138,13 @@ def _execute_claimed(
     owner_id: str,
     handler: WorkHandler,
     config: _WorkerConfig,
+    context: WorkerContext,
 ) -> None:
     lease_live = True
     failure: BaseException | None = None
     result: dict[str, Any] | None = None
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="swarm-job") as executor:
-        future = executor.submit(_invoke_handler, handler, item)
+        future = executor.submit(_invoke_handler, handler, item, context)
         while True:
             try:
                 result = future.result(timeout=config.heartbeat_interval_seconds)
@@ -151,6 +184,12 @@ def _worker_main(config: _WorkerConfig, stop_event: Any, ready_queue: Any) -> No
     try:
         store = Store(config.database_path)
         queue = WorkQueue(store)
+        context = WorkerContext(
+            store=store,
+            queue=queue,
+            owner_id=owner_id,
+            database_path=config.database_path,
+        )
         handlers = {kind: _load_handler(reference) for kind, reference in config.handlers}
         ready_queue.put(("ready", pid, owner_id))
         while not stop_event.is_set():
@@ -177,7 +216,7 @@ def _worker_main(config: _WorkerConfig, stop_event: Any, ready_queue: Any) -> No
                     WorkerPoolError(f"No handler is registered for work kind {item.kind!r}"),
                 )
                 continue
-            _execute_claimed(queue, item, owner_id, handler, config)
+            _execute_claimed(queue, item, owner_id, handler, config, context)
     except BaseException as exc:
         message = str(exc).strip() or type(exc).__name__
         ready_queue.put(("fatal", pid, message[:1000]))
