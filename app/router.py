@@ -61,9 +61,18 @@ class RouteCandidate(BaseModel):
         return selection_rationale(self)
 
 
+class RouteRejection(BaseModel):
+    """A credential-safe explanation of why a provider/model was not eligible."""
+
+    provider_id: str
+    model: str | None = None
+    reasons: list[str] = Field(default_factory=list)
+
+
 class RouteDecision(BaseModel):
     selected: RouteCandidate
     fallbacks: list[RouteCandidate] = Field(default_factory=list)
+    rejected: list[RouteRejection] = Field(default_factory=list)
     request: CapabilityRequest
 
     @property
@@ -73,6 +82,21 @@ class RouteDecision(BaseModel):
     @property
     def rationale(self) -> str:
         return self.selected.rationale
+
+
+class NoRouteError(ProviderError):
+    """A classified no-route result with structured, safe diagnostics."""
+
+    def __init__(self, failure_class: FailureClass, rejections: list[RouteRejection]):
+        self.rejections = list(rejections)
+        details = "; ".join(
+            f"{item.provider_id}/{item.model or '*'}: {', '.join(item.reasons)}"
+            for item in self.rejections
+        )
+        message = "No registered model satisfies the requested capabilities"
+        if details:
+            message = f"{message} ({details})"
+        super().__init__(message, failure_class)
 
 
 class ProviderHistory:
@@ -148,31 +172,38 @@ def _level_ok(have: str, want: str) -> bool:
     return LEVEL_RANK.get(have, 0) >= LEVEL_RANK.get(want, 0)
 
 
-def _hard_reject(descriptor: ModelDescriptor, request: CapabilityRequest,
-                 estimate: CostEstimate, health: str) -> str | None:
+def _hard_rejection_reasons(descriptor: ModelDescriptor, request: CapabilityRequest,
+                            estimate: CostEstimate, health: str) -> list[str]:
+    reasons: list[str] = []
     if request.privacy == "local_only" and not descriptor.local:
-        return "privacy requires a local model"
+        reasons.append("privacy requires a local model")
     caps = descriptor.capabilities
     if request.vision and caps.vision is False:
-        return "vision is not available"
+        reasons.append("vision is not available")
     if request.tool_use == "required" and caps.tool_use is False:
-        return "tool use is not available"
+        reasons.append("tool use is not available")
     if caps.structured_outputs is False:
-        return "structured outputs are not available"
+        reasons.append("structured outputs are not available")
     if not _level_ok(caps.reasoning, request.reasoning):
-        return "reasoning capability is below the request"
+        reasons.append("reasoning capability is below the request")
     if not _level_ok(caps.coding, request.coding):
-        return "coding capability is below the request"
+        reasons.append("coding capability is below the request")
     context_tokens = descriptor.context_limits.context_tokens
     if request.min_context_tokens is not None:
         if context_tokens is None or context_tokens < request.min_context_tokens:
-            return "context window is unknown or below the request"
+            reasons.append("context window is unknown or below the request")
     if request.max_cost is not None:
         if not estimate.known or estimate.estimated_cost is None or estimate.estimated_cost > request.max_cost:
-            return "cost is unknown or above the request"
+            reasons.append("cost is unknown or above the request")
     if health == "unconfigured":
-        return "provider is not configured"
-    return None
+        reasons.append("provider is not configured")
+    return reasons
+
+
+def _hard_reject(descriptor: ModelDescriptor, request: CapabilityRequest,
+                 estimate: CostEstimate, health: str) -> str | None:
+    reasons = _hard_rejection_reasons(descriptor, request, estimate, health)
+    return reasons[0] if reasons else None
 
 
 def _cost_signal(descriptor: ModelDescriptor,
@@ -283,6 +314,7 @@ class ModelRouter:
         self.last_decision: RouteDecision | None = None
         self._history: dict[str, ProviderHistory] = {}
         self._last_catalog: list[tuple[ModelProvider, ModelDescriptor, str]] = []
+        self._last_rejections: list[RouteRejection] = []
 
     @classmethod
     def wrap(cls, provider: ModelProvider) -> "ModelRouter":
@@ -324,17 +356,31 @@ class ModelRouter:
 
     async def catalog(self) -> list[tuple[ModelProvider, ModelDescriptor, str]]:
         catalog: list[tuple[ModelProvider, ModelDescriptor, str]] = []
+        rejections: list[RouteRejection] = []
         for provider in self.providers:
             if not provider_configured(provider):
                 continue
             health = await self._health(provider)
-            models = await provider.list_models()
+            try:
+                models = await provider.list_models()
+            except ProviderError as exc:
+                rejections.append(RouteRejection(
+                    provider_id=provider.provider_id,
+                    reasons=[f"catalog failed: {exc.failure_class.value}"],
+                ))
+                continue
             if not models:
                 synthetic = self._synthetic_descriptor(provider)
                 models = [synthetic] if synthetic else []
+            if not models:
+                rejections.append(RouteRejection(
+                    provider_id=provider.provider_id,
+                    reasons=["catalog returned no models and no default model is configured"],
+                ))
             for descriptor in models:
                 catalog.append((provider, descriptor, health.status))
         self._last_catalog = catalog
+        self._last_rejections = rejections
         return catalog
 
     def descriptor_for(self, provider_id: str | None, model: str | None) -> ModelDescriptor | None:
@@ -356,14 +402,28 @@ class ModelRouter:
             return None
         return descriptor.price_input_per_million, descriptor.price_output_per_million
 
-    async def select(self, request: CapabilityRequest) -> RouteDecision:
+    async def select(
+        self,
+        request: CapabilityRequest,
+        model_request: ModelRequest | None = None,
+    ) -> RouteDecision:
         if not self.configured():
             raise ProviderError("No model provider is configured", FailureClass.AUTHORIZATION_REQUIRED)
         ranked: list[RouteCandidate] = []
         costs: list[tuple[float | None, str]] = []
         for index, (provider, descriptor, health) in enumerate(await self.catalog()):
-            probe = ModelRequest(model=descriptor.model, instructions="route", input="")
+            probe = model_request or ModelRequest(model=descriptor.model, instructions="route", input="")
+            if probe.model != descriptor.model:
+                probe = probe.model_copy(update={"model": descriptor.model})
             estimate = provider.estimate_cost(probe)
+            rejected = _hard_rejection_reasons(descriptor, request, estimate, health)
+            if rejected:
+                self._last_rejections.append(RouteRejection(
+                    provider_id=provider.provider_id,
+                    model=descriptor.model,
+                    reasons=rejected,
+                ))
+                continue
             scored = score_model(
                 descriptor, request, health=health, index=index, estimate=estimate,
                 history=self.history_for(provider.provider_id),
@@ -379,11 +439,21 @@ class ModelRouter:
         _apply_relative_cost(ranked, costs)
         ranked.sort(key=lambda candidate: candidate.score, reverse=True)
         if not ranked:
-            raise ProviderError(
-                "No registered model satisfies the requested capabilities",
-                FailureClass.CAPABILITY_MISMATCH,
+            discovery_failed = any(
+                any(reason.startswith("catalog failed:") for reason in item.reasons)
+                for item in self._last_rejections
             )
-        decision = RouteDecision(selected=ranked[0], fallbacks=ranked[1:], request=request)
+            failure_class = (
+                FailureClass.PROVIDER_OUTAGE if discovery_failed
+                else FailureClass.CAPABILITY_MISMATCH
+            )
+            raise NoRouteError(failure_class, self._last_rejections)
+        decision = RouteDecision(
+            selected=ranked[0],
+            fallbacks=ranked[1:],
+            rejected=self._last_rejections,
+            request=request,
+        )
         self.last_decision = decision
         return decision
 
@@ -397,7 +467,7 @@ class ModelRouter:
 
     async def complete(self, capability: CapabilityRequest, request: ModelRequest) -> ModelResponse:
         """Pick by capability, then walk the fallback chain on PROVIDER_OUTAGE only."""
-        decision = await self.select(capability)
+        decision = await self.select(capability, request)
         primary = decision.selected
         last_error: ProviderError | None = None
         failover_reason: str | None = None

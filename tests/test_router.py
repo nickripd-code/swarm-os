@@ -7,7 +7,8 @@ from app.providers import (
     ModelProvider, ModelRequest, ModelResponse, ModelUsage, ProviderError, ProviderHealth,
 )
 from app.router import (
-    CapabilityRequest, ModelRouter, ProviderHistory, capability_request_for, score_model,
+    CapabilityRequest, ModelRouter, NoRouteError, ProviderHistory,
+    capability_request_for, score_model,
 )
 from app.runtime import SwarmRuntime
 from app.store import Store
@@ -23,7 +24,8 @@ class FakeModelProvider(ModelProvider):
                  capabilities: ModelCapabilities | None = None,
                  context_tokens: int | None = None, local: bool = False,
                  price_output_per_million: float | None = None,
-                 estimated_cost: float | None = None, cost_known: bool = False):
+                 estimated_cost: float | None = None, cost_known: bool = False,
+                 list_error: ProviderError | None = None):
         self.provider_id = provider_id
         self.model = model
         self._configured = configured
@@ -37,14 +39,18 @@ class FakeModelProvider(ModelProvider):
         self.price_output_per_million = price_output_per_million
         self._estimated_cost = estimated_cost
         self._cost_known = cost_known
+        self.list_error = list_error
         self.calls = 0
         self.requested_models: list[str] = []
+        self.estimated_requests: list[ModelRequest] = []
         self._usage = ModelUsage()
 
     def configured(self) -> bool:
         return self._configured
 
     async def list_models(self):
+        if self.list_error:
+            raise self.list_error
         return [ModelDescriptor(
             provider=self.provider_id,
             model=self.model,
@@ -66,6 +72,7 @@ class FakeModelProvider(ModelProvider):
         return ProviderHealth(provider=self.provider_id, status=self._health)
 
     def estimate_cost(self, request: ModelRequest) -> CostEstimate:
+        self.estimated_requests.append(request)
         return CostEstimate(
             provider=self.provider_id, model=request.model,
             estimated_cost=self._estimated_cost, known=self._cost_known,
@@ -215,6 +222,73 @@ async def test_router_excludes_models_over_max_cost():
     decision = await router.select(CapabilityRequest(reasoning="high", max_cost=0.4))
     assert decision.selected.provider_id == "openrouter"
     assert decision.fallbacks == []
+
+
+@pytest.mark.asyncio
+async def test_complete_estimates_cost_from_the_real_request():
+    openai = openai_like(estimated_cost=0.05, cost_known=True)
+    router = ModelRouter([openai])
+    request = ModelRequest(
+        model="caller-default",
+        instructions="Use the complete mission context",
+        input={"goal": "a real request with payload"},
+        max_output_tokens=321,
+    )
+    await router.complete(CapabilityRequest(reasoning="high", max_cost=0.10), request)
+    assert len(openai.estimated_requests) == 1
+    estimate_request = openai.estimated_requests[0]
+    assert estimate_request.model == "gpt-6-astra"
+    assert estimate_request.instructions == request.instructions
+    assert estimate_request.input == request.input
+    assert estimate_request.max_output_tokens == 321
+
+
+@pytest.mark.asyncio
+async def test_catalog_failure_is_rejected_while_healthy_provider_is_routed():
+    broken = openai_like(list_error=ProviderError(
+        "sensitive upstream detail", FailureClass.PROVIDER_OUTAGE,
+    ))
+    healthy = openrouter_like(capabilities=EQUAL_CAPS)
+    router = ModelRouter([broken, healthy])
+    decision = await router.select(CapabilityRequest(reasoning="high", coding="high"))
+    assert decision.selected.provider_id == "openrouter"
+    assert decision.rejected[0].provider_id == "openai"
+    assert decision.rejected[0].model is None
+    assert decision.rejected[0].reasons == ["catalog failed: PROVIDER_OUTAGE"]
+    assert "sensitive upstream detail" not in decision.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_all_catalog_failures_are_provider_outage_with_structured_diagnostics():
+    openai = openai_like(list_error=ProviderError("first secret", FailureClass.PROVIDER_OUTAGE))
+    openrouter = openrouter_like(list_error=ProviderError(
+        "second secret", FailureClass.PROVIDER_OUTAGE,
+    ))
+    router = ModelRouter([openai, openrouter])
+    with pytest.raises(NoRouteError) as caught:
+        await router.select(CapabilityRequest(reasoning="high"))
+    assert caught.value.failure_class == FailureClass.PROVIDER_OUTAGE
+    assert [item.provider_id for item in caught.value.rejections] == ["openai", "openrouter"]
+    assert "first secret" not in str(caught.value)
+    assert "second secret" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_capability_mismatch_has_explicit_rejection_reasons():
+    router = ModelRouter([openai_like()])
+    with pytest.raises(NoRouteError) as caught:
+        await router.select(CapabilityRequest(
+            privacy="local_only",
+            min_context_tokens=1_000_000,
+        ))
+    assert caught.value.failure_class == FailureClass.CAPABILITY_MISMATCH
+    [rejection] = caught.value.rejections
+    assert rejection.provider_id == "openai"
+    assert rejection.model == "gpt-6-astra"
+    assert rejection.reasons == [
+        "privacy requires a local model",
+        "context window is unknown or below the request",
+    ]
 
 
 @pytest.mark.asyncio
