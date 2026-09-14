@@ -9,7 +9,8 @@ from .credentials import (
 )
 from .llm import (
     DEFAULT_ANTHROPIC_BASE_URL, DEFAULT_ANTHROPIC_MODEL, DEFAULT_AZURE_OPENAI_API_VERSION,
-    DEFAULT_COHERE_BASE_URL, DEFAULT_COHERE_MODEL, DEFAULT_DEEPSEEK_BASE_URL,
+    DEFAULT_BEDROCK_MODEL, DEFAULT_BEDROCK_REGION, DEFAULT_COHERE_BASE_URL, DEFAULT_COHERE_MODEL,
+    DEFAULT_DEEPSEEK_BASE_URL,
     DEFAULT_DEEPSEEK_MODEL, DEFAULT_FIREWORKS_BASE_URL, DEFAULT_FIREWORKS_MODEL,
     DEFAULT_GEMINI_BASE_URL, DEFAULT_GEMINI_MODEL, DEFAULT_GROQ_BASE_URL,
     DEFAULT_GROQ_MODEL, DEFAULT_LLAMACPP_BASE_URL, DEFAULT_MODEL,
@@ -19,7 +20,8 @@ from .llm import (
     DEFAULT_TOGETHER_MODEL, DEFAULT_VLLM_BASE_URL,
     DEFAULT_XAI_MODEL, DEFAULT_XAI_BASE_URL,
     LlamaCppModelProvider, OllamaModelProvider, VllmModelProvider,
-    azure_openai_opted_in, llamacpp_opted_in, ollama_opted_in, vllm_opted_in,
+    azure_openai_opted_in, bedrock_opted_in, default_bedrock_base_url, llamacpp_opted_in,
+    ollama_opted_in, vllm_opted_in,
 )
 
 
@@ -114,6 +116,16 @@ def perplexity_status() -> dict:
             "model": os.getenv("PERPLEXITY_MODEL", DEFAULT_PERPLEXITY_MODEL),
             "base_url": os.getenv("PERPLEXITY_BASE_URL", DEFAULT_PERPLEXITY_BASE_URL),
             "provider": "perplexity", "fallback": False}
+
+
+def bedrock_status() -> dict:
+    region = (os.getenv("BEDROCK_REGION") or DEFAULT_BEDROCK_REGION).strip() or DEFAULT_BEDROCK_REGION
+    base_url = (os.getenv("BEDROCK_BASE_URL") or default_bedrock_base_url(region)).rstrip("/")
+    return {"configured": bedrock_opted_in(),
+            "model": os.getenv("BEDROCK_MODEL", DEFAULT_BEDROCK_MODEL),
+            "region": region,
+            "base_url": base_url,
+            "provider": "bedrock", "fallback": False}
 
 
 def ollama_status() -> dict:
