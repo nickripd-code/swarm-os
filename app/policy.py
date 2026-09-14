@@ -28,6 +28,7 @@ DANGEROUS_TOOLS = frozenset({
 DANGEROUS_PREFIXES = (
     "shell.", "bash.", "fs.", "file.", "browser.", "http.", "net.",
     "pay.", "wallet.", "secret.", "deploy.", "ssh.", "selfmod.", "self_modify.",
+    "composio.",
 )
 CLOUD_EXFIL_TOOLS = frozenset({
     "browser", "playwright", "computer_use", "network", "http", "fetch",
@@ -124,7 +125,9 @@ def tool_exfiltrates(name: str) -> bool:
     lowered = name.strip().lower()
     if lowered in CLOUD_EXFIL_TOOLS:
         return True
-    return any(lowered.startswith(prefix) for prefix in ("browser.", "http.", "net.", "pay.", "wallet."))
+    return any(lowered.startswith(prefix) for prefix in (
+        "browser.", "http.", "net.", "pay.", "wallet.", "composio.",
+    ))
 
 
 def browser_capability_enabled() -> bool:
@@ -150,6 +153,10 @@ def tool_is_opted_in_selfmod(name: str) -> bool:
     if lowered in OPTED_IN_SELFMOD_WRITE_TOOLS:
         return selfmod_write_enabled()
     return False
+
+
+def tool_is_opted_in_composio(name: str) -> bool:
+    return name.strip().lower().startswith("composio.") and bool(os.getenv("COMPOSIO_API_KEY", "").strip())
 
 
 class PolicyGate:
@@ -238,7 +245,12 @@ class PolicyGate:
             raise PolicyError("Tool use omitted a tool name", FailureClass.POLICY_REFUSAL)
         if mission_privacy(request.mission) == "local_only" and tool_exfiltrates(name):
             raise PolicyError("local_only policy forbids cloud or network tools", FailureClass.POLICY_REFUSAL)
-        if tool_is_dangerous(name) and not tool_is_opted_in_browser(name) and not tool_is_opted_in_selfmod(name):
+        if (
+            tool_is_dangerous(name)
+            and not tool_is_opted_in_browser(name)
+            and not tool_is_opted_in_selfmod(name)
+            and not tool_is_opted_in_composio(name)
+        ):
             raise PolicyError(f"Tool '{name}' is denied by default", FailureClass.POLICY_REFUSAL)
 
     def _authorize_org_change(self, request: PolicyRequest) -> None:

@@ -2,7 +2,10 @@ import pytest
 
 from app.llm import FallbackController, LLMProvider
 from app.models import FailureClass, Mission
-from app.policy import PolicyError, PolicyGate, PolicyRequest, privacy_from_state, tool_is_dangerous
+from app.policy import (
+    PolicyError, PolicyGate, PolicyRequest, privacy_from_state, tool_is_dangerous,
+    tool_is_opted_in_composio,
+)
 from app.router import capability_request_for
 from app.runtime import SwarmRuntime
 from app.store import Store
@@ -154,6 +157,24 @@ def test_tool_budget_fails_closed_before_other_tool_rules():
     with pytest.raises(PolicyError) as exc:
         gate.authorize(_request(action="tool_use", mission=mission, tool_calls_used=1, tool="shell"))
     assert exc.value.failure_class == FailureClass.RESOURCE_EXHAUSTED
+
+
+def test_composio_is_external_and_requires_explicit_configuration(monkeypatch):
+    gate = PolicyGate()
+    cloud = Mission(goal="cloud")
+    local = Mission(goal="private", privacy="local_only")
+    monkeypatch.delenv("COMPOSIO_API_KEY", raising=False)
+    assert tool_is_dangerous("composio.GMAIL_FETCH_EMAILS")
+    assert not tool_is_opted_in_composio("composio.GMAIL_FETCH_EMAILS")
+    with pytest.raises(PolicyError):
+        gate.authorize(_request(action="tool_use", mission=cloud, tool="composio.GMAIL_FETCH_EMAILS"))
+
+    monkeypatch.setenv("COMPOSIO_API_KEY", "configured")
+    assert tool_is_opted_in_composio("composio.GMAIL_FETCH_EMAILS")
+    gate.authorize(_request(action="tool_use", mission=cloud, tool="composio.GMAIL_FETCH_EMAILS"))
+    with pytest.raises(PolicyError) as exc:
+        gate.authorize(_request(action="tool_use", mission=local, tool="composio.GMAIL_FETCH_EMAILS"))
+    assert "local_only" in str(exc.value)
 
 
 def test_token_budget_is_independent_of_payment_spent():
