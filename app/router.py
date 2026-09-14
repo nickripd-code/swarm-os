@@ -61,12 +61,16 @@ class RouteDecision(BaseModel):
         return [self.selected, *self.fallbacks]
 
 
-def capability_request_for(*, kind: str, agent: dict[str, Any] | None = None) -> CapabilityRequest:
+def capability_request_for(*, kind: str, agent: dict[str, Any] | None = None,
+                           privacy: Literal["cloud_allowed", "local_only"] | None = None) -> CapabilityRequest:
     """Map controller/worker work to a capability request. No model names."""
+    resolved: Literal["cloud_allowed", "local_only"] = (
+        "local_only" if privacy == "local_only" else "cloud_allowed"
+    )
     if kind == "decision":
-        return CapabilityRequest(reasoning="high", coding="low", tool_use="none")
+        return CapabilityRequest(reasoning="high", coding="low", tool_use="none", privacy=resolved)
     if kind == "verification":
-        return CapabilityRequest(reasoning="high", coding="medium", tool_use="none")
+        return CapabilityRequest(reasoning="high", coding="medium", tool_use="none", privacy=resolved)
     caps = set((agent or {}).get("capabilities") or [])
     reasoning: Literal["none", "low", "medium", "high"]
     coding: Literal["none", "low", "medium", "high"]
@@ -79,7 +83,7 @@ def capability_request_for(*, kind: str, agent: dict[str, Any] | None = None) ->
         reasoning, coding = "high", "none"
     else:
         reasoning, coding = "medium", "none"
-    return CapabilityRequest(reasoning=reasoning, coding=coding, tool_use="none")
+    return CapabilityRequest(reasoning=reasoning, coding=coding, tool_use="none", privacy=resolved)
 
 
 def _level_ok(have: str, want: str) -> bool:

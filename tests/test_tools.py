@@ -59,7 +59,7 @@ async def test_unknown_local_tool_fails_closed_without_charge(tmp_path):
     mission = Mission(goal="Unknown tool")
     store.save_mission(mission)
     with pytest.raises(PolicyError) as exc:
-        await runtime.invoke_tool(mission, "shell", {"command": "ls"})
+        await runtime.invoke_tool(mission, "lookup", {"query": "unknown"})
     assert exc.value.failure_class == FailureClass.TOOL_MISSING
     assert runtime.tool_calls_used(mission.id) == 0
     assert not any(e.event_type == "tool.started" for e in store.events(mission.id))
