@@ -170,6 +170,8 @@ class OrganizationDesigner:
         tasks = runtime.tasks[mission.id]
         mode = getattr(runtime.controller, "mode", "openai")
         parent = self.validate(change, mission, agents, tasks, mode=mode)
+        await self._enforce_org_approval(runtime, mission, root, change, mode=mode)
+        parent = self.validate(change, mission, agents, tasks, mode=mode)
         if change.op == "spawn":
             child = await self._spawn(runtime, mission, parent, change)
             await self._emit_changed(runtime, mission, root, change, agent=child, parent=parent)
@@ -197,6 +199,33 @@ class OrganizationDesigner:
         await self._emit_changed(runtime, mission, root, change, agent=replacement, parent=parent,
                                  replaced_id=str(target.id))
         return replacement
+
+    async def _enforce_org_approval(
+        self,
+        runtime: Any,
+        mission: Mission,
+        root: AgentSpec,
+        change: OrgChange,
+        *,
+        mode: str,
+    ) -> None:
+        """Park replace/reparent/retire on the runtime approval path. Spawn is not gated."""
+        gate = getattr(runtime, "policy", None) or PolicyGate()
+        request = PolicyRequest(
+            action="org_change",
+            mission=mission,
+            org_op=change.op,
+            org_agent_id=change.agent_id,
+            mode=mode,
+        )
+        gate.authorize(request)
+        enforce = getattr(runtime, "_enforce_human_approval", None)
+        if enforce is None:
+            needed = gate.approval_required(request)
+            if needed is not None:
+                raise PolicyError(needed.reason, FailureClass.AUTHORIZATION_REQUIRED)
+            return
+        await enforce(mission, root, request)
 
     def _resolve_parent(self, agents: list[AgentSpec], parent_id: str | None, *, required: bool) -> AgentSpec | None:
         if not parent_id:

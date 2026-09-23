@@ -3,8 +3,8 @@ import pytest
 from app.llm import FallbackController, LLMProvider
 from app.models import FailureClass, Mission
 from app.policy import (
-    PolicyError, PolicyGate, PolicyRequest, privacy_from_state, tool_is_dangerous,
-    tool_is_opted_in_composio,
+    PolicyError, PolicyGate, PolicyRequest, approval_action_key, privacy_from_state,
+    tool_is_dangerous, tool_is_opted_in_composio,
 )
 from app.router import capability_request_for
 from app.runtime import SwarmRuntime
@@ -109,6 +109,8 @@ def test_irreversible_org_and_live_payment_require_approval():
     for op in ("replace", "reparent", "retire"):
         needed = gate.approval_required(_request(action="org_change", mission=mission, org_op=op))
         assert needed is not None and needed.action == "org_change" and needed.org_op == op
+        assert approval_action_key(needed, agent_id="agent-1") == f"org_change:{op}:agent-1"
+        assert approval_action_key(needed) == f"org_change:{op}"
     with pytest.raises(PolicyError) as unknown_op:
         gate.authorize(_request(action="org_change", mission=mission, org_op="merge"))
     assert unknown_op.value.failure_class == FailureClass.INVALID_OUTPUT
