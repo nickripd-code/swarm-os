@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,objectiveSnippet} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -42,6 +42,20 @@ function formatElapsed(ms){
 function renderHud(){
   const mission=state.mission, status=mission?.status||"idle", mode=missionMode(state);
   if($("objectiveText"))$("objectiveText").textContent=mission?.goal||"Awaiting a mission.";
+  const snippet=objectiveSnippet(mission,{preview:!!state.preview});
+  const snippetPanel=$("objectiveSnippet");
+  if(snippetPanel)snippetPanel.hidden=!snippet.visible;
+  const snippetText=$("objectiveSnippetText");
+  if(snippetText){
+    snippetText.textContent=snippet.text;
+    if(snippet.visible&&snippet.truncated){
+      snippetText.setAttribute("aria-label",snippet.full);
+      snippetText.title=snippet.full;
+    }else{
+      snippetText.removeAttribute("aria-label");
+      snippetText.removeAttribute("title");
+    }
+  }
   if($("missionMode")){
     $("missionMode").textContent=String(mode).replaceAll("_"," ").toUpperCase();
     $("missionMode").className="hud-chip mode "+mode;

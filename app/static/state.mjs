@@ -128,6 +128,43 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+/** Graphemes that fit two lines of the Mission Control type on a phone width. */
+export const OBJECTIVE_SNIPPET_PHONE_LIMIT = 64;
+
+function objectiveGraphemes(value) {
+  if (typeof Intl !== "undefined" && typeof Intl.Segmenter === "function") {
+    return [...new Intl.Segmenter(undefined, {granularity: "grapheme"}).segment(value)].map((part) => part.segment);
+  }
+  return Array.from(value);
+}
+
+function loadedMissionGoal(mission) {
+  if (!mission || typeof mission !== "object") return "";
+  if (mission.id === "preview") return "";
+  if (typeof mission.goal !== "string") return "";
+  return mission.goal.replace(/[\u0000-\u001F\u007F]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function truncateObjective(full, limit) {
+  const max = Number.isInteger(limit) && limit >= 8 ? limit : OBJECTIVE_SNIPPET_PHONE_LIMIT;
+  const parts = objectiveGraphemes(full);
+  if (parts.length <= max) return full;
+  const budget = max - 1;
+  const head = parts.slice(0, budget).join("");
+  const space = head.lastIndexOf(" ");
+  const end = space >= Math.floor(budget * 0.6) ? objectiveGraphemes(head.slice(0, space)).length : budget;
+  const clipped = parts.slice(0, end).join("").trimEnd();
+  return (clipped || head.trimEnd()) + "…";
+}
+
+export function objectiveSnippet(mission, options = {}) {
+  const empty = {visible: false, text: "", full: "", truncated: false};
+  if (options.preview === true) return empty;
+  const full = loadedMissionGoal(mission);
+  if (!full) return empty;
+  const text = truncateObjective(full, options.limit);
+  return {visible: true, text, full, truncated: text !== full};
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
