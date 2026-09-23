@@ -26,7 +26,8 @@ def test_compact_shell_preserves_every_javascript_mount_point():
 
     required = {
         "missionForm", "goal", "launch", "brain", "history", "objectiveHud",
-        "missionMode", "missionStatus", "hudElapsed", "hudAgents", "hudTasks",
+        "missionMode", "missionStatus", "hudElapsed", "hudAgents", "agentOnlineCountChip",
+        "hudTasks",
         "hudTokens", "hudSpend", "costHud", "replayHud", "questionPanel",
         "answerForm", "mapViewport", "world", "connections", "nodes", "emptyMap",
         "agentCount", "taskCount", "tokenCount", "inspectorContent", "activity",
@@ -55,6 +56,21 @@ def test_ui_does_not_claim_unconfigured_capabilities():
     assert "can do anything" not in html
     assert "payment connected" not in html
     assert "durable mission events appear here" in html
+
+
+def test_agent_online_count_chip_is_hidden_until_a_mission_roster_is_known():
+    html = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    control = (ROOT / "app/static/control.js").read_text(encoding="utf-8")
+    state = (ROOT / "app/static/state.mjs").read_text(encoding="utf-8")
+    hud = html.split('id="objectiveHud"', 1)[1].split("</section>", 1)[0]
+    assert '<div hidden><dt>Online</dt><dd id="agentOnlineCountChip" hidden></dd></div>' in hud
+    assert "export function agentOnlineCountView" in state
+    assert "AGENT_ONLINE_UNAVAILABLE = \"unavailable\"" in state
+    body = control.split("function renderAgentOnlineCount", 1)[1].split("function clearAgentRoster", 1)[0]
+    assert "agentOnlineCountView" in body
+    assert "view.label" in body
+    assert "state.agents.size" not in body
+    assert "/api/missions/" in control and "/agents" in control
 
 
 def test_control_module_starts_with_a_real_line_break():

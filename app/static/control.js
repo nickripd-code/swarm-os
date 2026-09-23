@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,agentOnlineCountView} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -6,6 +6,8 @@ const statusName = status => ({created:"Ready",running:"Thinking",completed:"Don
 const symbol = status => ({created:"·",running:"",completed:"✓",blocked:"?",failed:"!",stopped:"■"}[status] || "·");
 const colors = ["#c6b4ef","#edbd9e","#aed8cf","#e6cd90","#b5cbe3","#dfb9ca"];
 let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null, hudTick=null, notifyArmed=false, killAvailable=false;
+let agentRoster, agentRosterToken=0, agentRosterBusy=false, agentRosterPending=false, agentRosterWanted=null;
+const ROSTER_REFRESH_EVENTS=new Set(["agent.spawned","agent.updated","agent.killed","agent.retired"]);
 let eventLog=[], replayCursor=-1, replayLive=true, replayTimer=null, sourceMission=null;
 const elements=new Map();
 const bot = color => '<span class="bot" style="--agent-color:'+color+'" aria-hidden="true"><span class="ear ear-left"></span><span class="ear ear-right"></span><span class="visor"><i></i><i></i><b class="mouth"></b></span></span>';
@@ -78,9 +80,54 @@ function renderHud(){
     $("replayChip").textContent=state.preview?"PREVIEW":(replayLive?"LIVE":"REPLAY");
     $("replayChip").className="hud-chip mode "+(state.preview?"preview":replayLive?"replay-live":"replay");
   }
+  renderAgentOnlineCount();
   const running=!!mission&&!terminal.has(status)&&replayLive&&!state.preview;
   if(running&&!hudTick)hudTick=setInterval(renderHud,1000);
   if(!running&&hudTick){clearInterval(hudTick);hudTick=null;}
+}
+function renderAgentOnlineCount(){
+  const el=$("agentOnlineCountChip");
+  if(!el)return;
+  const view=agentOnlineCountView({mission:state.mission,preview:!!state.preview,roster:agentRoster});
+  el.textContent=view.label;
+  el.hidden=view.hidden;
+  el.dataset.known=view.known?"true":"false";
+  if(view.hidden)el.removeAttribute("aria-label");
+  else el.setAttribute("aria-label",view.known?("Agents online: "+view.count):"Agents online unavailable");
+  if(el.parentElement)el.parentElement.hidden=view.hidden;
+}
+function clearAgentRoster(){
+  agentRoster=undefined;
+  agentRosterToken++;
+  agentRosterPending=false;
+  agentRosterWanted=null;
+}
+function queueAgentRosterRefresh(id){
+  if(!id||state.preview)return;
+  agentRosterWanted=id;
+  if(agentRosterBusy){agentRosterPending=true;return;}
+  refreshAgentRoster(id);
+}
+async function refreshAgentRoster(id){
+  if(!id||state.preview)return;
+  const token=agentRosterToken;
+  const gen=generation;
+  agentRosterBusy=true;
+  agentRosterPending=false;
+  let next=null, ok=false;
+  try{
+    next=await request("/api/missions/"+id+"/agents");
+    ok=true;
+  }catch{ok=false;}
+  agentRosterBusy=false;
+  if(agentRosterPending){
+    const wanted=agentRosterWanted;
+    if(wanted&&!state.preview)queueAgentRosterRefresh(wanted);
+    return;
+  }
+  if(token!==agentRosterToken||gen!==generation||state.preview||state.mission?.id!==id)return;
+  agentRoster=ok?next:null;
+  schedule();
 }
 function clearAlerts(){if($("alerts"))$("alerts").replaceChildren();}
 function pushAlert(alert){
@@ -308,6 +355,7 @@ function disconnect(){
 }
 function reset(mission){
   stopReplayPlay();
+  clearAgentRoster();
   eventLog=[];replayCursor=-1;replayLive=true;sourceMission=mission||null;
   state=newState(mission);selected=null;elements.clear();$("nodes").replaceChildren();$("activity").replaceChildren();
   $("resultPanel").hidden=true;if($("resultMeta")){$("resultMeta").hidden=true;$("resultMeta").textContent="";}
@@ -394,7 +442,11 @@ function connect(id,gen){
   if(gen!==generation)return;
   const liveFrom=Date.now();
   ws=new WebSocket((location.protocol==="https:"?"wss:":"ws:")+"//"+location.host+"/api/missions/"+id+"/stream");
-  ws.onopen=()=>{if(gen===generation&&!terminal.has(state.mission?.status||""))connection("Live connection","live");};
+  ws.onopen=()=>{
+    if(gen!==generation)return;
+    if(!terminal.has(state.mission?.status||""))connection("Live connection","live");
+    queueAgentRosterRefresh(id);
+  };
   ws.onmessage=message=>{
     if(gen!==generation)return;
     try{
@@ -412,6 +464,7 @@ function connect(id,gen){
           if(e.event_type==='agent.message')setTimeout(schedule,9100);
         }
         if(e.event_type.startsWith("mission.")&&terminal.has(e.event_type.split(".")[1]))refreshHistory();
+        if(ROSTER_REFRESH_EVENTS.has(e.event_type))queueAgentRosterRefresh(id);
       }
     }catch{showNotice("An event could not be read. Reconnect to restore the mission.");}
   };
@@ -429,6 +482,7 @@ async function loadMission(id){
   try{
     const m=await request("/api/missions/"+id);if(gen!==generation)return;
     reset(m);localStorage.setItem("swarm.mission",id);$("goal").value=m.goal;
+    queueAgentRosterRefresh(id);
     try{
       const events=await request("/api/missions/"+id+"/events");
       if(gen!==generation)return;
@@ -452,6 +506,7 @@ $("missionForm").addEventListener("submit",async e=>{
   try{
     const m=await request("/api/missions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({goal:$("goal").value})});
     disconnect();reset(m);localStorage.setItem("swarm.mission",m.id);connect(m.id,generation);
+    queueAgentRosterRefresh(m.id);
     schedule();refreshHistory();
   }catch(error){showNotice(error.message);$("launch").disabled=false;}
 });
