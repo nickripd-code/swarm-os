@@ -1,5 +1,6 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const QUESTION_SUMMARY_CAP = 160;
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -128,6 +129,40 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+function recordedQuestionId(value) {
+  if (typeof value !== "string") return "";
+  const id = value.trim();
+  if (!id || id.length > 80 || /\s/.test(id)) return "";
+  return id;
+}
+function recordedQuestionSummary(value) {
+  if (typeof value !== "string") return "";
+  const text = value.replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (text.length <= QUESTION_SUMMARY_CAP) return text;
+  return text.slice(0, QUESTION_SUMMARY_CAP - 1) + "…";
+}
+function copyPendingQuestion(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const questionId = recordedQuestionId(raw.question_id);
+  const question = typeof raw.question === "string" ? raw.question.trim() : "";
+  if (!questionId || !question) return null;
+  const pending = {question_id: questionId, question};
+  if (raw.kind === "approval" || raw.kind === "question") pending.kind = raw.kind;
+  if (typeof raw.reason === "string" && raw.reason.trim()) pending.reason = raw.reason.trim();
+  if (typeof raw.approval_action === "string" && raw.approval_action.trim()) {
+    pending.approval_action = raw.approval_action.trim();
+  }
+  return pending;
+}
+export function pendingQuestionView(state = {}) {
+  const empty = {pending: false, questionId: "", summary: ""};
+  if (!state || state.preview || !state.mission || state.mission.status !== "waiting") return empty;
+  const questionId = recordedQuestionId(state.mission.pending_question?.question_id);
+  const summary = recordedQuestionSummary(state.mission.pending_question?.question);
+  if (!questionId || !summary) return empty;
+  return {pending: true, questionId, summary};
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
@@ -182,6 +217,8 @@ export function applyEvent(state, e) {
   }
   if (e.event_type === "mission.waiting" && state.mission) {
     state.mission.status = "waiting";
+    // Task waits carry no question. Only a recorded id plus prompt is a human park.
+    state.mission.pending_question = copyPendingQuestion(p);
   }
   if (e.event_type === "mission.running" && state.mission) {
     state.mission.status = "running";
@@ -193,8 +230,8 @@ export function applyEvent(state, e) {
     state.mission.status = "running";
   }
   if (e.event_type === "mission.question" && state.mission) {
-    state.mission.pending_question = p;
     state.mission.status = "waiting";
+    state.mission.pending_question = copyPendingQuestion(p);
   }
   if (e.event_type === "user.answered" && state.mission) {
     const open = state.mission.pending_question;
@@ -205,6 +242,7 @@ export function applyEvent(state, e) {
   if (e.event_type.startsWith("mission.") && terminal.has(e.event_type.split(".")[1]) && state.mission) {
     state.mission.status = e.event_type.split(".")[1];
     state.mission.result = p;
+    state.mission.pending_question = null;
     for (const a of state.agents.values()) {
       if (["created","running"].includes(a.status)) {
         a.status = state.mission.status;

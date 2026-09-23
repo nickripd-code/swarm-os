@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,pendingQuestionView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -64,6 +64,14 @@ function renderHud(){
       : cost.budgetLabel;
   }
   if($("costHud"))$("costHud").dataset.known=cost.known?"true":"false";
+  const pending=pendingQuestionView(state);
+  const questionStrip=$("questionStrip");
+  if(questionStrip){
+    questionStrip.hidden=!pending.pending;
+    questionStrip.dataset.pending=pending.pending?"true":"false";
+  }
+  if($("questionStripId"))$("questionStripId").textContent=pending.questionId;
+  if($("questionStripSummary"))$("questionStripSummary").textContent=pending.summary;
   if($("hudElapsed")){
     const view=replayView(eventLog,replayCursor,{preview:state.preview,mission:sourceMission||mission});
     if(!replayLive&&!state.preview&&view.elapsedMs!=null){
@@ -312,6 +320,10 @@ function reset(mission){
   state=newState(mission);selected=null;elements.clear();$("nodes").replaceChildren();$("activity").replaceChildren();
   $("resultPanel").hidden=true;if($("resultMeta")){$("resultMeta").hidden=true;$("resultMeta").textContent="";}
   if($("questionPanel"))$("questionPanel").hidden=!mission?.pending_question;
+  const questionStrip=$("questionStrip");
+  if(questionStrip){questionStrip.hidden=true;questionStrip.dataset.pending="false";}
+  if($("questionStripId"))$("questionStripId").textContent="";
+  if($("questionStripSummary"))$("questionStripSummary").textContent="";
   if($("answerText"))$("answerText").value="";
   showNotice("");setCommandStatus("");zoom=1;$("zoomValue").textContent="100%";clearAlerts();
   if(hudTick){clearInterval(hudTick);hudTick=null;}
