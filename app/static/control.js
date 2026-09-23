@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,lastEventTypeView} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -39,6 +39,19 @@ function formatElapsed(ms){
   if(m)return m+"m "+(s%60)+"s";
   return s+"s";
 }
+function renderLastEventChip(){
+  const el=$("lastEventChip");
+  if(!el)return;
+  const view=lastEventTypeView(eventLog,{preview:!!state.preview,mission:sourceMission||state.mission});
+  el.hidden=!view.visible;
+  el.textContent=view.visible?view.label:"";
+  if(view.unavailable)el.dataset.unavailable="true";
+  else delete el.dataset.unavailable;
+  if(view.visible)el.setAttribute("aria-label",view.ariaLabel);
+  else el.removeAttribute("aria-label");
+  if(view.title)el.title=view.title;
+  else el.removeAttribute("title");
+}
 function renderHud(){
   const mission=state.mission, status=mission?.status||"idle", mode=missionMode(state);
   if($("objectiveText"))$("objectiveText").textContent=mission?.goal||"Awaiting a mission.";
@@ -78,6 +91,7 @@ function renderHud(){
     $("replayChip").textContent=state.preview?"PREVIEW":(replayLive?"LIVE":"REPLAY");
     $("replayChip").className="hud-chip mode "+(state.preview?"preview":replayLive?"replay-live":"replay");
   }
+  renderLastEventChip();
   const running=!!mission&&!terminal.has(status)&&replayLive&&!state.preview;
   if(running&&!hudTick)hudTick=setInterval(renderHud,1000);
   if(!running&&hudTick){clearInterval(hudTick);hudTick=null;}

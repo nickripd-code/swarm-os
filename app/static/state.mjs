@@ -347,6 +347,47 @@ export function isReplayLive(index, length) {
   if (!length || length < 1) return true;
   return clampReplayIndex(index, length) === length - 1;
 }
+const HIDDEN_LAST_EVENT = Object.freeze({
+  visible: false,
+  unavailable: false,
+  label: "",
+  eventType: "",
+  title: "",
+  ariaLabel: "",
+});
+
+function recordedEventType(event) {
+  if (!event || typeof event !== "object" || Array.isArray(event)) return "";
+  const raw = event.event_type;
+  if (typeof raw !== "string" || !raw || raw !== raw.trim()) return "";
+  if (/[\u0000\r\n]/.test(raw)) return "";
+  return raw;
+}
+
+export function lastEventTypeView(log, options = {}) {
+  if (!options.mission || options.preview === true) return HIDDEN_LAST_EVENT;
+  if (!Array.isArray(log) || log.length < 1) return HIDDEN_LAST_EVENT;
+  const eventType = recordedEventType(log[log.length - 1]);
+  if (!eventType) {
+    return {
+      visible: true,
+      unavailable: true,
+      label: "unavailable",
+      eventType: "",
+      title: "",
+      ariaLabel: "Last event unavailable",
+    };
+  }
+  return {
+    visible: true,
+    unavailable: false,
+    label: eventType,
+    eventType,
+    title: eventType,
+    ariaLabel: "Last event " + eventType,
+  };
+}
+
 export function missionSnapshot(mission) {
   if (!mission) return null;
   return {
