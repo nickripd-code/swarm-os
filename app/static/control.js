@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,recordedResumeRequestedCountFeed,resumeRequestedCountView} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -6,7 +6,7 @@ const statusName = status => ({created:"Ready",running:"Thinking",completed:"Don
 const symbol = status => ({created:"·",running:"",completed:"✓",blocked:"?",failed:"!",stopped:"■"}[status] || "·");
 const colors = ["#c6b4ef","#edbd9e","#aed8cf","#e6cd90","#b5cbe3","#dfb9ca"];
 let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null, hudTick=null, notifyArmed=false, killAvailable=false;
-let eventLog=[], replayCursor=-1, replayLive=true, replayTimer=null, sourceMission=null;
+let eventLog=[], replayCursor=-1, replayLive=true, replayTimer=null, sourceMission=null, resumeRequestedFeedLoaded=false;
 const elements=new Map();
 const bot = color => '<span class="bot" style="--agent-color:'+color+'" aria-hidden="true"><span class="ear ear-left"></span><span class="ear ear-right"></span><span class="visor"><i></i><i></i><b class="mouth"></b></span></span>';
 function colorFor(a) {if(!a.parent_id)return colors[0];let n=0;for(const c of a.role)n=(n*31+c.charCodeAt(0))>>>0;return colors[1+n%(colors.length-1)];}
@@ -77,6 +77,14 @@ function renderHud(){
     $("replayChip").hidden=state.preview||!mission;
     $("replayChip").textContent=state.preview?"PREVIEW":(replayLive?"LIVE":"REPLAY");
     $("replayChip").className="hud-chip mode "+(state.preview?"preview":replayLive?"replay-live":"replay");
+  }
+  const resumeRequestedChip=$("resumeRequestedCountChip");
+  if(resumeRequestedChip){
+    const feed=state.preview?null:recordedResumeRequestedCountFeed(eventLog,replayCursor,resumeRequestedFeedLoaded);
+    const requestedView=resumeRequestedCountView(feed,{visible:!!(state.mission&&!state.preview)});
+    resumeRequestedChip.hidden=requestedView.hidden;
+    resumeRequestedChip.textContent=requestedView.hidden?"":requestedView.label;
+    resumeRequestedChip.dataset.known=requestedView.known?"true":"false";
   }
   const running=!!mission&&!terminal.has(status)&&replayLive&&!state.preview;
   if(running&&!hudTick)hudTick=setInterval(renderHud,1000);
@@ -306,9 +314,10 @@ async function request(path,options){
 function disconnect(){
   generation++;clearTimeout(retry);clearTimeout(previewTimer);stopReplayPlay();if(ws){ws.onclose=null;ws.close();ws=null;}
 }
-function reset(mission){
+function reset(mission, options={}){
   stopReplayPlay();
   eventLog=[];replayCursor=-1;replayLive=true;sourceMission=mission||null;
+  resumeRequestedFeedLoaded=options.resumeRequestedFeedLoaded===true;
   state=newState(mission);selected=null;elements.clear();$("nodes").replaceChildren();$("activity").replaceChildren();
   $("resultPanel").hidden=true;if($("resultMeta")){$("resultMeta").hidden=true;$("resultMeta").textContent="";}
   if($("questionPanel"))$("questionPanel").hidden=!mission?.pending_question;
@@ -432,7 +441,10 @@ async function loadMission(id){
     try{
       const events=await request("/api/missions/"+id+"/events");
       if(gen!==generation)return;
-      for(const e of events)ingestRecorded(e);
+      if(Array.isArray(events)){
+        for(const e of events)ingestRecorded(e);
+        resumeRequestedFeedLoaded=true;
+      }
     }catch{}
     connect(id,gen);schedule();
   }catch(error){showNotice(error.message);}
@@ -451,7 +463,7 @@ $("missionForm").addEventListener("submit",async e=>{
   showNotice("");$("launch").disabled=true;armNotifications();
   try{
     const m=await request("/api/missions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({goal:$("goal").value})});
-    disconnect();reset(m);localStorage.setItem("swarm.mission",m.id);connect(m.id,generation);
+    disconnect();reset(m,{resumeRequestedFeedLoaded:true});localStorage.setItem("swarm.mission",m.id);connect(m.id,generation);
     schedule();refreshHistory();
   }catch(error){showNotice(error.message);$("launch").disabled=false;}
 });
