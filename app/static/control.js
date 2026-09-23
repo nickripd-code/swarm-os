@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,agentCostRows,agentCostView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -64,6 +64,13 @@ function renderHud(){
       : cost.budgetLabel;
   }
   if($("costHud"))$("costHud").dataset.known=cost.known?"true":"false";
+  const agentCosts=$("costHudAgents");
+  if(agentCosts){
+    const rows=agentCostRows(state.agentCosts,state.agents);
+    agentCosts.hidden=rows.length===0;
+    agentCosts.innerHTML=rows.map(row=>'<li><span class="role">'+esc(row.label)+'</span><span>'
+      +row.tokens.toLocaleString()+" tokens</span><span class=\"spend\">"+esc(row.spendLabel)+"</span></li>").join("");
+  }
   if($("hudElapsed")){
     const view=replayView(eventLog,replayCursor,{preview:state.preview,mission:sourceMission||mission});
     if(!replayLive&&!state.preview&&view.elapsedMs!=null){
@@ -205,6 +212,16 @@ function selectAgent(id){
   $("announcement").textContent=label(state.agents.get(id)?.role)+" selected";
   schedule();
 }
+function inspectorSpend(agent){
+  const row=state.agentCosts.get(agent.id);
+  const view=agentCostView(row||{input:agent.tokens||0,output:0,reasoning:0});
+  const tokens=view.tokens||agent.tokens||0;
+  if(!tokens&&!view.known)return "";
+  const bits=[];
+  if(tokens)bits.push(tokens.toLocaleString()+" tokens");
+  bits.push(view.spendLabel);
+  return bits.join(" · ");
+}
 function renderInspector(){
   const a=state.agents.get(selected);if(!a)return;
   const tasks=[...state.tasks.values()].filter(t=>t.agent_id===a.id),current=tasks.find(t=>t.status==="running")||tasks.at(-1);
@@ -222,7 +239,7 @@ function renderInspector(){
     '<div class="detail-label">RIGHT NOW</div><p class="detail-purpose">'+esc(a.status==="running"?a.activity||"Considering the next step…":statusName(a.status))+'</p>')+
     (canKill?'<button type="button" class="kill-agent" id="killAgent">Kill this agent</button>':'')+
     '<div class="detail-label">COMMUNICATIONS</div>'+state.events.filter(e=>e.event_type==='agent.message'&&(e.payload.from_id===a.id||e.payload.to_id===a.id)).slice(0,3).map(e=>'<p class="detail-purpose message-detail">'+esc(label(state.agents.get(e.payload.from_id)?.role))+' → '+esc(label(state.agents.get(e.payload.to_id)?.role))+'<br><small>'+esc(e.payload.kind)+' · '+esc(e.payload.text.slice(0,160))+'</small></p>').join('')+
-    '<div class="detail-usage">'+esc(a.model||health?.openai?.model||"")+(a.tokens?' · '+a.tokens.toLocaleString()+' tokens':'')+'</div></div>';
+    '<div class="detail-usage">'+esc([a.model||health?.openai?.model||"",inspectorSpend(a)].filter(Boolean).join(" · "))+'</div></div>';
   const inspector=$("inspectorContent");
   if(inspector.innerHTML!==html){const scroll=inspector.querySelector(".detail-output")?.scrollTop||0;inspector.innerHTML=html;
     if(inspector.querySelector(".detail-output"))inspector.querySelector(".detail-output").scrollTop=scroll;

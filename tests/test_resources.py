@@ -126,6 +126,102 @@ def test_over_budget_consume_records_spend_then_fails_closed():
     assert exc.value.failure_class == FailureClass.RESOURCE_EXHAUSTED
 
 
+def test_per_agent_known_usd_matches_mission_total_and_persists(tmp_path):
+    scheduler = ResourceScheduler(TokenCostSettings(
+        default_budget=10, hard_cap=10, markup=1.0, warning_fraction=0.8,
+        default_input_per_million=None, default_output_per_million=None,
+    ))
+    mission = Mission(goal="attribute", limits={"max_token_cost": 10})
+    scheduler.consume(
+        mission, ModelUsage(input_tokens=1_000_000, output_tokens=0),
+        listed_input=1.0, listed_output=1.0, agent_id="agent-a",
+    )
+    second = scheduler.consume(
+        mission, ModelUsage(input_tokens=0, output_tokens=500_000),
+        listed_input=1.0, listed_output=2.0, agent_id="agent-b",
+    )
+    assert mission.token_spent == 2.0
+    assert mission.agent_token_costs["agent-a"].known_usd == 1.0
+    assert mission.agent_token_costs["agent-a"].input_tokens == 1_000_000
+    assert mission.agent_token_costs["agent-b"].known_usd == 1.0
+    assert mission.agent_token_costs["agent-b"].output_tokens == 500_000
+    assert scheduler.known_agent_usd(mission) == mission.token_spent
+    store = Store(str(tmp_path / "costs.db"))
+    store.save_mission(mission)
+    loaded = store.get_mission(mission.id)
+    assert loaded is not None
+    assert loaded.agent_token_costs["agent-a"].known_usd == 1.0
+    assert scheduler.known_agent_usd(loaded) == loaded.token_spent
+    payload = scheduler.snapshot(loaded, second.estimate)
+    assert payload["token_spent"] == 2.0
+    assert sum(row["known_usd"] for row in payload["by_agent"]) == payload["token_spent"]
+    assert all(row["known"] is True for row in payload["by_agent"])
+
+
+def test_unknown_agent_price_skips_without_inventing_zero():
+    scheduler = ResourceScheduler(TokenCostSettings(
+        default_input_per_million=None, default_output_per_million=None,
+        unknown_price="skip", default_budget=3, hard_cap=10, markup=1.0,
+    ))
+    mission = Mission(goal="skip agent")
+    scheduler.consume(
+        mission, ModelUsage(input_tokens=1_000_000),
+        listed_input=0.4, listed_output=0, agent_id="priced",
+    )
+    unknown = scheduler.consume(
+        mission, ModelUsage(input_tokens=10, output_tokens=2), agent_id="unpriced",
+    )
+    assert unknown.error is None
+    assert unknown.estimate.known is False
+    assert unknown.estimate.estimated_cost is None
+    assert mission.token_spent == 0.4
+    assert mission.agent_token_costs["priced"].known_usd == 0.4
+    unpriced = mission.agent_token_costs["unpriced"]
+    assert unpriced.known_usd is None
+    assert unpriced.input_tokens == 10
+    assert unpriced.output_tokens == 2
+    assert unpriced.unknown_calls == 1
+    assert scheduler.known_agent_usd(mission) == mission.token_spent
+    row = next(item for item in scheduler.agent_breakdown(mission) if item["agent_id"] == "unpriced")
+    assert row["known"] is False
+    assert row["known_usd"] is None
+    assert row["partial"] is False
+    assert row["tokens"] == 12
+
+
+def test_unknown_agent_price_fail_closed_does_not_invent_spend():
+    scheduler = ResourceScheduler(TokenCostSettings(
+        default_input_per_million=None, default_output_per_million=None,
+        unknown_price="fail", markup=1.0, default_budget=3, hard_cap=10,
+    ))
+    mission = Mission(goal="fail agent")
+    outcome = scheduler.consume(
+        mission, ModelUsage(input_tokens=9, output_tokens=1), agent_id="agent-a",
+    )
+    assert outcome.error is not None
+    assert outcome.error.failure_class == FailureClass.RESOURCE_EXHAUSTED
+    assert mission.token_spent == 0
+    tally = mission.agent_token_costs["agent-a"]
+    assert tally.known_usd is None
+    assert tally.input_tokens == 9
+    assert tally.output_tokens == 1
+
+
+def test_missing_agent_id_does_not_invent_an_agent_bucket():
+    scheduler = ResourceScheduler(TokenCostSettings(
+        default_input_per_million=None, default_output_per_million=None,
+        markup=1.0, default_budget=3, hard_cap=10,
+    ))
+    mission = Mission(goal="no agent")
+    scheduler.consume(
+        mission, ModelUsage(input_tokens=1_000_000), listed_input=1, listed_output=1,
+    )
+    assert mission.token_spent == 1.0
+    assert mission.agent_token_costs == {}
+    assert scheduler.known_agent_usd(mission) == 0.0
+    assert scheduler.agent_breakdown(mission) == []
+
+
 def test_hard_cap_clamps_mission_limit():
     scheduler = ResourceScheduler(TokenCostSettings(default_budget=3, hard_cap=10, markup=1.0))
     mission = Mission(goal="cap", limits={"max_token_cost": 50})
@@ -225,6 +321,14 @@ async def test_runtime_under_budget_emits_spend_and_completes(tmp_path):
     assert updates[-1].payload["known"] is True
     assert updates[-1].payload["token_spent"] == 2.0
     assert updates[-1].payload["source"] == "listed"
+    assert scheduler.known_agent_usd(saved) == saved.token_spent
+    completed = [e for e in events if e.event_type == "llm.completed"]
+    assert completed
+    assert all(e.payload.get("agent_id") for e in completed)
+    assert all(str(e.actor_id) == e.payload["agent_id"] for e in completed)
+    by_agent = updates[-1].payload["by_agent"]
+    assert by_agent
+    assert sum(row["known_usd"] for row in by_agent) == updates[-1].payload["token_spent"]
     assert any(e.event_type == "budget.warning" for e in events)
     assert any(e.event_type == "llm.completed" for e in events)
 
@@ -245,6 +349,7 @@ async def test_runtime_over_budget_fails_closed(tmp_path):
     assert saved.status == "failed"
     assert saved.result["failure_class"] == "RESOURCE_EXHAUSTED"
     assert saved.token_spent == 1.0
+    assert scheduler.known_agent_usd(saved) == saved.token_spent
     events = store.events(mission.id)
     assert any(e.event_type == "budget.updated" for e in events)
     assert any(e.event_type == "llm.completed" for e in events)
@@ -291,6 +396,12 @@ async def test_runtime_missing_prices_skip_estimate_honestly(tmp_path):
     assert updates
     assert all(item.payload["known"] is False for item in updates)
     assert all(item.payload["estimated_cost"] is None for item in updates)
+    assert saved.agent_token_costs
+    assert all(item.known_usd is None for item in saved.agent_token_costs.values())
+    assert scheduler.known_agent_usd(saved) == 0.0
+    rows = updates[-1].payload["by_agent"]
+    assert rows
+    assert all(row["known"] is False and row["known_usd"] is None for row in rows)
 
 
 @pytest.mark.asyncio

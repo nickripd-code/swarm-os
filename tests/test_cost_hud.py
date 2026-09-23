@@ -130,6 +130,39 @@ def test_known_zero_spend_is_honest_zero(cases):
     assert view["spendLabel"] == "$0"
 
 
+def test_per_agent_known_usd_sums_to_mission_total(cases):
+    usage = cases["split"]["usage"]
+    rows = cases["split"]["rows"]
+    assert usage["known"] is True
+    assert usage["cost"] == 1.25
+    assert [row["label"] for row in rows] == ["researcher", "writer"]
+    assert [row["tokens"] for row in rows] == [11, 6]
+    assert [row["spendLabel"] for row in rows] == ["$1.00", "$0.25"]
+    assert all(row["known"] is True for row in rows)
+    assert sum(row["knownUsd"] for row in rows) == usage["cost"]
+    assert "$" not in cases["tokensOnlyAgent"]["spendLabel"]
+    assert cases["tokensOnlyAgent"]["spendLabel"] == UNAVAILABLE
+    assert cases["tokensOnlyAgent"]["tokens"] == 21
+
+
+def test_unknown_agent_price_stays_unavailable(cases):
+    usage = cases["unpricedAgent"]["usage"]
+    view = cases["unpricedAgent"]["view"]
+    rows = cases["unpricedAgent"]["rows"]
+    assert usage["known"] is False
+    assert usage["cost"] is None
+    assert view["tokens"] == 10
+    assert view["known"] is False
+    assert view["spendLabel"] == UNAVAILABLE
+    assert rows[0]["spendLabel"] == UNAVAILABLE
+    assert "$" not in view["spendLabel"]
+    invented = cases["inventedZero"]
+    assert invented["known"] is False
+    assert invented["spendLabel"] == UNAVAILABLE
+    assert invented["spendLabel"] != "$0"
+    assert invented["tokens"] == 3
+
+
 def test_format_usd_never_invents_from_invalid_values(cases):
     assert cases["formatUsd"]["nan"] is None
     assert cases["formatUsd"]["inf"] is None
@@ -150,7 +183,9 @@ def test_markup_is_not_applied_in_the_hud_source():
     assert "per_million" not in blob
     assert "1.25" not in blob
     assert "costHudView" in control
+    assert "agentCostRows" in control
     assert 'id="costHud"' in html
+    assert 'id="costHudAgents"' in html
     assert UNAVAILABLE in html
     assert ".cost-hud{" in css
     cost_block = css.split(".cost-hud{")[1].split(".alert-stack")[0]
