@@ -77,7 +77,120 @@ export function resolveCommand(parsed, context = {}) {
 }
 export function newState(mission = null) {
   return {mission, agents: new Map(), tasks: new Map(), seen: new Set(), events: [],
-    usage: {input: 0, output: 0, reasoning: 0, cost: null, budget: null, known: false}, decisions: 0, preview: false};
+    usage: {input: 0, output: 0, reasoning: 0, cost: null, budget: null, known: false},
+    evidence: {started: null, steps: []}, decisions: 0, preview: false};
+}
+const EVIDENCE_EVENT_TYPES = new Set([
+  "verification.evidence.started",
+  "verification.evidence.passed",
+  "verification.evidence.failed",
+]);
+const EVIDENCE_KINDS = new Set(["pytest", "http", "file", "unknown"]);
+const EVIDENCE_DETAIL_LIMIT = 160;
+function evidenceKind(value) {
+  if (typeof value !== "string") return null;
+  const kind = value.trim().toLowerCase();
+  return EVIDENCE_KINDS.has(kind) ? kind : null;
+}
+function shortEvidenceDetail(value) {
+  if (typeof value !== "string") return "";
+  const text = value.replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (text.length <= EVIDENCE_DETAIL_LIMIT) return text;
+  return text.slice(0, EVIDENCE_DETAIL_LIMIT - 1) + "…";
+}
+export function evidenceFromEvent(e) {
+  const type = e?.event_type;
+  if (!EVIDENCE_EVENT_TYPES.has(type)) return null;
+  const p = e.payload || {};
+  if (type === "verification.evidence.started") {
+    const kinds = Array.isArray(p.kinds) ? p.kinds.map(evidenceKind).filter(Boolean) : [];
+    const count = Number.isInteger(p.count) && p.count >= 0 ? p.count : kinds.length;
+    return {phase: "started", count, kinds};
+  }
+  const kind = evidenceKind(p.kind);
+  if (!kind) return null;
+  if (type === "verification.evidence.passed") {
+    if (p.ok === false) return null;
+    return {phase: "step", kind, status: "passed", detail: "", failure_class: ""};
+  }
+  const failure = typeof p.failure_class === "string" ? p.failure_class.trim().slice(0, 64) : "";
+  return {
+    phase: "step",
+    kind,
+    status: "failed",
+    detail: shortEvidenceDetail(p.detail),
+    failure_class: failure,
+  };
+}
+export function evidenceActivity(e) {
+  const item = evidenceFromEvent(e);
+  if (!item) return "";
+  if (item.phase === "started") {
+    const bits = ["started"];
+    if (item.count > 0) bits.push(item.count + (item.count === 1 ? " check" : " checks"));
+    if (item.kinds.length) bits.push(item.kinds.join(", "));
+    return bits.join(" · ");
+  }
+  const bits = [item.kind + " " + item.status];
+  if (item.status === "failed" && item.failure_class) bits.push(item.failure_class);
+  if (item.status === "failed" && item.detail) bits.push(item.detail);
+  return bits.join(" · ");
+}
+function noteEvidence(state, e) {
+  const item = evidenceFromEvent(e);
+  if (!item) return;
+  if (!state.evidence) state.evidence = {started: null, steps: []};
+  if (item.phase === "started") {
+    state.evidence.started = {count: item.count, kinds: item.kinds};
+    return;
+  }
+  state.evidence.steps.push({
+    kind: item.kind,
+    status: item.status,
+    detail: item.detail,
+    failure_class: item.failure_class,
+  });
+  if (state.evidence.steps.length > 8) {
+    state.evidence.steps.splice(0, state.evidence.steps.length - 8);
+  }
+}
+function startedSummary(started) {
+  const kinds = (started.kinds || []).join(", ");
+  const noun = started.count === 1 ? "check" : "checks";
+  if (started.count > 0 && kinds) return "Checking " + started.count + " " + noun + " · " + kinds;
+  if (started.count > 0) return "Checking " + started.count + " " + noun;
+  if (kinds) return "Checking · " + kinds;
+  return "Checks started";
+}
+export function evidenceHudView(state) {
+  const empty = {visible: false, summary: "No evidence checks", steps: []};
+  if (!state || state.preview === true) return empty;
+  const evidence = state.evidence || {started: null, steps: []};
+  const steps = (evidence.steps || []).map((step) => ({
+    kind: step.kind,
+    status: step.status,
+    detail: step.status === "failed" ? (step.detail || "") : "",
+    failure_class: step.status === "failed" ? (step.failure_class || "") : "",
+  }));
+  const started = evidence.started;
+  if (!started && steps.length === 0) return empty;
+  if (!steps.length && started) {
+    const kinds = started.kinds || [];
+    return {
+      visible: true,
+      summary: startedSummary(started),
+      steps: [{
+        kind: kinds.length ? kinds.join(", ") : "checks",
+        status: "checking",
+        detail: "",
+        failure_class: "",
+      }],
+    };
+  }
+  const passed = steps.filter((step) => step.status === "passed").length;
+  const failed = steps.filter((step) => step.status === "failed").length;
+  return {visible: true, summary: passed + " passed · " + failed + " failed", steps};
 }
 function finiteNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -211,6 +324,7 @@ export function applyEvent(state, e) {
       }
     }
   }
+  noteEvidence(state, e);
   state.events.unshift(e);
   if (state.events.length > 120) state.events.length = 120;
   return true;

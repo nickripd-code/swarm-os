@@ -71,6 +71,22 @@ a{color:inherit;text-decoration:none}[hidden]{display:none!important}
 
 .replay-hud{margin-top:10px;padding-top:10px;border-top:1px solid #142e40}.replay-hud-heading,.replay-meta{display:flex;align-items:center;justify-content:space-between;gap:10px}.replay-caption{margin:7px 0;color:#6d8999;font-size:9px}.replay-controls{display:flex;align-items:center;gap:7px}.replay-controls button{border:1px solid #294b60;border-radius:5px;background:#0b2232;color:#9abac8;padding:5px 8px;font:8px var(--mono)}.replay-controls input{flex:1;accent-color:var(--cyan)}.replay-meta{margin-top:6px;color:#577588;font:8px var(--mono)}
 
+.evidence-strip{grid-column:1/-1;min-width:0;max-width:100%;border-top:1px solid #142d40;padding-top:8px}
+.evidence-heading{display:flex;align-items:baseline;justify-content:space-between;gap:10px}
+.evidence-summary{color:#7ea0b2;font:9px var(--mono);text-align:right}
+#evidenceSteps{list-style:none;display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 0;padding:0}
+.evidence-step{flex:1 1 200px;min-width:0;max-width:100%;border:1px solid #1d3d52;border-radius:7px;background:#07131e;padding:7px 8px;color:#8eacbc;font-size:10px;line-height:1.4;overflow-wrap:anywhere}
+.evidence-step b{color:#d5e7ee;font-weight:600}
+.evidence-step.passed{border-color:#2b7058}
+.evidence-step.failed{border-color:#753744}
+.evidence-step.checking{border-color:#3d5d7c}
+.evidence-error{display:block;margin-top:3px;color:#ffb4be;overflow-wrap:anywhere}
+@media(max-width:620px){
+  .evidence-heading{flex-direction:column;align-items:flex-start;gap:4px}
+  .evidence-summary{text-align:left;overflow-wrap:anywhere}
+  #evidenceSteps{flex-direction:column}
+  .evidence-step{flex:1 1 auto;font-size:13px}
+}
 @media(max-width:980px){
   .workspace{height:auto;min-height:0;grid-template-columns:1fr}.map-panel{height:620px}.inspector{height:620px;grid-template-columns:1fr 1fr;grid-template-rows:46px minmax(0,1fr)}.inspector-heading{grid-column:1/-1}#inspectorContent{border-right:1px solid var(--line);border-bottom:0}.activity-section{height:100%}
   .objective-hud{grid-template-columns:1fr auto}.hud-stats{grid-column:1/-1;justify-content:space-between}

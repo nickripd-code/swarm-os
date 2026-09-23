@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,evidenceActivity,evidenceHudView} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -190,6 +190,7 @@ function render(){
   if(!selected&&state.agents.size)selected=state.agents.keys().next().value;
   renderInspector();
   renderActivity();
+  renderEvidence();
   renderQuestion();
   renderReplayHud();
   $("resultPanel").hidden=!mission?.result||state.preview||!replayLive;
@@ -250,6 +251,12 @@ function describe(e){
     case "verification.started":return "<b>Verifier</b> is checking the claimed result";
     case "verification.passed":return "<b>Verifier</b> accepted the claimed result";
     case "verification.failed":return "<b>Verifier</b> rejected the claim"+(p.failure_class?" · "+esc(p.failure_class):"")+(p.rationale?" · "+esc(p.rationale):"");
+    case "verification.evidence.started":
+    case "verification.evidence.passed":
+    case "verification.evidence.failed":{
+      const text=evidenceActivity(e);
+      return text?"<b>Evidence</b> · "+esc(text):"";
+    }
     case "task.completed":return "<b>"+esc(name)+"</b> delivered a result";
     case "task.blocked":return "<b>"+esc(name)+"</b> needs a missing capability";
     case "mission.started":return "The mission is underway";
@@ -259,6 +266,22 @@ function describe(e){
     case "mission.blocked":return "<b>Mission blocked</b> · "+esc(p.reason||"");
     default:return "";
   }
+}
+function renderEvidence(){
+  const hud=$("evidenceHud");
+  if(!hud)return;
+  const view=evidenceHudView(state);
+  hud.hidden=!view.visible;
+  if($("evidenceSummary"))$("evidenceSummary").textContent=view.summary;
+  const list=$("evidenceSteps");
+  if(!list)return;
+  if(!view.visible){list.replaceChildren();return;}
+  list.innerHTML=view.steps.map(step=>{
+    const status=step.status==="failed"?"failed":step.status==="checking"?"checking":"passed";
+    const err=status==="failed"&&step.detail?'<span class="evidence-error">'+esc(step.detail)+"</span>":"";
+    const klass=status==="failed"&&step.failure_class?" · "+esc(step.failure_class):"";
+    return '<li class="evidence-step '+status+'"><b>'+esc(step.kind)+"</b> "+status+klass+err+"</li>";
+  }).join("");
 }
 function renderActivity(){
   const html=state.events.filter(e=>describe(e)).slice(0,30).map(e=>'<li>'+describe(e)+'<time>'+
