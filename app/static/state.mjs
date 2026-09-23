@@ -75,9 +75,34 @@ export function resolveCommand(parsed, context = {}) {
   }
   return {ok: false, error: "Unknown command"};
 }
+const MODEL_CALL_EVENTS = new Set([
+  "llm.started", "llm.completed", "llm.failed", "llm.retry", "llm.failover",
+]);
 export function newState(mission = null) {
   return {mission, agents: new Map(), tasks: new Map(), seen: new Set(), events: [],
-    usage: {input: 0, output: 0, reasoning: 0, cost: null, budget: null, known: false}, decisions: 0, preview: false};
+    usage: {input: 0, output: 0, reasoning: 0, cost: null, budget: null, known: false},
+    decisions: 0, preview: false, lastModel: null};
+}
+export function recordedModelId(value) {
+  if (typeof value !== "string") return null;
+  const model = value.trim();
+  if (!model || /[\u0000-\u001f\u007f]/.test(model)) return null;
+  return model;
+}
+export function truncateModelId(model, max = 32) {
+  const limit = typeof max === "number" && Number.isFinite(max) ? Math.trunc(max) : 32;
+  const chars = Array.from(model);
+  if (limit < 2) return chars.length ? "…" : "";
+  if (chars.length <= limit) return model;
+  return chars.slice(0, limit - 1).join("") + "…";
+}
+export function missionModelChip(state) {
+  if (!state || state.preview === true || !state.mission) {
+    return {visible: false, model: null, label: ""};
+  }
+  const model = recordedModelId(state.lastModel);
+  if (!model) return {visible: false, model: null, label: ""};
+  return {visible: true, model, label: truncateModelId(model)};
 }
 function finiteNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -150,6 +175,10 @@ export function applyEvent(state, e) {
       const agent = state.agents.get(task.agent_id || e.actor_id);
       if (agent) {agent.status = status; agent.output = task.output || agent.output;}
     }
+  }
+  if (MODEL_CALL_EVENTS.has(e.event_type)) {
+    const model = recordedModelId(p.model);
+    if (model) state.lastModel = model;
   }
   if (e.event_type === "llm.started") {
     const a = state.agents.get(e.actor_id);
