@@ -1,5 +1,6 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const EVENT_COUNT_UNAVAILABLE = "unavailable";
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -371,6 +372,22 @@ export function projectEvents(mission, log, throughIndex) {
   for (let i = 0; i <= cursor; i++) applyEvent(state, events[i]);
   state.replay = cursor < events.length - 1;
   return state;
+}
+export function eventCountView(feed, context = {}) {
+  const preview = context.preview === true;
+  const mission = context.mission;
+  const loaded = preview || (!!mission && typeof mission === "object");
+  if (!loaded) return {hidden: true, known: false, count: null, label: ""};
+  if (!Array.isArray(feed)) {
+    return {hidden: false, known: false, count: null, label: EVENT_COUNT_UNAVAILABLE};
+  }
+  const count = feed.length;
+  return {
+    hidden: false,
+    known: true,
+    count,
+    label: count === 1 ? "1 event" : count + " events",
+  };
 }
 export function replayElapsedMs(mission, event) {
   const start = mission?.created_at ? Date.parse(mission.created_at) : NaN;
