@@ -128,6 +128,27 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+export function spendRemainingChip(mission, usage = {}, options = {}) {
+  const hidden = {visible: false, known: false, remaining: null, spent: null, budget: null, label: ""};
+  if (options.preview === true || !mission || typeof mission !== "object") return hidden;
+  const source = usage && typeof usage === "object" && !Array.isArray(usage) ? usage : {};
+  const view = costHudView(source);
+  const spent = finiteNumber(source.cost);
+  const budget = finiteNumber(source.budget);
+  // Remaining is budget minus spent only when the cost HUD already marked both known.
+  // Payment totals on the mission and a default zero token total are not dollars.
+  if (!view.known || spent === null || budget === null || view.remainingLabel == null) {
+    return {visible: true, known: false, remaining: null, spent: null, budget: null, label: ESTIMATE_UNAVAILABLE};
+  }
+  return {
+    visible: true,
+    known: true,
+    remaining: budget - spent,
+    spent,
+    budget,
+    label: view.remainingLabel + " left · " + view.spendLabel + " spent",
+  };
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
