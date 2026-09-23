@@ -31,6 +31,7 @@ def test_compact_shell_preserves_every_javascript_mount_point():
         "answerForm", "mapViewport", "world", "connections", "nodes", "emptyMap",
         "agentCount", "taskCount", "tokenCount", "inspectorContent", "activity",
         "commandBar", "commandForm", "resultPanel", "stopAll", "alerts",
+        "missionControls", "missionPause", "missionResume",
     }
     assert required <= set(parser.ids)
     assert len(parser.ids) == len(set(parser.ids))
@@ -55,6 +56,35 @@ def test_ui_does_not_claim_unconfigured_capabilities():
     assert "can do anything" not in html
     assert "payment connected" not in html
     assert "durable mission events appear here" in html
+
+
+def test_pause_resume_controls_fail_closed_and_stay_touch_sized():
+    html = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    css = (ROOT / "app/static/control.css").read_text(encoding="utf-8")
+    control = (ROOT / "app/static/control.js").read_text(encoding="utf-8")
+    state = (ROOT / "app/static/state.mjs").read_text(encoding="utf-8")
+    assert 'id="missionControls"' in html
+    assert 'id="missionPause"' in html
+    assert 'id="missionResume"' in html
+    assert html.index('id="stopAll"') < html.index('id="missionPause"') < html.index('id="mapViewport"')
+    assert "missionHoldVisibility" in state
+    assert "pauseConfirmed" in state
+    assert 'result.status === "paused"' in state
+    assert 'result.status === "resume_requested"' in state
+    assert "/pause" in control and "/resume" in control
+    assert "resume_requested" in control
+    hold = control.split("async function holdMission")[1].split("function commandSuccessMessage")[0]
+    assert "resumeConfirmed" in hold and "pauseConfirmed" in hold
+    assert "running" not in hold
+    block = css.split(".mission-controls{")[1].split(".telemetry-drawer")[0]
+    assert "animation" not in block
+    assert "@keyframes" not in block
+    assert "min-height:44px" in block
+    phone = css.split("@media(max-width:430px)")[1].split("@media(prefers-reduced-motion")[0]
+    assert "#missionPause" in phone
+    assert "min-height:44px" in phone
+    assert "react" not in (html + css + control).lower()
+    assert "pixi" not in (html + css + control).lower()
 
 
 def test_control_module_starts_with_a_real_line_break():

@@ -33,6 +33,8 @@ export function parseCommand(raw) {
     if (!rest) return {ok: false, error: "answer requires text"};
     return {ok: true, action: "answer", text: rest};
   }
+  if (verb === "pause" && tokens.length === 1) return {ok: true, action: "pause"};
+  if (verb === "resume" && tokens.length === 1) return {ok: true, action: "resume"};
   return {ok: false, error: "Unknown command: " + tokens[0]};
 }
 export function resolveCommand(parsed, context = {}) {
@@ -73,7 +75,38 @@ export function resolveCommand(parsed, context = {}) {
       body: {answer: parsed.text},
     };
   }
+  if (parsed.action === "pause") {
+    if (!missionId) return {ok: false, error: "No live mission to pause"};
+    const status = String(context.missionStatus || "");
+    if (status !== "running" && status !== "waiting") {
+      return {ok: false, error: "Pause is only available while a mission is running or waiting"};
+    }
+    return {ok: true, action: "pause", method: "POST", path: "/api/missions/" + missionId + "/pause"};
+  }
+  if (parsed.action === "resume") {
+    if (!missionId) return {ok: false, error: "No live mission to resume"};
+    if (String(context.missionStatus || "") !== "paused") {
+      return {ok: false, error: "Resume is only available while a mission is paused"};
+    }
+    return {ok: true, action: "resume", method: "POST", path: "/api/missions/" + missionId + "/resume"};
+  }
   return {ok: false, error: "Unknown command"};
+}
+export function missionHoldVisibility(context = {}) {
+  const preview = context.preview === true;
+  const replayLive = context.replayLive !== false;
+  const live = !!context.missionId && !preview && replayLive;
+  const status = String(context.status || "");
+  return {
+    pause: live && (status === "running" || status === "waiting"),
+    resume: live && status === "paused",
+  };
+}
+export function pauseConfirmed(result) {
+  return !!(result && result.status === "paused");
+}
+export function resumeConfirmed(result) {
+  return !!(result && result.status === "resume_requested");
 }
 export function newState(mission = null) {
   return {mission, agents: new Map(), tasks: new Map(), seen: new Set(), events: [],
