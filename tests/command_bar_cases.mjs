@@ -21,6 +21,13 @@ cases.killId = parseCommand("kill " + agentId);
 cases.killExtra = parseCommand("kill " + agentId + " extra");
 cases.answerEmpty = parseCommand("answer");
 cases.answerText = parseCommand("answer ship it");
+cases.budgetSet = parseCommand("budget set max_token_cost 4.5");
+cases.budgetDelta = parseCommand("budget delta max_tool_calls -2");
+cases.budgetPayment = parseCommand("budget set max_payment_amount 1.25");
+cases.budgetBadField = parseCommand("budget set wallet 1");
+cases.budgetBadMode = parseCommand("budget raise max_token_cost 1");
+cases.budgetShort = parseCommand("budget set max_token_cost");
+cases.budgetFraction = parseCommand("budget set max_tool_calls 1.5");
 cases.unknown = parseCommand("pause everything");
 cases.unknownNatural = parseCommand("Prioritize deployment.");
 
@@ -42,6 +49,10 @@ cases.resolveKillPreview = resolveCommand(cases.killId, preview);
 cases.resolveAnswer = resolveCommand(cases.answerText, live);
 cases.resolveAnswerNoQuestion = resolveCommand(cases.answerText, noQuestion);
 cases.resolveAnswerPreview = resolveCommand(cases.answerText, preview);
+cases.resolveBudget = resolveCommand(cases.budgetSet, live);
+cases.resolveBudgetDelta = resolveCommand(cases.budgetDelta, live);
+cases.resolveBudgetPreview = resolveCommand(cases.budgetSet, preview);
+cases.resolveBudgetNoMission = resolveCommand(cases.budgetSet, noMission);
 cases.resolveUnknown = resolveCommand(cases.unknown, live);
 
 cases.killPresent = killRoutePresent({

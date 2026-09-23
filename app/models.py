@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 def utcnow() -> datetime:
@@ -168,3 +168,25 @@ class MissionEvent(BaseModel):
 
 class AnswerRequest(BaseModel):
     answer: str = Field(min_length=1, max_length=4000)
+
+
+class LimitFieldPatch(BaseModel):
+    """Allowlisted MissionLimits caps. Omitted fields stay unchanged. Null is invalid."""
+
+    model_config = ConfigDict(extra="forbid")
+    max_depth: int | None = None
+    max_agents: int | None = None
+    max_tasks: int | None = None
+    max_tool_calls: int | None = None
+    max_runtime_seconds: int | None = None
+    max_payment_amount: float | None = None
+    max_token_cost: float | None = None
+
+
+class MissionBudgetPatch(BaseModel):
+    """Absolute `set` and/or numeric `delta` for allowlisted caps. Not a spend report."""
+
+    model_config = ConfigDict(extra="forbid")
+    set: LimitFieldPatch | None = None
+    delta: LimitFieldPatch | None = None
+    expected_updated_at: datetime | None = None

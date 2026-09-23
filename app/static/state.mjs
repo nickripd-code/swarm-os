@@ -1,6 +1,13 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
+export const BUDGET_LIMIT_FIELDS = new Set([
+  "max_depth", "max_agents", "max_tasks", "max_tool_calls",
+  "max_runtime_seconds", "max_payment_amount", "max_token_cost",
+]);
+export const BUDGET_INTEGER_FIELDS = new Set([
+  "max_depth", "max_agents", "max_tasks", "max_tool_calls", "max_runtime_seconds",
+]);
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
   const paths = spec.paths || {};
@@ -32,6 +39,22 @@ export function parseCommand(raw) {
   if (verb === "answer") {
     if (!rest) return {ok: false, error: "answer requires text"};
     return {ok: true, action: "answer", text: rest};
+  }
+  if (verb === "budget") {
+    const mode = tokens[1] ? tokens[1].toLowerCase() : "";
+    const field = tokens[2] || "";
+    if (tokens.length !== 4 || (mode !== "set" && mode !== "delta")) {
+      return {ok: false, error: "budget requires set or delta, a limit field, and a number"};
+    }
+    if (!BUDGET_LIMIT_FIELDS.has(field)) {
+      return {ok: false, error: "Unknown limit field: " + field};
+    }
+    const value = Number(tokens[3]);
+    if (!Number.isFinite(value)) return {ok: false, error: "budget value must be a finite number"};
+    if (BUDGET_INTEGER_FIELDS.has(field) && !Number.isInteger(value)) {
+      return {ok: false, error: "budget value must be an integer"};
+    }
+    return {ok: true, action: "budget", mode, field, value};
   }
   return {ok: false, error: "Unknown command: " + tokens[0]};
 }
@@ -71,6 +94,19 @@ export function resolveCommand(parsed, context = {}) {
       method: "POST",
       path: "/api/missions/" + missionId + "/answers/" + encodeURIComponent(questionId),
       body: {answer: parsed.text},
+    };
+  }
+  if (parsed.action === "budget") {
+    if (!missionId) return {ok: false, error: "No live mission to update"};
+    const body = {};
+    body[parsed.mode] = {};
+    body[parsed.mode][parsed.field] = parsed.value;
+    return {
+      ok: true,
+      action: "budget",
+      method: "POST",
+      path: "/api/missions/" + missionId + "/budget",
+      body,
     };
   }
   return {ok: false, error: "Unknown command"};

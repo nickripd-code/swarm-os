@@ -10,7 +10,8 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .models import AnswerRequest, Mission, MissionCreate, PaymentIntent
+from .budget import BudgetUpdateError
+from .models import AnswerRequest, Mission, MissionBudgetPatch, MissionCreate, PaymentIntent
 from .runtime import PolicyError, SwarmRuntime
 from .store import Store
 from .health import (
@@ -135,6 +136,16 @@ async def get_agents(mission_id: UUID):
 async def get_tasks(mission_id: UUID):
     if not store.get_mission(mission_id): raise HTTPException(404, "Mission not found")
     return store.project(mission_id)["tasks"]
+
+
+@app.post("/api/missions/{mission_id}/budget")
+async def update_mission_budget(mission_id: UUID, request: MissionBudgetPatch):
+    if not store.get_mission(mission_id):
+        raise HTTPException(404, "Mission not found")
+    try:
+        return await runtime.update_budget(mission_id, request)
+    except BudgetUpdateError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
 
 
 @app.post("/api/missions/{mission_id}/payments", response_model=PaymentIntent)
