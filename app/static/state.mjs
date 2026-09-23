@@ -228,6 +228,43 @@ export function resultMetaText(mission) {
   if (result.failure_class) bits.push(result.failure_class);
   return bits.join(" · ");
 }
+// Keep in lockstep with app.models.FailureClass. Do not add display-only names.
+const FAILURE_CLASSES = new Set([
+  "MODEL_FAILURE",
+  "PROVIDER_OUTAGE",
+  "RATE_LIMIT",
+  "TIMEOUT",
+  "CONTEXT_LIMIT",
+  "CAPABILITY_MISMATCH",
+  "TOOL_MISSING",
+  "TOOL_FAILURE",
+  "INVALID_OUTPUT",
+  "LOW_CONFIDENCE",
+  "VERIFICATION_FAILURE",
+  "RESOURCE_EXHAUSTED",
+  "AUTHORIZATION_REQUIRED",
+  "POLICY_REFUSAL",
+  "UNKNOWN_FAILURE",
+]);
+export const FAILURE_CLASS_UNAVAILABLE = "unavailable";
+export function knownFailureClasses() {
+  return [...FAILURE_CLASSES];
+}
+function recordedFailureClass(mission) {
+  const raw = mission?.result?.failure_class;
+  return typeof raw === "string" && FAILURE_CLASSES.has(raw) ? raw : null;
+}
+export function failureClassChip(state) {
+  const mission = state?.mission || null;
+  if (!mission || state?.preview === true || mission.status !== "failed") {
+    return {hidden: true, label: "", known: false, failure_class: null};
+  }
+  const recorded = recordedFailureClass(mission);
+  if (!recorded) {
+    return {hidden: false, label: FAILURE_CLASS_UNAVAILABLE, known: false, failure_class: null};
+  }
+  return {hidden: false, label: recorded, known: true, failure_class: recorded};
+}
 export function alertFromEvent(e) {
   const p = e.payload || {};
   switch (e.event_type) {
