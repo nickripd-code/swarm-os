@@ -404,3 +404,111 @@ export function replayView(log, index, options = {}) {
         : "Recorded events only · not a simulation"),
   };
 }
+
+export const LAST_TOOL_LATENCY_UNAVAILABLE = "unavailable";
+const TOOL_FINISHED_EVENTS = new Set(["tool.completed", "tool.failed"]);
+const TOOL_LATENCY_FIELDS = ["latency_ms", "duration_ms", "elapsed_ms"];
+
+function hiddenToolLatency() {
+  return {hidden: true, label: "", known: false, ms: null};
+}
+function unavailableToolLatency() {
+  return {hidden: false, label: LAST_TOOL_LATENCY_UNAVAILABLE, known: false, ms: null};
+}
+function toolEventPayload(event) {
+  const payload = event?.payload;
+  return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+}
+function toolEventTimeMs(event) {
+  const raw = event?.created_at;
+  if (typeof raw === "number") return raw > 0 && Number.isFinite(raw) ? raw : null;
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const parsed = Date.parse(raw.trim());
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+/** Same buckets as Mission Control elapsed (`#hudElapsed`): hours, minutes, then seconds. */
+export function formatToolLatency(ms) {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) return null;
+  if (ms < 1000) {
+    const rounded = Math.round(ms);
+    if (rounded <= 0) return null;
+    if (rounded >= 1000) return formatToolLatency(rounded);
+    return rounded + "ms";
+  }
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  if (hours) return hours + "h " + (minutes % 60) + "m";
+  if (minutes) return minutes + "m " + (seconds % 60) + "s";
+  return seconds + "s";
+}
+function knownToolLatency(ms) {
+  const label = formatToolLatency(ms);
+  if (!label) return unavailableToolLatency();
+  return {hidden: false, label, known: true, ms};
+}
+function explicitToolLatency(payload) {
+  for (const key of TOOL_LATENCY_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(payload, key)) continue;
+    const ms = finiteNumber(payload[key]);
+    if (ms === null || ms <= 0) return {status: "invalid"};
+    return {status: "ok", ms};
+  }
+  return {status: "absent"};
+}
+function matchingToolStart(events, finishedIndex, finished) {
+  const actor = finished?.actor_id ?? null;
+  const payload = toolEventPayload(finished);
+  const tool = typeof payload.tool === "string" ? payload.tool : "";
+  const used = Object.prototype.hasOwnProperty.call(payload, "used") ? finiteNumber(payload.used) : null;
+  for (let i = finishedIndex + 1; i < events.length; i++) {
+    const event = events[i];
+    if (!event || typeof event !== "object") continue;
+    const sameActor = !actor || !event.actor_id || event.actor_id === actor;
+    if (!sameActor) continue;
+    if (TOOL_FINISHED_EVENTS.has(event.event_type)) return null;
+    if (event.event_type !== "tool.started") continue;
+    const startPayload = toolEventPayload(event);
+    const startTool = typeof startPayload.tool === "string" ? startPayload.tool : "";
+    if (tool && startTool && startTool !== tool) continue;
+    if (used !== null && Object.prototype.hasOwnProperty.call(startPayload, "used")) {
+      const startUsed = finiteNumber(startPayload.used);
+      if (startUsed === null || startUsed !== used) continue;
+    }
+    return event;
+  }
+  return null;
+}
+
+/**
+ * Read-only duration of the newest finished tool call already on the shell.
+ * Events are newest-first, matching `state.events`. Incomplete `tool.started`
+ * rows are ignored. An explicit positive `latency_ms` / `duration_ms` /
+ * `elapsed_ms` on `tool.completed` or `tool.failed` wins. Otherwise the span
+ * is the recorded `created_at` delta from the matching `tool.started`.
+ * Zero is never a duration. `tool.failed` is included, matching the model chip.
+ */
+export function lastToolLatencyView(state) {
+  if (!state || state.preview === true || !state.mission) return hiddenToolLatency();
+  const events = state.events;
+  if (!Array.isArray(events)) return unavailableToolLatency();
+  let finished = null;
+  let finishedIndex = -1;
+  for (let i = 0; i < events.length; i++) {
+    const event = events[i];
+    if (event && TOOL_FINISHED_EVENTS.has(event.event_type)) {
+      finished = event;
+      finishedIndex = i;
+      break;
+    }
+  }
+  if (!finished) return unavailableToolLatency();
+  const explicit = explicitToolLatency(toolEventPayload(finished));
+  if (explicit.status === "invalid") return unavailableToolLatency();
+  if (explicit.status === "ok") return knownToolLatency(explicit.ms);
+  const started = matchingToolStart(events, finishedIndex, finished);
+  const end = toolEventTimeMs(finished);
+  const start = started ? toolEventTimeMs(started) : null;
+  if (start === null || end === null || end <= start) return unavailableToolLatency();
+  return knownToolLatency(end - start);
+}
