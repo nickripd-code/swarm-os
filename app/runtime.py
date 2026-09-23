@@ -875,7 +875,10 @@ class SwarmRuntime:
                     "reason": metadata.get("failover_reason"),
                     "model": metadata.get("model", model),
                 }, actor.id)
-            await self.emit(mission.id, EventType.LLM_COMPLETED, {"kind": kind, **metadata}, actor.id)
+            await self.emit(
+                mission.id, EventType.LLM_COMPLETED,
+                {"kind": kind, **metadata, "agent_id": str(actor.id)}, actor.id,
+            )
             await self._account_tokens(mission, actor, kind, metadata)
         return response
 
@@ -892,7 +895,9 @@ class SwarmRuntime:
                 listed = lookup(metadata.get("provider"), metadata.get("model"))
                 if listed is not None:
                     listed_input, listed_output = listed
-        outcome = self.resources.consume(mission, usage, listed_input, listed_output)
+        outcome = self.resources.consume(
+            mission, usage, listed_input, listed_output, agent_id=actor.id,
+        )
         extra = {
             "kind": kind,
             "provider": metadata.get("provider"),

@@ -77,7 +77,67 @@ export function resolveCommand(parsed, context = {}) {
 }
 export function newState(mission = null) {
   return {mission, agents: new Map(), tasks: new Map(), seen: new Set(), events: [],
-    usage: {input: 0, output: 0, reasoning: 0, cost: null, budget: null, known: false}, decisions: 0, preview: false};
+    usage: {input: 0, output: 0, reasoning: 0, cost: null, budget: null, known: false},
+    agentCosts: new Map(), decisions: 0, preview: false};
+}
+function blankAgentCost() {
+  return {input: 0, output: 0, reasoning: 0, knownUsd: null, costKnown: false, partial: false};
+}
+function ensureAgentCost(state, id) {
+  if (!id) return null;
+  let row = state.agentCosts.get(id);
+  if (!row) {
+    row = blankAgentCost();
+    state.agentCosts.set(id, row);
+  }
+  return row;
+}
+export function agentCostView(entry) {
+  const input = nonNegativeInt(entry?.input);
+  const output = nonNegativeInt(entry?.output);
+  const reasoning = nonNegativeInt(entry?.reasoning);
+  const tokens = input + output + reasoning;
+  const usd = finiteNumber(entry?.knownUsd);
+  const known = entry?.costKnown === true && usd !== null && usd >= 0;
+  return {
+    tokens,
+    input,
+    output,
+    reasoning,
+    known,
+    spendLabel: known ? formatUsd(usd) : ESTIMATE_UNAVAILABLE,
+  };
+}
+export function agentCostRows(agentCosts, agents) {
+  const rows = [];
+  if (!agentCosts) return rows;
+  for (const [id, entry] of agentCosts) {
+    const view = agentCostView(entry);
+    if (view.tokens <= 0 && !view.known) continue;
+    const agent = agents?.get?.(id);
+    const role = agent?.role ? String(agent.role).replaceAll("_", " ") : String(id).slice(0, 8);
+    const usd = finiteNumber(entry?.knownUsd);
+    rows.push({
+      id, label: role, tokens: view.tokens, spendLabel: view.spendLabel, known: view.known,
+      knownUsd: view.known && usd !== null ? usd : null,
+    });
+  }
+  return rows;
+}
+function applyAgentCostSnapshot(row, item) {
+  if (finiteNumber(item.input_tokens) !== null) row.input = nonNegativeInt(item.input_tokens);
+  if (finiteNumber(item.output_tokens) !== null) row.output = nonNegativeInt(item.output_tokens);
+  if (finiteNumber(item.reasoning_tokens) !== null) row.reasoning = nonNegativeInt(item.reasoning_tokens);
+  const usd = finiteNumber(item.known_usd);
+  if (item.known === true && usd !== null && usd >= 0) {
+    row.knownUsd = usd;
+    row.costKnown = true;
+    row.partial = false;
+    return;
+  }
+  row.costKnown = false;
+  row.partial = item.partial === true && usd !== null && usd >= 0;
+  row.knownUsd = null;
 }
 function finiteNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -162,7 +222,14 @@ export function applyEvent(state, e) {
     state.usage.input += input;
     state.usage.output += output;
     state.usage.reasoning += reasoning;
-    const a = state.agents.get(e.actor_id);
+    const agentId = p.agent_id || e.actor_id;
+    const cost = ensureAgentCost(state, agentId);
+    if (cost) {
+      cost.input += input;
+      cost.output += output;
+      cost.reasoning += reasoning;
+    }
+    const a = state.agents.get(agentId) || state.agents.get(e.actor_id);
     if (a) {a.tokens = (a.tokens || 0) + input + output + reasoning; a.model = p.model;}
   }
   if (e.event_type === "budget.updated") {
@@ -174,6 +241,15 @@ export function applyEvent(state, e) {
     if (p.known === true && spent !== null && spent >= 0) {
       state.usage.cost = spent;
       state.usage.known = true;
+    }
+    if (Array.isArray(p.by_agent)) {
+      for (const item of p.by_agent) {
+        if (!item || !item.agent_id) continue;
+        const row = ensureAgentCost(state, item.agent_id);
+        applyAgentCostSnapshot(row, item);
+        const agent = state.agents.get(item.agent_id);
+        if (agent && finiteNumber(item.tokens) !== null) agent.tokens = nonNegativeInt(item.tokens);
+      }
     }
   }
   if (e.event_type === "controller.decision") state.decisions++;

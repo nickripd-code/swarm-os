@@ -99,6 +99,16 @@ class MissionAnswer(BaseModel):
     approval_action: str | None = None
 
 
+class AgentTokenCost(BaseModel):
+    """Tokens attributed to one agent. known_usd stays None until a priced estimate exists."""
+
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    reasoning_tokens: int = Field(default=0, ge=0)
+    known_usd: float | None = None
+    unknown_calls: int = Field(default=0, ge=0)
+
+
 class Mission(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     goal: str
@@ -106,6 +116,7 @@ class Mission(BaseModel):
     budget: float = 0
     spent: float = 0
     token_spent: float = Field(default=0, ge=0)
+    agent_token_costs: dict[str, AgentTokenCost] = Field(default_factory=dict)
     live_payments: bool = False
     privacy: Literal["cloud_allowed", "local_only"] = "cloud_allowed"
     limits: MissionLimits = Field(default_factory=MissionLimits)

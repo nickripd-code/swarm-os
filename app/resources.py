@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from .models import FailureClass, Mission
+from .models import AgentTokenCost, FailureClass, Mission
 from .policy import PolicyError, PolicyGate
 from .providers import ModelUsage
 
@@ -266,6 +266,60 @@ class ResourceScheduler:
             usage, self.resolve_prices(listed_input, listed_output), self.settings.markup,
         )
 
+    def known_agent_usd(self, mission: Mission) -> float:
+        """Sum of priced per-agent estimates. None means that agent contributed no dollars."""
+        total = 0.0
+        for tally in mission.agent_token_costs.values():
+            if tally.known_usd is not None:
+                total += tally.known_usd
+        return round_cost(total)
+
+    def agent_breakdown(self, mission: Mission) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for agent_id, tally in mission.agent_token_costs.items():
+            priced = tally.known_usd is not None
+            partial = priced and tally.unknown_calls > 0
+            rows.append({
+                "agent_id": agent_id,
+                "input_tokens": tally.input_tokens,
+                "output_tokens": tally.output_tokens,
+                "reasoning_tokens": tally.reasoning_tokens,
+                "tokens": tally.input_tokens + tally.output_tokens + tally.reasoning_tokens,
+                "known_usd": tally.known_usd,
+                "known": priced and not partial,
+                "partial": partial,
+                "unknown_calls": tally.unknown_calls,
+            })
+        return rows
+
+    def _attribute(
+        self,
+        mission: Mission,
+        usage: ModelUsage,
+        estimate: UsageCostEstimate,
+        agent_id: Any,
+    ) -> None:
+        """Record tokens and known USD for the agent that spent them. Never stores $0 for an unknown price."""
+        if agent_id is None:
+            return
+        key = str(agent_id).strip()
+        if not key:
+            return
+        tokens = usage.input_tokens + usage.output_tokens + usage.reasoning_tokens
+        priced = estimate.known and estimate.estimated_cost is not None
+        if tokens <= 0 and not priced:
+            return
+        tally = mission.agent_token_costs.get(key) or AgentTokenCost()
+        tally.input_tokens += max(usage.input_tokens, 0)
+        tally.output_tokens += max(usage.output_tokens, 0)
+        tally.reasoning_tokens += max(usage.reasoning_tokens, 0)
+        if priced:
+            assert estimate.estimated_cost is not None
+            tally.known_usd = round_cost((tally.known_usd or 0.0) + estimate.estimated_cost)
+        elif tokens > 0:
+            tally.unknown_calls += 1
+        mission.agent_token_costs[key] = tally
+
     def authorize_start(self, mission: Mission) -> None:
         """Fail closed before another model call when the token budget is already exhausted."""
         if mission.token_spent > 0 and self.remaining(mission) <= 0:
@@ -280,15 +334,19 @@ class ResourceScheduler:
         usage: ModelUsage,
         listed_input: float | None = None,
         listed_output: float | None = None,
+        *,
+        agent_id: Any = None,
     ) -> SpendOutcome:
         """Charge estimated USD when known. Over-budget still records spend, then marks exhausted.
 
         Unknown prices: fail closed (default) or skip-estimate honestly when configured.
         Skip does not invent a dollar amount and does not charge.
+        When agent_id is present, tokens and known USD are attributed to that agent.
         """
         estimate = self.estimate(usage, listed_input, listed_output)
         has_tokens = (usage.input_tokens + usage.output_tokens + usage.reasoning_tokens) > 0
         if not estimate.known:
+            self._attribute(mission, usage, estimate, agent_id)
             error = None
             if has_tokens and self.settings.unknown_price == "fail":
                 error = PolicyError(
@@ -300,6 +358,7 @@ class ResourceScheduler:
         budget = self.budget_for(mission)
         previous = mission.token_spent
         mission.token_spent = round_cost(previous + estimate.estimated_cost)
+        self._attribute(mission, usage, estimate, agent_id)
         crossed = previous < self.warning_threshold(mission) <= mission.token_spent
         error = None
         try:
@@ -315,6 +374,7 @@ class ResourceScheduler:
             "token_budget": budget,
             "remaining": self.remaining(mission),
             "currency": "USD",
+            "by_agent": self.agent_breakdown(mission),
             **estimate.as_payload(),
         }
         payload.update(extra)
