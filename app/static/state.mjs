@@ -228,6 +228,70 @@ export function resultMetaText(mission) {
   if (result.failure_class) bits.push(result.failure_class);
   return bits.join(" · ");
 }
+const MISSION_STATUS_EVENTS = new Set([
+  "mission.started", "mission.waiting", "mission.running", "mission.paused",
+  "mission.resumed", "mission.question", "mission.failed", "mission.completed",
+  "mission.stopped", "mission.blocked",
+]);
+function recordedText(value) {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  return text ? text : null;
+}
+function newestMissionStatusEvent(events) {
+  if (!Array.isArray(events)) return null;
+  for (const event of events) {
+    if (event && MISSION_STATUS_EVENTS.has(event.event_type)) return event;
+  }
+  return null;
+}
+function hiddenErrorParkSnippet() {
+  return {visible: false, kind: null, label: "", text: "", failureClass: null};
+}
+function failedSnippetText(source) {
+  const record = source && typeof source === "object" ? source : {};
+  const failureClass = recordedText(record.failure_class);
+  const error = recordedText(record.error) || recordedText(record.reason);
+  if (!failureClass && !error) return null;
+  return {
+    failureClass,
+    text: failureClass && error ? failureClass + " · " + error : (failureClass || error),
+  };
+}
+/** Read-only failed/parked reason. Hidden unless a recorded field is present. */
+export function errorParkSnippet(state = {}) {
+  if (!state || state.preview === true || !state.mission) return hiddenErrorParkSnippet();
+  const mission = state.mission;
+  const status = typeof mission.status === "string" ? mission.status : "";
+  const newest = newestMissionStatusEvent(state.events);
+  if (status === "failed") {
+    if (newest && newest.event_type !== "mission.failed") return hiddenErrorParkSnippet();
+    const source = newest ? (newest.payload || {}) : mission.result;
+    const failed = failedSnippetText(source);
+    if (!failed) return hiddenErrorParkSnippet();
+    return {
+      visible: true,
+      kind: "failed",
+      label: "FAILED",
+      text: failed.text,
+      failureClass: failed.failureClass,
+    };
+  }
+  if (status === "waiting") {
+    if (newest && newest.event_type !== "mission.waiting" && newest.event_type !== "mission.question") {
+      return hiddenErrorParkSnippet();
+    }
+    let reason = null;
+    if (!newest || newest.event_type === "mission.question") {
+      reason = recordedText(mission.pending_question?.reason);
+    } else {
+      reason = recordedText((newest.payload || {}).reason) || recordedText(mission.pending_question?.reason);
+    }
+    if (!reason) return hiddenErrorParkSnippet();
+    return {visible: true, kind: "parked", label: "PARKED", text: reason, failureClass: null};
+  }
+  return hiddenErrorParkSnippet();
+}
 export function alertFromEvent(e) {
   const p = e.payload || {};
   switch (e.event_type) {
