@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,replayCursorChip} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -373,6 +373,16 @@ function renderReplayHud(){
   }
   if($("replayCaption"))$("replayCaption").textContent=view.caption;
   if($("replayPosition"))$("replayPosition").textContent=view.positionLabel;
+  const cursorChip=$("replayCursorChip");
+  if(cursorChip){
+    const cursorView=replayCursorChip(view,sourceMission||state.mission);
+    cursorChip.hidden=!cursorView.visible;
+    cursorChip.textContent=cursorView.visible?cursorView.label:"";
+    if(cursorView.unavailable)cursorChip.dataset.unavailable="true";
+    else delete cursorChip.dataset.unavailable;
+    if(cursorView.visible)cursorChip.setAttribute("aria-label",cursorView.ariaLabel);
+    else cursorChip.removeAttribute("aria-label");
+  }
   if($("replayEvent"))$("replayEvent").textContent=view.eventType||"—";
   const scrub=$("replayScrub");
   if(scrub){

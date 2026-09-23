@@ -1,5 +1,6 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const REPLAY_CURSOR_UNAVAILABLE = "unavailable";
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -402,5 +403,36 @@ export function replayView(log, index, options = {}) {
       : (events.length < 1
         ? "No recorded events yet"
         : "Recorded events only · not a simulation"),
+  };
+}
+function replayCursorHidden() {
+  return {visible: false, unavailable: false, label: "", index: null, total: null, ariaLabel: ""};
+}
+export function replayCursorChip(view, mission) {
+  if (!mission || !view || view.preview === true || view.live !== false) return replayCursorHidden();
+  const cursor = view.cursor;
+  const total = view.total;
+  const positionLabel = typeof view.positionLabel === "string" ? view.positionLabel : "";
+  const indexOk = Number.isInteger(cursor) && cursor >= 0;
+  const totalOk = Number.isInteger(total) && total >= 1;
+  const index = indexOk ? cursor + 1 : null;
+  const expected = indexOk && totalOk && cursor < total ? index + " / " + total : "";
+  if (!expected || positionLabel !== expected) {
+    return {
+      visible: true,
+      unavailable: true,
+      label: REPLAY_CURSOR_UNAVAILABLE,
+      index: null,
+      total: null,
+      ariaLabel: "Replay cursor unavailable",
+    };
+  }
+  return {
+    visible: true,
+    unavailable: false,
+    label: positionLabel,
+    index,
+    total,
+    ariaLabel: "Replay cursor " + positionLabel,
   };
 }
