@@ -69,6 +69,11 @@
       </details>
     </section>
 
+    <p class="error-park-snippet" id="errorParkSnippet" role="status" hidden>
+      <span class="eyebrow" id="errorParkLabel"></span>
+      <span id="errorParkText"></span>
+    </p>
+
     <section class="question-panel" id="questionPanel" hidden>
       <div><span class="eyebrow">AUTHORIZATION REQUIRED</span><h2>The swarm needs your answer.</h2></div><p id="questionText"></p>
       <form id="answerForm" class="answer-form"><label class="sr-only" for="answerText">Your answer</label><textarea id="answerText" name="answer" required minlength="1" maxlength="4000" rows="2" placeholder="Type an answer…"></textarea><button id="answerSend" type="submit">Send <span aria-hidden="true">↗</span></button></form>
