@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,missionPhaseChip,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -49,6 +49,13 @@ function renderHud(){
   if($("missionStatus")){
     $("missionStatus").textContent=status.toUpperCase();
     $("missionStatus").className="hud-chip status "+status;
+  }
+  if($("missionPhaseChip")){
+    const phase=missionPhaseChip(state);
+    const chip=$("missionPhaseChip");
+    chip.hidden=phase.hidden;
+    chip.textContent=phase.label;
+    chip.className="hud-chip status"+(phase.statusClass?" "+phase.statusClass:"");
   }
   if($("hudAgents"))$("hudAgents").textContent=state.agents.size;
   if($("hudTasks"))$("hudTasks").textContent=[...state.tasks.values()].filter(t=>t.status==="completed").length;

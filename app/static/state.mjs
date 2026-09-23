@@ -219,6 +219,21 @@ export function missionMode(state) {
   if (state.preview) return "preview";
   return state.mission?.mode || state.mission?.result?.mode || (state.mission ? "pending" : "standby");
 }
+// Same strings as MissionStatus and the #missionStatus badge. No aliases.
+const MISSION_PHASES = new Set([
+  "pending", "running", "waiting", "paused", "blocked", "completed", "failed", "stopped",
+]);
+export function missionPhaseChip(state = {}) {
+  if (!state || state.preview === true || !state.mission) {
+    return {hidden: true, label: "", statusClass: ""};
+  }
+  const raw = state.mission.status;
+  const status = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  if (!MISSION_PHASES.has(status)) {
+    return {hidden: false, label: "unavailable", statusClass: "unavailable"};
+  }
+  return {hidden: false, label: status.toUpperCase(), statusClass: status};
+}
 export function resultMetaText(mission) {
   const result = mission?.result;
   if (!result) return "";
