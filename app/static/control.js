@@ -199,6 +199,7 @@ function render(){
     const meta=resultMetaText(mission);
     if($("resultMeta")){$("resultMeta").hidden=!meta;$("resultMeta").textContent=meta;}
   }
+  document.dispatchEvent(new CustomEvent("swarm-spend-context",{detail:{missionId:state.preview?null:state.mission?.id||null,preview:!!state.preview,stamp:state.preview?0:state.seen.size}}));
 }
 function selectAgent(id){
   selected=id;
