@@ -404,3 +404,100 @@ export function replayView(log, index, options = {}) {
         : "Recorded events only · not a simulation"),
   };
 }
+
+export const LAST_LEASE_EXPIRED_UNAVAILABLE = "LAST LEASE EXPIRED unavailable";
+const LEASE_EXPIRED_AT_EVENTS = new Set([
+  "lease.expired",
+]);
+const LEASE_EXPIRED_AT_STAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})$/;
+
+function hiddenLastLeaseExpired() {
+  return {hidden: true, label: "", known: false, at: null, title: ""};
+}
+function unavailableLastLeaseExpired() {
+  return {hidden: false, label: LAST_LEASE_EXPIRED_UNAVAILABLE, known: false, at: null, title: ""};
+}
+
+/** UTC clock from a recorded event stamp. Epoch and naive times are rejected. */
+function parseLeaseExpiredAt(raw) {
+  if (typeof raw !== "string" || raw === "" || raw !== raw.trim()) return null;
+  const match = LEASE_EXPIRED_AT_STAMP.exec(raw);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const fraction = match[7] ? Number(match[7].padEnd(3, "0").slice(0, 3)) : 0;
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return null;
+  let offsetMinutes = 0;
+  if (match[8] !== "Z") {
+    const sign = match[8][0] === "-" ? -1 : 1;
+    const offsetHour = Number(match[8].slice(1, 3));
+    const offsetMinute = Number(match[8].slice(4, 6));
+    if (offsetHour > 23 || offsetMinute > 59) return null;
+    offsetMinutes = sign * (offsetHour * 60 + offsetMinute);
+  }
+  const utc = Date.UTC(year, month - 1, day, hour, minute, second, fraction) - offsetMinutes * 60000;
+  if (!Number.isFinite(utc) || utc <= 0) return null;
+  const wall = new Date(utc + offsetMinutes * 60000);
+  if (
+    wall.getUTCFullYear() !== year ||
+    wall.getUTCMonth() !== month - 1 ||
+    wall.getUTCDate() !== day ||
+    wall.getUTCHours() !== hour ||
+    wall.getUTCMinutes() !== minute ||
+    wall.getUTCSeconds() !== second
+  ) return null;
+  const shown = new Date(utc);
+  const hh = String(shown.getUTCHours()).padStart(2, "0");
+  const mm = String(shown.getUTCMinutes()).padStart(2, "0");
+  const ss = String(shown.getUTCSeconds()).padStart(2, "0");
+  return {label: hh + ":" + mm + ":" + ss + "Z", stamp: raw, at: utc};
+}
+
+/** Prefix of a loaded event log. A missing feed stays null — never an invented []. */
+export function recordedLeaseExpiredAtFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+
+/**
+ * Read-only UTC time of the newest recorded lease.expired on the loaded
+ * shell log. Companion to the lease-expired count (open PR #269), which
+ * counts lease.expired only. lease.claimed, lease.released, job.enqueued,
+ * and tool.started do not set this clock. Hidden with no mission, in
+ * preview, or when no lease.expired is visible yet. A missing feed, or a
+ * visible expiry whose own stamp is unreadable, is LAST LEASE EXPIRED
+ * unavailable. The newest valid event time wins. The log-order last
+ * lease.expired must itself have a valid stamp. Never invents a clock
+ * or spend.
+ */
+export function lastLeaseExpiredAtView(feed, options = {}) {
+  if (options.visible !== true) return hiddenLastLeaseExpired();
+  if (!Array.isArray(feed)) return unavailableLastLeaseExpired();
+  let lastParsed = null;
+  let sawExpired = false;
+  let best = null;
+  for (const event of feed) {
+    if (!event || typeof event !== "object" || Array.isArray(event)) continue;
+    if (!LEASE_EXPIRED_AT_EVENTS.has(event.event_type)) continue;
+    sawExpired = true;
+    const parsed = parseLeaseExpiredAt(event.created_at);
+    lastParsed = parsed;
+    if (parsed && (!best || parsed.at >= best.at)) best = parsed;
+  }
+  if (!sawExpired) return hiddenLastLeaseExpired();
+  if (!lastParsed || !best) return unavailableLastLeaseExpired();
+  return {
+    hidden: false,
+    label: "LAST LEASE EXPIRED " + best.label,
+    known: true,
+    at: best.stamp,
+    title: best.stamp,
+  };
+}
