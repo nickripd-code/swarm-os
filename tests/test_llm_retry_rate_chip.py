@@ -112,7 +112,8 @@ def test_unreadable_tiny_rate_stays_unavailable(cases):
     assert tiny["known"] is False
     assert tiny["retries"] == 1
     assert tiny["completed"] == 1000000
-    assert tiny["attempts"] == 1000001
+    assert tiny["failed"] == 0
+    assert tiny["attempts"] == 1000000
     assert tiny["rate"] is None
     assert tiny["label"] == "LLM RETRY RATE " + UNAVAILABLE
     assert tiny["label"] != "LLM RETRY RATE 0%"
