@@ -528,6 +528,8 @@ def test_build_tool_provider_empty_without_env(monkeypatch):
     monkeypatch.delenv("SWARM_BROWSER", raising=False)
     monkeypatch.delenv("SWARM_SELFMOD", raising=False)
     monkeypatch.delenv("SWARM_SELFMOD_WRITE", raising=False)
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    monkeypatch.delenv("SWARM_EXA", raising=False)
     assert build_tool_provider() is None
 
 
@@ -537,6 +539,8 @@ def test_build_tool_provider_local_allowlist(monkeypatch):
     monkeypatch.delenv("SWARM_BROWSER", raising=False)
     monkeypatch.delenv("SWARM_SELFMOD", raising=False)
     monkeypatch.delenv("SWARM_SELFMOD_WRITE", raising=False)
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    monkeypatch.delenv("SWARM_EXA", raising=False)
     provider = build_tool_provider()
     assert [spec.name for spec in provider.list_tools()] == ["echo", "hash.sha256"]
     assert "not-a-tool" not in LOCAL_TOOL_CATALOG

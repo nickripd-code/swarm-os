@@ -3,8 +3,9 @@ import pytest
 from app.llm import FallbackController, LLMProvider
 from app.models import FailureClass, Mission
 from app.policy import (
-    PolicyError, PolicyGate, PolicyRequest, privacy_from_state, tool_is_dangerous,
+    PolicyError, PolicyGate, PolicyRequest, privacy_from_state,     tool_is_dangerous,
     tool_is_opted_in_composio,
+    tool_is_opted_in_exa,
 )
 from app.router import capability_request_for
 from app.runtime import SwarmRuntime
@@ -175,6 +176,27 @@ def test_composio_is_external_and_requires_explicit_configuration(monkeypatch):
     with pytest.raises(PolicyError) as exc:
         gate.authorize(_request(action="tool_use", mission=local, tool="composio.GMAIL_FETCH_EMAILS"))
     assert "local_only" in str(exc.value)
+
+
+def test_exa_search_is_external_and_requires_explicit_opt_in(monkeypatch):
+    gate = PolicyGate()
+    cloud = Mission(goal="research")
+    local = Mission(goal="private", privacy="local_only")
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    monkeypatch.delenv("SWARM_EXA", raising=False)
+    assert tool_is_dangerous("exa.search")
+    assert tool_is_dangerous("search.web")
+    assert not tool_is_opted_in_exa("exa.search")
+    with pytest.raises(PolicyError):
+        gate.authorize(_request(action="tool_use", mission=cloud, tool="search.web"))
+    monkeypatch.setenv("EXA_API_KEY", "configured")
+    assert tool_is_opted_in_exa("exa.contents")
+    gate.authorize(_request(action="tool_use", mission=cloud, tool="exa.contents"))
+    with pytest.raises(PolicyError) as exc:
+        gate.authorize(_request(action="tool_use", mission=local, tool="exa.search"))
+    assert "local_only" in str(exc.value)
+    with pytest.raises(PolicyError):
+        gate.authorize(_request(action="tool_use", mission=cloud, tool="web.search"))
 
 
 def test_token_budget_is_independent_of_payment_spent():
