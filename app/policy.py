@@ -3,9 +3,17 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from .models import FailureClass, Mission
+from .twilio import (
+    SMS_SEND_TOOL,
+    redact_twilio_secrets,
+    sms_body_preview,
+    sms_destination,
+    sms_refusal_reason,
+    twilio_sms_configured,
+)
 
 PolicyAction = Literal["spawn", "finish", "tool_use", "org_change", "live_payment"]
 PrivacyMode = Literal["cloud_allowed", "local_only"]
@@ -28,7 +36,7 @@ DANGEROUS_TOOLS = frozenset({
 DANGEROUS_PREFIXES = (
     "shell.", "bash.", "fs.", "file.", "browser.", "http.", "net.",
     "pay.", "wallet.", "secret.", "deploy.", "ssh.", "selfmod.", "self_modify.",
-    "composio.",
+    "composio.", "sms.", "voice.", "twilio.",
 )
 CLOUD_EXFIL_TOOLS = frozenset({
     "browser", "playwright", "computer_use", "network", "http", "fetch",
@@ -62,6 +70,8 @@ class ApprovalRequirement:
     question: str
     reason: str
     org_op: str | None = None
+    single_use: bool = False
+    approval_action: str | None = None
 
 
 @dataclass(frozen=True)
@@ -78,6 +88,7 @@ class PolicyRequest:
     mode: str = "openai"
     parent_ok: bool = True
     org_op: str | None = None
+    arguments: dict[str, Any] | None = None
 
 
 def parse_approval_answer(text: str) -> ApprovalVerdict | None:
@@ -127,6 +138,7 @@ def tool_exfiltrates(name: str) -> bool:
         return True
     return any(lowered.startswith(prefix) for prefix in (
         "browser.", "http.", "net.", "pay.", "wallet.", "composio.",
+        "sms.", "voice.", "twilio.",
     ))
 
 
@@ -157,6 +169,14 @@ def tool_is_opted_in_selfmod(name: str) -> bool:
 
 def tool_is_opted_in_composio(name: str) -> bool:
     return name.strip().lower().startswith("composio.") and bool(os.getenv("COMPOSIO_API_KEY", "").strip())
+
+
+def tool_is_twilio_sms(name: str) -> bool:
+    return name.strip().lower() == SMS_SEND_TOOL
+
+
+def tool_is_opted_in_twilio(name: str) -> bool:
+    return tool_is_twilio_sms(name) and twilio_sms_configured()
 
 
 class PolicyGate:
@@ -205,6 +225,18 @@ class PolicyGate:
                 reason=f"Organization {op} requires human approval",
                 org_op=op,
             )
+        if request.action == "tool_use" and tool_is_opted_in_twilio(request.tool or ""):
+            dest = sms_destination(request.arguments) or "an unknown number"
+            preview = sms_body_preview(request.arguments)
+            return ApprovalRequirement(
+                action="tool_use",
+                question=redact_twilio_secrets(
+                    f"Approve one SMS to {dest}? Reply approve or deny. Body: {preview}"
+                ),
+                reason="Outbound SMS requires human approval",
+                single_use=True,
+                approval_action=SMS_SEND_TOOL,
+            )
         return None
 
     def check_tool_budget(self, mission: Mission, used: int) -> None:
@@ -250,8 +282,16 @@ class PolicyGate:
             and not tool_is_opted_in_browser(name)
             and not tool_is_opted_in_selfmod(name)
             and not tool_is_opted_in_composio(name)
+            and not tool_is_opted_in_twilio(name)
         ):
+            # Partial Twilio env is unconfigured, so sms.send falls through to TOOL_MISSING.
+            if tool_is_twilio_sms(name) and not twilio_sms_configured():
+                return
             raise PolicyError(f"Tool '{name}' is denied by default", FailureClass.POLICY_REFUSAL)
+        if tool_is_opted_in_twilio(name):
+            reason = sms_refusal_reason(request.arguments)
+            if reason:
+                raise PolicyError(reason, FailureClass.POLICY_REFUSAL)
 
     def _authorize_org_change(self, request: PolicyRequest) -> None:
         op = (request.org_op or "").strip()

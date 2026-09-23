@@ -4,7 +4,7 @@ from app.llm import FallbackController, LLMProvider
 from app.models import FailureClass, Mission
 from app.policy import (
     PolicyError, PolicyGate, PolicyRequest, privacy_from_state, tool_is_dangerous,
-    tool_is_opted_in_composio,
+    tool_is_opted_in_composio, tool_is_opted_in_twilio,
 )
 from app.router import capability_request_for
 from app.runtime import SwarmRuntime
@@ -175,6 +175,49 @@ def test_composio_is_external_and_requires_explicit_configuration(monkeypatch):
     with pytest.raises(PolicyError) as exc:
         gate.authorize(_request(action="tool_use", mission=local, tool="composio.GMAIL_FETCH_EMAILS"))
     assert "local_only" in str(exc.value)
+
+
+def test_twilio_sms_requires_full_opt_in_allowlist_and_blocks_local_only(monkeypatch):
+    gate = PolicyGate()
+    cloud = Mission(goal="cloud")
+    local = Mission(goal="private", privacy="local_only")
+    for name in (
+        "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER", "TWILIO_SMS_ALLOWLIST",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("TWILIO_ACCOUNT_SID", "AC1234567890abcdef1234567890abcd")
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "twilio-auth-secret")
+    monkeypatch.setenv("TWILIO_FROM_NUMBER", "+15557654321")
+    assert not tool_is_opted_in_twilio("sms.send")
+    gate.authorize(_request(action="tool_use", mission=cloud, tool="sms.send",
+                            arguments={"to": "+15551230000", "body": "hi"}))
+
+    monkeypatch.setenv("TWILIO_SMS_ALLOWLIST", "+15551230000")
+    assert tool_is_opted_in_twilio("sms.send")
+    allowed = {"to": "+15551230000", "body": "hi"}
+    gate.authorize(_request(action="tool_use", mission=cloud, tool="sms.send", arguments=allowed))
+    needed = gate.approval_required(_request(action="tool_use", mission=cloud, tool="sms.send",
+                                             arguments=allowed))
+    assert needed is not None
+    assert needed.single_use is True
+    assert needed.approval_action == "sms.send"
+    assert needed.question.startswith("Approve one SMS to +15551230000?")
+    with pytest.raises(PolicyError) as missing:
+        gate.authorize(_request(action="tool_use", mission=cloud, tool="sms.send",
+                                arguments={"to": "+15559999999", "body": "hi"}))
+    assert missing.value.failure_class == FailureClass.POLICY_REFUSAL
+    with pytest.raises(PolicyError) as blast:
+        gate.authorize(_request(action="tool_use", mission=cloud, tool="sms.send",
+                                arguments={"to": ["+15551230000"], "body": "hi"}))
+    assert blast.value.failure_class == FailureClass.POLICY_REFUSAL
+    with pytest.raises(PolicyError) as voice:
+        gate.authorize(_request(action="tool_use", mission=cloud, tool="voice.call",
+                                arguments={"to": "+15551230000"}))
+    assert voice.value.failure_class == FailureClass.POLICY_REFUSAL
+    with pytest.raises(PolicyError) as local_only:
+        gate.authorize(_request(action="tool_use", mission=local, tool="sms.send", arguments=allowed))
+    assert local_only.value.failure_class == FailureClass.POLICY_REFUSAL
+    assert "local_only" in str(local_only.value)
 
 
 def test_token_budget_is_independent_of_payment_spent():

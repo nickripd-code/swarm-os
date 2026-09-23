@@ -528,6 +528,11 @@ def test_build_tool_provider_empty_without_env(monkeypatch):
     monkeypatch.delenv("SWARM_BROWSER", raising=False)
     monkeypatch.delenv("SWARM_SELFMOD", raising=False)
     monkeypatch.delenv("SWARM_SELFMOD_WRITE", raising=False)
+    monkeypatch.delenv("COMPOSIO_API_KEY", raising=False)
+    monkeypatch.delenv("TWILIO_ACCOUNT_SID", raising=False)
+    monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("TWILIO_FROM_NUMBER", raising=False)
+    monkeypatch.delenv("TWILIO_SMS_ALLOWLIST", raising=False)
     assert build_tool_provider() is None
 
 
