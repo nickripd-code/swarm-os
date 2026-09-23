@@ -1,17 +1,23 @@
+import base64
 import hashlib
 import json
+import socket
+import subprocess
 from datetime import datetime
+from uuid import UUID
 
 import httpx
 import pytest
 
 from app.llm import LLMProvider
 from app.models import FailureClass, Mission
+from app.policy import PolicyGate, PolicyRequest
 from app.runtime import PolicyError, SwarmRuntime
 from app.store import Store
 from app.tools import (
     LOCAL_TOOL_CATALOG, LocalToolProvider, McpToolProvider, ToolCall, ToolError,
     ToolProvider, ToolResult, ToolSpec, build_tool_provider, public_tool_data,
+    tools_status,
 )
 from app.verifier import local_evidence_check
 
@@ -545,3 +551,158 @@ def test_build_tool_provider_local_allowlist(monkeypatch):
 def test_public_tool_data_strips_credentials():
     cleaned = public_tool_data({"text": "ok", "api_key": "secret", "nested": {"token": "x", "n": 1}})
     assert cleaned == {"text": "ok", "nested": {"n": 1}}
+
+
+UTILITY_TOOLS = ("json.pretty", "uuid.v4", "text.bytes_len", "text.b64decode")
+
+
+def _utility_provider() -> LocalToolProvider:
+    return LocalToolProvider(allowlist=list(UTILITY_TOOLS))
+
+
+@pytest.mark.asyncio
+async def test_local_utility_tools_happy_path_strips_secrets(tmp_path, monkeypatch):
+    def blocked(*_args, **_kwargs):
+        raise AssertionError("utility tool attempted shell or network")
+
+    monkeypatch.setattr(subprocess, "Popen", blocked)
+    monkeypatch.setattr(socket, "socket", blocked)
+    monkeypatch.setattr(httpx, "Client", blocked)
+    monkeypatch.setattr(httpx, "AsyncClient", blocked)
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(store, tools=_utility_provider())
+    mission = Mission(goal="Local utilities", privacy="local_only", limits={"max_tool_calls": 4})
+    store.save_mission(mission)
+    gate = PolicyGate()
+    for name in UTILITY_TOOLS:
+        gate.authorize(PolicyRequest(action="tool_use", mission=mission, tool=name, tool_calls_used=0))
+
+    pretty = await runtime.invoke_tool(mission, "json.pretty", {
+        "text": '{"z":1,"api_key":"sekret","nested":{"token":"t","ok":true}}',
+    })
+    rendered = pretty["output"]["text"]
+    assert json.loads(rendered) == {"nested": {"ok": True}, "z": 1}
+    assert "sekret" not in rendered and "api_key" not in rendered and "token" not in rendered
+
+    minted = await runtime.invoke_tool(mission, "uuid.v4", {})
+    parsed = UUID(minted["output"]["uuid"])
+    assert parsed.version == 4
+
+    measured = await runtime.invoke_tool(mission, "text.bytes_len", {"text": "café"})
+    assert measured["output"] == {"bytes": len("café".encode("utf-8"))}
+    assert "café" not in json.dumps(measured["output"])
+
+    encoded = base64.b64encode(b'{"token":"abc","ok":1}').decode("ascii")
+    decoded = await runtime.invoke_tool(mission, "text.b64decode", {"text": encoded})
+    assert json.loads(decoded["output"]["text"]) == {"ok": 1}
+    assert "abc" not in decoded["output"]["text"]
+
+    events = store.events(mission.id)
+    assert len([e for e in events if e.event_type == "tool.started"]) == 4
+    assert len([e for e in events if e.event_type == "tool.completed"]) == 4
+    assert runtime.tool_calls_used(mission.id) == 4
+    health = await runtime.tools.health()
+    assert health.status == "healthy"
+    assert health.tools == list(UTILITY_TOOLS)
+    assert tools_status(runtime.tools)["tools"] == list(UTILITY_TOOLS)
+
+
+@pytest.mark.asyncio
+async def test_local_utility_bad_input_fails_closed(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(store, tools=_utility_provider())
+    mission = Mission(goal="Bad utility input", limits={"max_tool_calls": 8})
+    store.save_mission(mission)
+    cases = [
+        ("json.pretty", {"text": "{not json"}, FailureClass.INVALID_OUTPUT),
+        ("json.pretty", {"text": 1}, FailureClass.INVALID_OUTPUT),
+        ("uuid.v4", {"text": "nope"}, FailureClass.INVALID_OUTPUT),
+        ("text.bytes_len", {}, FailureClass.INVALID_OUTPUT),
+        ("text.b64decode", {"text": "!!!!"}, FailureClass.INVALID_OUTPUT),
+        ("text.b64decode", {"text": base64.b64encode(b"\xff").decode("ascii")}, FailureClass.INVALID_OUTPUT),
+    ]
+    for name, arguments, failure in cases:
+        with pytest.raises(PolicyError) as exc:
+            await runtime.invoke_tool(mission, name, arguments)
+        assert exc.value.failure_class == failure
+    started = [e for e in store.events(mission.id) if e.event_type == "tool.started"]
+    failed = [e for e in store.events(mission.id) if e.event_type == "tool.failed"]
+    assert len(started) == len(cases)
+    assert [e.payload["failure_class"] for e in failed] == ["INVALID_OUTPUT"] * len(cases)
+    assert not any(e.event_type == "tool.completed" for e in store.events(mission.id))
+    assert runtime.tool_calls_used(mission.id) == len(cases)
+
+
+@pytest.mark.asyncio
+async def test_local_utility_oversize_is_tool_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.tools.MAX_UTILITY_OUTPUT_BYTES", 8)
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(store, tools=_utility_provider())
+    mission = Mission(goal="Oversize utility output")
+    store.save_mission(mission)
+    with pytest.raises(PolicyError) as pretty_exc:
+        await runtime.invoke_tool(mission, "json.pretty", {"text": '{"hello":"world"}'})
+    assert pretty_exc.value.failure_class == FailureClass.TOOL_FAILURE
+    payload = base64.b64encode(b"hello-world").decode("ascii")
+    with pytest.raises(PolicyError) as decode_exc:
+        await runtime.invoke_tool(mission, "text.b64decode", {"text": payload})
+    assert decode_exc.value.failure_class == FailureClass.TOOL_FAILURE
+    failed = [e for e in store.events(mission.id) if e.event_type == "tool.failed"]
+    assert [e.payload["failure_class"] for e in failed] == ["TOOL_FAILURE", "TOOL_FAILURE"]
+
+
+@pytest.mark.asyncio
+async def test_local_utility_disabled_when_opt_in_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv("SWARM_LOCAL_TOOLS", raising=False)
+    monkeypatch.delenv("MCP_SERVER_URL", raising=False)
+    monkeypatch.delenv("SWARM_BROWSER", raising=False)
+    monkeypatch.delenv("SWARM_SELFMOD", raising=False)
+    monkeypatch.delenv("COMPOSIO_API_KEY", raising=False)
+    assert build_tool_provider() is None
+    empty = LocalToolProvider()
+    health = await empty.health()
+    assert health.status == "unconfigured"
+    assert health.tools == []
+    assert tools_status(empty) == {"configured": True, "provider": "local", "tools": []}
+    assert tools_status(None) == {"configured": False, "provider": None, "tools": []}
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(store, tools=empty)
+    mission = Mission(goal="Utilities off", privacy="local_only")
+    store.save_mission(mission)
+    with pytest.raises(PolicyError) as exc:
+        await runtime.invoke_tool(mission, "json.pretty", {"text": "{}"})
+    assert exc.value.failure_class == FailureClass.TOOL_MISSING
+    assert runtime.tool_calls_used(mission.id) == 0
+    assert not any(e.event_type == "tool.started" for e in store.events(mission.id))
+    assert "json.pretty" in LOCAL_TOOL_CATALOG
+
+
+def test_local_utility_allowlist_ignores_unknown_names(monkeypatch):
+    monkeypatch.setenv(
+        "SWARM_LOCAL_TOOLS",
+        "json.pretty, shell, uuid.v4, text.bytes_len, text.b64decode, not-a-tool",
+    )
+    monkeypatch.delenv("MCP_SERVER_URL", raising=False)
+    monkeypatch.delenv("SWARM_BROWSER", raising=False)
+    monkeypatch.delenv("SWARM_SELFMOD", raising=False)
+    monkeypatch.delenv("COMPOSIO_API_KEY", raising=False)
+    provider = build_tool_provider()
+    assert [spec.name for spec in provider.list_tools()] == list(UTILITY_TOOLS)
+
+
+@pytest.mark.asyncio
+async def test_local_utility_budget_charges_only_on_started(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    runtime = SwarmRuntime(store, tools=_utility_provider())
+    mission = Mission(goal="One utility call", privacy="local_only", limits={"max_tool_calls": 1})
+    store.save_mission(mission)
+    first = await runtime.invoke_tool(mission, "uuid.v4", {})
+    assert UUID(first["output"]["uuid"]).version == 4
+    with pytest.raises(PolicyError) as exc:
+        await runtime.invoke_tool(mission, "text.bytes_len", {"text": "next"})
+    assert exc.value.failure_class == FailureClass.RESOURCE_EXHAUSTED
+    events = store.events(mission.id)
+    assert len([e for e in events if e.event_type == "tool.started"]) == 1
+    assert runtime.tool_calls_used(mission.id) == 1
+    denied = [e for e in events if e.event_type == "tool.failed"]
+    assert denied and denied[-1].payload["failure_class"] == "RESOURCE_EXHAUSTED"

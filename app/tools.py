@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -16,6 +18,7 @@ _UNSET = object()
 
 DEFAULT_MCP_TIMEOUT = 15.0
 MAX_ARGUMENT_BYTES = 8192
+MAX_UTILITY_OUTPUT_BYTES = 8192
 _SECRET_KEYS = frozenset({
     "api_key", "apikey", "authorization", "password", "secret", "token",
     "access_token", "refresh_token", "private_key", "link_token",
@@ -130,6 +133,85 @@ def _hash_sha256(arguments: dict[str, Any]) -> dict[str, Any]:
     return {"sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
 
 
+def _require_text(arguments: dict[str, Any], tool_name: str, *, allow_empty: bool = False) -> str:
+    text = arguments.get("text")
+    if not isinstance(text, str):
+        raise ToolError(f"{tool_name} requires a string text argument", FailureClass.INVALID_OUTPUT)
+    if not allow_empty and not text.strip():
+        raise ToolError(f"{tool_name} requires non-empty text", FailureClass.INVALID_OUTPUT)
+    return text
+
+
+def _bounded_text(text: str, tool_name: str) -> str:
+    if len(text.encode("utf-8")) > MAX_UTILITY_OUTPUT_BYTES:
+        raise ToolError(f"{tool_name} output exceeds the size limit", FailureClass.TOOL_FAILURE)
+    return text
+
+
+def _redact_json_text(text: str, tool_name: str) -> str:
+    """Drop credential-shaped keys when decoded or parsed text is a JSON object or array."""
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    if not isinstance(parsed, (dict, list)):
+        return text
+    try:
+        rendered = json.dumps(
+            public_tool_data(parsed), ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+        )
+    except (TypeError, ValueError):
+        raise ToolError(f"{tool_name} could not serialize JSON", FailureClass.TOOL_FAILURE) from None
+    return rendered
+
+
+def _json_pretty(arguments: dict[str, Any]) -> dict[str, Any]:
+    text = _require_text(arguments, "json.pretty")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        raise ToolError("json.pretty received invalid JSON", FailureClass.INVALID_OUTPUT) from None
+    try:
+        pretty = json.dumps(public_tool_data(parsed), indent=2, sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        raise ToolError("json.pretty could not serialize JSON", FailureClass.TOOL_FAILURE) from None
+    return {"text": _bounded_text(pretty, "json.pretty")}
+
+
+def _uuid_v4(arguments: dict[str, Any]) -> dict[str, Any]:
+    if arguments:
+        raise ToolError("uuid.v4 does not accept arguments", FailureClass.INVALID_OUTPUT)
+    value = str(uuid4())
+    try:
+        parsed = UUID(value)
+    except ValueError:
+        raise ToolError("uuid.v4 did not produce a UUID", FailureClass.TOOL_FAILURE) from None
+    if parsed.version != 4:
+        raise ToolError("uuid.v4 did not produce a version-4 UUID", FailureClass.TOOL_FAILURE)
+    return {"uuid": str(parsed)}
+
+
+def _text_bytes_len(arguments: dict[str, Any]) -> dict[str, Any]:
+    text = _require_text(arguments, "text.bytes_len", allow_empty=True)
+    return {"bytes": len(text.encode("utf-8"))}
+
+
+def _text_b64decode(arguments: dict[str, Any]) -> dict[str, Any]:
+    text = _require_text(arguments, "text.b64decode")
+    compact = "".join(text.split())
+    try:
+        raw = base64.b64decode(compact, validate=True)
+    except (ValueError, binascii.Error):
+        raise ToolError("text.b64decode received invalid base64", FailureClass.INVALID_OUTPUT) from None
+    if len(raw) > MAX_UTILITY_OUTPUT_BYTES:
+        raise ToolError("text.b64decode output exceeds the size limit", FailureClass.TOOL_FAILURE)
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ToolError("text.b64decode output is not UTF-8 text", FailureClass.INVALID_OUTPUT) from None
+    return {"text": _bounded_text(_redact_json_text(decoded, "text.b64decode"), "text.b64decode")}
+
+
 LOCAL_TOOL_CATALOG: dict[str, tuple[ToolSpec, Any]] = {
     "echo": (
         ToolSpec(
@@ -187,6 +269,82 @@ LOCAL_TOOL_CATALOG: dict[str, tuple[ToolSpec, Any]] = {
         ),
         _hash_sha256,
     ),
+    "json.pretty": (
+        ToolSpec(
+            name="json.pretty",
+            description="Parse a JSON string in-process and return it pretty-printed. Credential-shaped keys are removed.",
+            provider="local",
+            permissions=["local"],
+            risk_class="local",
+            input_schema={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+            output_schema={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+        ),
+        _json_pretty,
+    ),
+    "uuid.v4": (
+        ToolSpec(
+            name="uuid.v4",
+            description="Return one new UUID version 4 from this process. Takes no arguments.",
+            provider="local",
+            permissions=["local"],
+            risk_class="local",
+            input_schema={"type": "object", "properties": {}},
+            output_schema={
+                "type": "object",
+                "properties": {"uuid": {"type": "string"}},
+                "required": ["uuid"],
+            },
+        ),
+        _uuid_v4,
+    ),
+    "text.bytes_len": (
+        ToolSpec(
+            name="text.bytes_len",
+            description="Return the UTF-8 byte length of the provided text. Does not echo the text.",
+            provider="local",
+            permissions=["local"],
+            risk_class="local",
+            input_schema={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+            output_schema={
+                "type": "object",
+                "properties": {"bytes": {"type": "integer"}},
+                "required": ["bytes"],
+            },
+        ),
+        _text_bytes_len,
+    ),
+    "text.b64decode": (
+        ToolSpec(
+            name="text.b64decode",
+            description="Decode a bounded standard-base64 string to UTF-8 text. JSON objects drop credential-shaped keys.",
+            provider="local",
+            permissions=["local"],
+            risk_class="local",
+            input_schema={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+            output_schema={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+        ),
+        _text_b64decode,
+    ),
 }
 
 
@@ -224,7 +382,12 @@ class LocalToolProvider(ToolProvider):
         handler = self._handlers.get(call.name)
         if handler is None:
             raise ToolError(f"Unknown tool: {call.name}", FailureClass.TOOL_MISSING)
-        output = handler(require_arguments(call.arguments))
+        try:
+            output = handler(require_arguments(call.arguments))
+        except ToolError:
+            raise
+        except Exception:
+            raise ToolError(f"{call.name} failed", FailureClass.TOOL_FAILURE) from None
         return ToolResult(
             name=call.name,
             call_id=call.call_id,
