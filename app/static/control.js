@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,shortcutHintView} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -561,6 +561,31 @@ if($("commandForm"))$("commandForm").addEventListener("submit",e=>{
   e.preventDefault();
   runCommand($("commandInput")?$("commandInput").value:"");
 });
+function renderShortcutHints(view){
+  const root=$("shortcutHints");
+  if(!root||!view)return;
+  root.dataset.available=view.available?"true":"false";
+  const status=$("shortcutHintStatus");
+  const list=$("shortcutHintList");
+  if(status){
+    status.hidden=!!view.available;
+    status.textContent=view.available?"":view.status;
+  }
+  if(!list)return;
+  list.replaceChildren();
+  list.hidden=!view.available;
+  if(!view.available)return;
+  for(const item of view.items){
+    const row=document.createElement("li");
+    const chord=document.createElement("kbd");
+    const action=document.createElement("span");
+    chord.textContent=item.chord;
+    action.textContent=item.action;
+    row.append(chord,action);
+    list.append(row);
+  }
+}
+renderShortcutHints(shortcutHintView({bindings:[],hasKeyListener:false,source:""}));
 $("history").addEventListener("change",()=>{if($("history").value)loadMission($("history").value);});
 $("answerForm").addEventListener("submit",async e=>{
   e.preventDefault();

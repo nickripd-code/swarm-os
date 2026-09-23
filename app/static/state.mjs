@@ -75,6 +75,45 @@ export function resolveCommand(parsed, context = {}) {
   }
   return {ok: false, error: "Unknown command"};
 }
+export const SHORTCUT_UNAVAILABLE = "unavailable";
+const SHORTCUT_MODIFIER = "(?:Ctrl|Control|Cmd|Command|Meta|Alt|Option|Shift)";
+const SHORTCUT_NAMED_KEY = "(?:Escape|Esc|Enter|Tab|Space|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Backspace|Delete)";
+const SHORTCUT_CHORD = new RegExp(
+  "^(?:" + SHORTCUT_MODIFIER + "\\+){1,3}(?:[A-Za-z0-9]|" + SHORTCUT_NAMED_KEY + ")$|^(?:" + SHORTCUT_NAMED_KEY + ")$",
+);
+const KEY_LISTENER = /addEventListener\(\s*["'](?:keydown|keyup|keypress)["']/;
+const COMMAND_VERBS = new Set(["stop", "stop-all", "stopall", "kill", "answer"]);
+
+function documentedChord(value) {
+  if (typeof value !== "string") return "";
+  const chord = value.trim();
+  if (!chord || chord.length > 32 || /\s/.test(chord)) return "";
+  if (COMMAND_VERBS.has(chord.toLowerCase())) return "";
+  if (!SHORTCUT_CHORD.test(chord)) return "";
+  return chord;
+}
+
+export function shortcutHintView(input = {}) {
+  const bindings = Array.isArray(input.bindings) ? input.bindings : [];
+  const source = typeof input.source === "string" ? input.source : "";
+  const listener = input.hasKeyListener === true && KEY_LISTENER.test(source);
+  const items = [];
+  if (listener) {
+    for (const binding of bindings) {
+      if (!binding || binding.wired !== true) continue;
+      const chord = documentedChord(binding.chord);
+      const action = typeof binding.action === "string" ? binding.action.trim() : "";
+      if (!chord || !action || action.length > 80) continue;
+      const literal = '"' + chord + '"';
+      const quoted = "'" + chord + "'";
+      if (!source.includes(literal) && !source.includes(quoted)) continue;
+      if (items.some((item) => item.chord === chord)) continue;
+      items.push({chord, action});
+    }
+  }
+  if (!items.length) return {available: false, status: SHORTCUT_UNAVAILABLE, items: []};
+  return {available: true, status: "ready", items};
+}
 export function newState(mission = null) {
   return {mission, agents: new Map(), tasks: new Map(), seen: new Set(), events: [],
     usage: {input: 0, output: 0, reasoning: 0, cost: null, budget: null, known: false}, decisions: 0, preview: false};
