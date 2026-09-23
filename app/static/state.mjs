@@ -228,6 +228,135 @@ export function resultMetaText(mission) {
   if (result.failure_class) bits.push(result.failure_class);
   return bits.join(" · ");
 }
+export const LAST_ERROR_AT_UNAVAILABLE = "unavailable";
+const LAST_ERROR_AT_SKEW_MS = 120000;
+const LAST_ERROR_AT_HIDDEN = Object.freeze({
+  hidden: true, label: "", known: false, kind: null, at: null, title: "",
+});
+const ERROR_EVENTS = new Set([
+  "mission.failed", "llm.failed", "tool.failed", "verification.failed", "llm.retry",
+]);
+const ERROR_PARK_CLEAR = new Set([
+  "mission.completed", "mission.running", "mission.resumed", "mission.stopped",
+  "user.answered", "user.answer_consumed", "llm.completed", "tool.completed",
+  "verification.passed",
+]);
+const RECORDED_STAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})$/;
+
+function recordedStamp(raw) {
+  if (typeof raw !== "string") return null;
+  const stamp = raw.trim();
+  const match = RECORDED_STAMP.exec(stamp);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const frac = match[7] || "";
+  const zone = match[8];
+  if (month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59 || second > 59) return null;
+  let offsetMin = 0;
+  if (zone !== "Z") {
+    const sign = zone[0] === "-" ? -1 : 1;
+    const zh = Number(zone.slice(1, 3));
+    const zm = Number(zone.slice(4, 6));
+    if (zh > 23 || zm > 59) return null;
+    offsetMin = sign * (zh * 60 + zm);
+  }
+  const ms = Number((frac + "000").slice(0, 3));
+  const at = Date.UTC(year, month - 1, day, hour, minute - offsetMin, second, ms);
+  if (!Number.isFinite(at) || at === 0) return null;
+  const zoned = new Date(at + offsetMin * 60000);
+  if (
+    zoned.getUTCFullYear() !== year
+    || zoned.getUTCMonth() !== month - 1
+    || zoned.getUTCDate() !== day
+    || zoned.getUTCHours() !== hour
+    || zoned.getUTCMinutes() !== minute
+    || zoned.getUTCSeconds() !== second
+  ) return null;
+  return {stamp, at};
+}
+
+function errorParkKind(event) {
+  const type = event && event.event_type;
+  if (ERROR_EVENTS.has(type)) return "error";
+  if (type === "mission.question") return "parked";
+  if (type !== "mission.waiting") return null;
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  if (payload.kind === "approval") return "parked";
+  const questionId = typeof payload.question_id === "string" ? payload.question_id.trim() : "";
+  return questionId ? "parked" : null;
+}
+
+function missionIsParked(mission) {
+  if (!mission || mission.status !== "waiting") return false;
+  const pending = mission.pending_question;
+  return !!pending && typeof pending === "object";
+}
+
+function unavailableLastError(kind) {
+  return {
+    hidden: false,
+    label: LAST_ERROR_AT_UNAVAILABLE,
+    known: false,
+    kind,
+    at: null,
+    title: "",
+  };
+}
+
+function relativeStampAge(ageMs) {
+  const seconds = Math.floor(ageMs / 1000);
+  if (seconds < 60) return seconds + "s ago";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + "m ago";
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + "h ago";
+  return Math.floor(hours / 24) + "d ago";
+}
+
+function knownLastError(kind, parsed, now) {
+  const prefix = kind === "parked" ? "Parked " : "Error ";
+  const clock = typeof now === "number" && Number.isFinite(now) && now > 0 ? now : null;
+  let label = prefix + parsed.stamp;
+  if (clock !== null) {
+    const ageMs = Math.max(0, clock - parsed.at);
+    label = prefix + relativeStampAge(ageMs);
+  }
+  return {
+    hidden: false,
+    label,
+    known: true,
+    kind,
+    at: parsed.stamp,
+    title: parsed.stamp,
+  };
+}
+
+/** Read-only last error/park time from a recorded event created_at already in the shell. */
+export function lastErrorAtChip(state, options = {}) {
+  if (!state || state.preview === true || !state.mission) return LAST_ERROR_AT_HIDDEN;
+  const events = Array.isArray(state.events) ? state.events : [];
+  const now = options.now;
+  for (const event of events) {
+    const type = event && event.event_type;
+    if (ERROR_PARK_CLEAR.has(type)) break;
+    const kind = errorParkKind(event);
+    if (!kind) continue;
+    const parsed = recordedStamp(event.created_at);
+    const clock = typeof now === "number" && Number.isFinite(now) && now > 0 ? now : null;
+    if (!parsed || (clock !== null && parsed.at - clock > LAST_ERROR_AT_SKEW_MS)) {
+      return unavailableLastError(kind);
+    }
+    return knownLastError(kind, parsed, now);
+  }
+  if (state.mission.status === "failed") return unavailableLastError("error");
+  if (missionIsParked(state.mission)) return unavailableLastError("parked");
+  return LAST_ERROR_AT_HIDDEN;
+}
 export function alertFromEvent(e) {
   const p = e.payload || {};
   switch (e.event_type) {
