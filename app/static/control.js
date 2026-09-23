@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,lastErrorAtChip,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -49,6 +49,15 @@ function renderHud(){
   if($("missionStatus")){
     $("missionStatus").textContent=status.toUpperCase();
     $("missionStatus").className="hud-chip status "+status;
+  }
+  if($("lastErrorAtChip")){
+    const lastError=lastErrorAtChip(state,{now:Date.now()});
+    const chip=$("lastErrorAtChip");
+    chip.hidden=lastError.hidden;
+    chip.textContent=lastError.hidden?"":lastError.label;
+    chip.className="hud-chip error-at "+(lastError.known?(lastError.kind==="parked"?"parked":"known"):"unavailable");
+    if(lastError.hidden||!lastError.title)chip.removeAttribute("title");
+    else chip.title=lastError.title;
   }
   if($("hudAgents"))$("hudAgents").textContent=state.agents.size;
   if($("hudTasks"))$("hudTasks").textContent=[...state.tasks.values()].filter(t=>t.status==="completed").length;
