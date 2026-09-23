@@ -163,6 +163,65 @@ async def test_health_is_truthful_and_does_not_expose_secrets(tmp_path, monkeypa
     assert Path(status["root"]).resolve() == (tmp_path / "from-env").resolve()
 
 
+@pytest.mark.asyncio
+async def test_code_mission_hand_copies_same_mission_files_only(tmp_path):
+    provider = _provider(tmp_path)
+    mission_id = uuid4()
+    source = await provider.create(mission_id=mission_id, agent_id=uuid4())
+    dest = await provider.create(mission_id=mission_id, agent_id=uuid4())
+    other = await provider.create(mission_id=uuid4(), agent_id=uuid4())
+    await provider.write_file(source.id, "src/app.py", "print('handed')\n")
+    copied = await provider.hand_files(source.id, dest.id, ["src/app.py"])
+    assert copied == ["src/app.py"]
+    assert await provider.read_file(dest.id, "src/app.py") == "print('handed')\n"
+    assert await provider.read_file(source.id, "src/app.py") == "print('handed')\n"
+    with pytest.raises(WorkspaceError) as cross:
+        await provider.hand_files(source.id, other.id, ["src/app.py"])
+    assert cross.value.failure_class == FailureClass.POLICY_REFUSAL
+    assert not (Path(other.path) / "src").exists()
+    with pytest.raises(WorkspaceError) as same:
+        await provider.hand_files(source.id, source.id, ["src/app.py"])
+    assert same.value.failure_class == FailureClass.POLICY_REFUSAL
+
+
+@pytest.mark.asyncio
+async def test_code_mission_hand_refuses_symlink_and_metadata(tmp_path):
+    provider = _provider(tmp_path)
+    mission_id = uuid4()
+    source = await provider.create(mission_id=mission_id)
+    dest = await provider.create(mission_id=mission_id)
+    outside = tmp_path / "secret.txt"
+    outside.write_text("nope", encoding="utf-8")
+    link = Path(source.path) / "leak.txt"
+    link.symlink_to(outside)
+    with pytest.raises(WorkspaceError) as exc:
+        await provider.hand_files(source.id, dest.id, ["leak.txt"])
+    assert exc.value.failure_class == FailureClass.POLICY_REFUSAL
+    assert outside.read_text(encoding="utf-8") == "nope"
+    assert [path.name for path in Path(dest.path).iterdir()] == [META_NAME]
+    with pytest.raises(WorkspaceError) as meta:
+        await provider.hand_files(source.id, dest.id, [META_NAME])
+    assert meta.value.failure_class == FailureClass.POLICY_REFUSAL
+
+
+@pytest.mark.asyncio
+async def test_runtime_hand_maps_cross_mission_to_policy_error(tmp_path):
+    store = Store(str(tmp_path / "swarm.db"))
+    provider = _provider(tmp_path)
+    runtime = SwarmRuntime(store, workspaces=provider)
+    mission = Mission(goal="hand code")
+    store.save_mission(mission)
+    other = Mission(goal="other")
+    store.save_mission(other)
+    source = await runtime.create_workspace(mission, agent_id=uuid4())
+    dest = await provider.create(mission_id=other.id, agent_id=uuid4())
+    await runtime.write_workspace_file(source.id, "notes.txt", "keep")
+    with pytest.raises(PolicyError) as exc:
+        await runtime.hand_workspace_files(source.id, dest.id, ["notes.txt"])
+    assert exc.value.failure_class == FailureClass.POLICY_REFUSAL
+    assert not (Path(dest.path) / "notes.txt").exists()
+
+
 def test_normalize_relpath_rejects_traversal(monkeypatch):
     monkeypatch.delenv("SWARM_WORKSPACE_ROOT", raising=False)
     with pytest.raises(WorkspaceError) as exc:

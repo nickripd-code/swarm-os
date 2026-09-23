@@ -25,9 +25,44 @@ MAX_DISCOVERED_TOOLS = 32
 MAX_QUERY_LENGTH = 500
 _TOOLKIT_RE = re.compile(r"^[a-zA-Z0-9_-]{1,80}$")
 _TOOL_SLUG_RE = re.compile(r"^[a-zA-Z0-9_-]{1,200}$")
+# Session readOnlyHint is a request, not a local guarantee. GitHub write slugs
+# are refused here so a search response cannot register a code mutation.
+_GITHUB_WRITE_TOKENS = frozenset({
+    "ADD", "ARCHIVE", "COMMENT", "CREATE", "DELETE", "DISABLE", "ENABLE",
+    "FORK", "INVITE", "LOCK", "MERGE", "PATCH", "PUSH", "REMOVE", "RENAME",
+    "REQUEST", "REVERT", "SET", "STAR", "SUBMIT", "TRANSFER", "UNLOCK",
+    "UNSTAR", "UPDATE", "UPLOAD", "WRITE",
+})
 
 SEARCH_TOOL = "composio.search_tools"
 AUTHORIZE_TOOL = "composio.authorize"
+
+
+def _declares_write(value: Any) -> bool:
+    if isinstance(value, dict):
+        if value.get("destructiveHint") is True or value.get("readOnlyHint") is False:
+            return True
+        return False
+    if isinstance(value, list):
+        return "destructiveHint" in value
+    return False
+
+
+def github_slug_is_mutating(slug: str, toolkit: str = "") -> bool:
+    """True when a GitHub tool slug names a write, not a read."""
+    if toolkit.strip().lower() != "github" and not slug.upper().startswith("GITHUB_"):
+        return False
+    return any(token in _GITHUB_WRITE_TOKENS for token in slug.upper().split("_"))
+
+
+def schema_is_write(schema: dict[str, Any]) -> bool:
+    if _declares_write(schema.get("tags")) or _declares_write(schema.get("annotations")):
+        return True
+    slug = schema.get("tool_slug")
+    toolkit = schema.get("toolkit")
+    if not isinstance(slug, str):
+        return False
+    return github_slug_is_mutating(slug, toolkit if isinstance(toolkit, str) else "")
 
 
 class ComposioToolProvider(ToolProvider):
@@ -193,6 +228,8 @@ class ComposioToolProvider(ToolProvider):
                 continue
             slug = schema.get("tool_slug")
             if not isinstance(slug, str) or not _TOOL_SLUG_RE.fullmatch(slug):
+                continue
+            if schema_is_write(schema):
                 continue
             public_name = self._public_name(slug)
             if public_name not in self._slug_by_name and len(self._slug_by_name) >= MAX_DISCOVERED_TOOLS:
