@@ -64,6 +64,8 @@ class EventType(StrEnum):
     PAYMENT_CREATED = "payment.created"
     USER_ANSWERED = "user.answered"
     USER_ANSWER_CONSUMED = "user.answer_consumed"
+    USER_INJECTED = "user.injected"
+    USER_INJECT_CONSUMED = "user.inject_consumed"
 
     BUDGET_UPDATED = "budget.updated"
     BUDGET_WARNING = "budget.warning"

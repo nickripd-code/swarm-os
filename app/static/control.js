@@ -239,6 +239,8 @@ function describe(e){
     case "controller.decision":return "<b>Controller</b> · "+esc(p.action==="spawn"?"delegated to "+label(p.role):p.action==="finish"?"assembled the final answer":p.action==="ask"?"asked the user a question":p.reason||p.action);
     case "mission.question":return "<b>Waiting for you</b> · "+esc(p.question||"A question is unanswered");
     case "user.answered":return "<b>Answer received</b> · "+esc(p.question||p.question_id||"question");
+    case "user.injected":return "<b>Information injected</b> · "+esc(p.text||"structured note");
+    case "user.inject_consumed":return "<b>Inject received by the swarm</b> · "+esc(p.inject_id||"next step");
     case "llm.started":return "<b>"+esc(name)+"</b> is "+(p.kind==="decision"?"deciding the next move":p.kind==="verification"?"verifying the claimed result":"working");
     case "llm.completed":return "<b>"+esc(name)+"</b> · "+((p.input_tokens||0)+(p.output_tokens||0)+(p.reasoning_tokens||0)).toLocaleString()+" tokens";
     case "budget.updated":return p.known===true&&typeof p.token_spent==="number"
@@ -513,6 +515,10 @@ function commandSuccessMessage(resolved,result){
   if(resolved.action==="answer"){
     if(!result||result.accepted!==true)return null;
     return "Answer accepted";
+  }
+  if(resolved.action==="inject"){
+    if(!result||result.accepted!==true||typeof result.inject_id!=="string"||!result.inject_id)return null;
+    return "Information injected";
   }
   if(resolved.action==="kill"){
     if(!result||typeof result.status!=="string"||!result.agent_id)return null;

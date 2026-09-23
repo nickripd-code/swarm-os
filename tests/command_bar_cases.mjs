@@ -21,6 +21,8 @@ cases.killId = parseCommand("kill " + agentId);
 cases.killExtra = parseCommand("kill " + agentId + " extra");
 cases.answerEmpty = parseCommand("answer");
 cases.answerText = parseCommand("answer ship it");
+cases.injectEmpty = parseCommand("inject");
+cases.injectText = parseCommand("inject the customer is Ada");
 cases.unknown = parseCommand("pause everything");
 cases.unknownNatural = parseCommand("Prioritize deployment.");
 
@@ -42,6 +44,9 @@ cases.resolveKillPreview = resolveCommand(cases.killId, preview);
 cases.resolveAnswer = resolveCommand(cases.answerText, live);
 cases.resolveAnswerNoQuestion = resolveCommand(cases.answerText, noQuestion);
 cases.resolveAnswerPreview = resolveCommand(cases.answerText, preview);
+cases.resolveInject = resolveCommand(cases.injectText, live);
+cases.resolveInjectPreview = resolveCommand(cases.injectText, preview);
+cases.resolveInjectNoMission = resolveCommand(cases.injectText, noMission);
 cases.resolveUnknown = resolveCommand(cases.unknown, live);
 
 cases.killPresent = killRoutePresent({

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, create_engine, select, update
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
@@ -12,7 +12,9 @@ from .events import (
     EventType, coerce_event_type, is_task_event, parse_event_type, task_status_from_event,
 )
 from .migrations import apply_migrations
-from .models import AgentSpec, Mission, MissionAnswer, MissionEvent, MissionStatus, Task, utcnow
+from .models import (
+    AgentSpec, Mission, MissionAnswer, MissionEvent, MissionInject, MissionStatus, Task, utcnow,
+)
 
 
 class AnswerStateError(RuntimeError):
@@ -24,6 +26,26 @@ class AnswerStateError(RuntimeError):
 
 
 _ANSWERABLE_STATUSES = frozenset({MissionStatus.WAITING, MissionStatus.PAUSED})
+_INJECTABLE_STATUSES = frozenset({MissionStatus.RUNNING, MissionStatus.WAITING})
+_TERMINAL_MISSION_STATUSES = frozenset({
+    MissionStatus.BLOCKED, MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.STOPPED,
+})
+MAX_MISSION_INJECTS = 32
+
+
+def _merge_injects(local: list[MissionInject], durable: list[MissionInject]) -> list[MissionInject]:
+    """Union injects. A consumed copy wins so a later save cannot un-consume one."""
+    merged: dict[str, MissionInject] = {}
+    order: list[str] = []
+    for item in [*local, *durable]:
+        current = merged.get(item.inject_id)
+        if current is None:
+            merged[item.inject_id] = item
+            order.append(item.inject_id)
+            continue
+        if current.consumed_at is None and item.consumed_at is not None:
+            merged[item.inject_id] = item
+    return [merged[key] for key in order]
 
 
 class Base(DeclarativeBase):
@@ -212,6 +234,81 @@ class Store:
                 if getattr(changed, "rowcount", 0) == 1:
                     return mission, record, True
         raise AnswerStateError("conflict", "Mission changed while the answer was being consumed")
+
+    def accept_inject(self, mission_id: UUID, text: str, data: dict | None,
+                      *, attempts: int = 3) -> tuple[Mission, MissionInject]:
+        """Append one server-identified inject. Only a live RUNNING or WAITING mission accepts it."""
+        for _ in range(attempts):
+            with self.sessions.begin() as db:
+                row = db.get(MissionRow, str(mission_id))
+                if row is None:
+                    raise AnswerStateError("not_found", "Mission not found")
+                original = row.payload
+                mission = Mission.model_validate_json(original)
+                if mission.status in _TERMINAL_MISSION_STATUSES:
+                    raise AnswerStateError("terminal", "Mission is no longer accepting injects")
+                if mission.status not in _INJECTABLE_STATUSES:
+                    raise AnswerStateError("status", "Mission is not live")
+                if len(mission.injects) >= MAX_MISSION_INJECTS:
+                    raise AnswerStateError("status", "Inject limit reached")
+                record = MissionInject(inject_id=str(uuid4()), text=text, data=data)
+                mission.injects.append(record)
+                mission.updated_at = utcnow()
+                changed = db.execute(
+                    update(MissionRow)
+                    .where(MissionRow.id == str(mission_id), MissionRow.payload == original)
+                    .values(payload=mission.model_dump_json(), updated_at=mission.updated_at)
+                )
+                if getattr(changed, "rowcount", 0) == 1:
+                    return mission, record
+        raise AnswerStateError("conflict", "Mission changed while the inject was being accepted")
+
+    def mark_inject_consumed(self, mission_id: UUID, inject_id: str,
+                             *, attempts: int = 3) -> tuple[Mission, MissionInject, bool]:
+        """Persist controller/worker consumption before a truthful consumption event is emitted."""
+        for _ in range(attempts):
+            with self.sessions.begin() as db:
+                row = db.get(MissionRow, str(mission_id))
+                if row is None:
+                    raise AnswerStateError("not_found", "Mission not found")
+                original = row.payload
+                mission = Mission.model_validate_json(original)
+                record = next((item for item in mission.injects if item.inject_id == inject_id), None)
+                if record is None:
+                    raise AnswerStateError("missing", "The matching inject is not persisted")
+                if record.consumed_at is not None:
+                    return mission, record, False
+                record.consumed_at = utcnow()
+                mission.updated_at = record.consumed_at
+                changed = db.execute(
+                    update(MissionRow)
+                    .where(MissionRow.id == str(mission_id), MissionRow.payload == original)
+                    .values(payload=mission.model_dump_json(), updated_at=mission.updated_at)
+                )
+                if getattr(changed, "rowcount", 0) == 1:
+                    return mission, record, True
+        raise AnswerStateError("conflict", "Mission changed while the inject was being consumed")
+
+    def save_mission_with_injects(self, mission: Mission, *, attempts: int = 3) -> None:
+        """Save runtime mission state without dropping an inject accepted in another transaction."""
+        for _ in range(attempts):
+            with self.sessions.begin() as db:
+                row = db.get(MissionRow, str(mission.id))
+                if row is None:
+                    db.add(MissionRow(id=str(mission.id), payload=mission.model_dump_json(),
+                                      updated_at=mission.updated_at))
+                    return
+                original = row.payload
+                saved = Mission.model_validate_json(original)
+                mission.injects = _merge_injects(mission.injects, saved.injects)
+                changed = db.execute(
+                    update(MissionRow)
+                    .where(MissionRow.id == str(mission.id), MissionRow.payload == original)
+                    .values(payload=mission.model_dump_json(), updated_at=mission.updated_at)
+                )
+                if getattr(changed, "rowcount", 0) == 1:
+                    return
+        raise AnswerStateError("conflict", "Mission changed while injects were being preserved")
 
     def save_agent(self, agent: AgentSpec) -> None:
         with self.sessions.begin() as db:

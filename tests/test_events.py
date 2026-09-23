@@ -69,6 +69,8 @@ UI_EVENT_TYPES = {
     "payment.created",
     "user.answered",
     "user.answer_consumed",
+    "user.injected",
+    "user.inject_consumed",
     "lease.claimed",
     "lease.expired",
     "lease.released",
@@ -99,6 +101,8 @@ def test_event_type_values_match_historical_ui_strings():
     assert EventType.MISSION_RESUME_REQUESTED == "mission.resume_requested"
     assert EventType.USER_ANSWERED == "user.answered"
     assert EventType.USER_ANSWER_CONSUMED == "user.answer_consumed"
+    assert EventType.USER_INJECTED == "user.injected"
+    assert EventType.USER_INJECT_CONSUMED == "user.inject_consumed"
     assert EventType.TOOL_COMPLETED == "tool.completed"
     assert EventType.LEASE_CLAIMED == "lease.claimed"
     assert EventType.LEASE_EXPIRED == "lease.expired"

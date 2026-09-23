@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 def utcnow() -> datetime:
@@ -99,6 +99,16 @@ class MissionAnswer(BaseModel):
     approval_action: str | None = None
 
 
+class MissionInject(BaseModel):
+    """Operator-supplied context. Not an answer and not an approval."""
+
+    inject_id: str
+    text: str = ""
+    data: dict[str, Any] | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    consumed_at: datetime | None = None
+
+
 class Mission(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     goal: str
@@ -114,6 +124,7 @@ class Mission(BaseModel):
     result: dict[str, Any] | None = None
     pending_question: PendingQuestion | None = None
     answers: list[MissionAnswer] = Field(default_factory=list)
+    injects: list[MissionInject] = Field(default_factory=list)
     paused_at: datetime | None = None
     paused_seconds: float = Field(default=0, ge=0)
 
@@ -168,3 +179,11 @@ class MissionEvent(BaseModel):
 
 class AnswerRequest(BaseModel):
     answer: str = Field(min_length=1, max_length=4000)
+
+
+class InjectRequest(BaseModel):
+    """Free text and/or a small object. Client ids are not accepted."""
+
+    model_config = ConfigDict(extra="ignore")
+    text: str | None = None
+    data: Any = None
