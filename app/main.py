@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from .models import AnswerRequest, Mission, MissionCreate, PaymentIntent
 from .runtime import PolicyError, SwarmRuntime
 from .store import Store
+from .build_info import reported_version
 from .health import (
     anthropic_status, azure_status, bedrock_status, browser_health_status, cerebras_status,
     cohere_status, deepseek_status, fireworks_status, gemini_status, groq_status,
@@ -67,7 +68,8 @@ async def index(): return FileResponse(BASE / "static" / "index.html")
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "openai": openai_status(), "openrouter": openrouter_status(),
+    return {"ok": True, "version": reported_version(app.version),
+            "openai": openai_status(), "openrouter": openrouter_status(),
             "xai": xai_status(), "anthropic": anthropic_status(),
             "mistral": mistral_status(), "gemini": gemini_status(), "cohere": cohere_status(),
             "deepseek": deepseek_status(), "together": together_status(),

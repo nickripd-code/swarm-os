@@ -128,6 +128,14 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+export const VERSION_UNAVAILABLE = "unavailable";
+export function buildVersionView(health) {
+  const raw = health && typeof health === "object" ? health.version : undefined;
+  if (typeof raw !== "string") return {known: false, version: null, label: VERSION_UNAVAILABLE};
+  const version = raw.trim();
+  if (!version) return {known: false, version: null, label: VERSION_UNAVAILABLE};
+  return {known: true, version, label: version};
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
