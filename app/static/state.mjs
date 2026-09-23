@@ -228,6 +228,149 @@ export function resultMetaText(mission) {
   if (result.failure_class) bits.push(result.failure_class);
   return bits.join(" · ");
 }
+export const RESUME_AGE_UNAVAILABLE = "RESUME AGE unavailable";
+const RESUME_AGE_SKEW_MS = 120000;
+const RESUME_AGE_HIDDEN = Object.freeze({
+  hidden: true, label: "", known: false, at: null, title: "",
+});
+const RESUME_STAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})$/;
+// Events that end "running after a resume". mission.resumed is the clock.
+// mission.running / mission.started are running for a different reason.
+// mission.resume_requested and mission.suspended do not change shell status.
+const CLEARS_RESUME = new Set([
+  "mission.started",
+  "mission.running",
+  "mission.waiting",
+  "mission.paused",
+  "mission.question",
+  "mission.completed",
+  "mission.failed",
+  "mission.stopped",
+  "mission.blocked",
+]);
+
+/** UTC clock from a recorded event stamp. Epoch and naive times are rejected. */
+function parseResumeStamp(raw) {
+  if (typeof raw !== "string" || raw === "" || raw !== raw.trim()) return null;
+  const match = RESUME_STAMP.exec(raw);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const fraction = match[7] ? Number(match[7].padEnd(3, "0").slice(0, 3)) : 0;
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return null;
+  let offsetMinutes = 0;
+  if (match[8] !== "Z") {
+    const sign = match[8][0] === "-" ? -1 : 1;
+    const offsetHour = Number(match[8].slice(1, 3));
+    const offsetMinute = Number(match[8].slice(4, 6));
+    if (offsetHour > 23 || offsetMinute > 59) return null;
+    offsetMinutes = sign * (offsetHour * 60 + offsetMinute);
+  }
+  const utc = Date.UTC(year, month - 1, day, hour, minute, second, fraction) - offsetMinutes * 60000;
+  if (!Number.isFinite(utc) || utc <= 0) return null;
+  const wall = new Date(utc + offsetMinutes * 60000);
+  if (
+    wall.getUTCFullYear() !== year ||
+    wall.getUTCMonth() !== month - 1 ||
+    wall.getUTCDate() !== day ||
+    wall.getUTCHours() !== hour ||
+    wall.getUTCMinutes() !== minute ||
+    wall.getUTCSeconds() !== second
+  ) return null;
+  return {stamp: raw, at: utc};
+}
+
+function unavailableResumeAge() {
+  return {
+    hidden: false,
+    label: RESUME_AGE_UNAVAILABLE,
+    known: false,
+    at: null,
+    title: "",
+  };
+}
+
+function relativeResumeAge(ageMs) {
+  const seconds = Math.floor(ageMs / 1000);
+  if (seconds < 60) return seconds + "s ago";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + "m ago";
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + "h ago";
+  return Math.floor(hours / 24) + "d ago";
+}
+
+function knownResumeAge(parsed, now) {
+  const clock = typeof now === "number" && Number.isFinite(now) && now > 0 ? now : null;
+  const label = clock === null
+    ? "Resumed " + parsed.stamp
+    : "Resumed " + relativeResumeAge(Math.max(0, clock - parsed.at));
+  return {
+    hidden: false,
+    label,
+    known: true,
+    at: parsed.stamp,
+    title: parsed.stamp,
+  };
+}
+
+/**
+ * Newest mission.resumed stamp that still holds on this feed.
+ * Same resume event as last-resume-at: only event_type mission.resumed counts.
+ * The log-order last resume in the open period must itself parse.
+ * Returns null when this running stretch was not opened by a resume.
+ * Returns false when a resume is present but its stamp cannot be read.
+ */
+function openResumeStamp(events) {
+  const chronological = [];
+  for (let i = events.length - 1; i >= 0; i--) chronological.push(events[i]);
+  let start = 0;
+  for (let i = 0; i < chronological.length; i++) {
+    const event = chronological[i];
+    if (event && CLEARS_RESUME.has(event.event_type)) start = i + 1;
+  }
+  let lastParsed = null;
+  let sawResume = false;
+  let best = null;
+  for (let i = start; i < chronological.length; i++) {
+    const event = chronological[i];
+    if (!event || typeof event !== "object" || event.event_type !== "mission.resumed") continue;
+    sawResume = true;
+    const parsed = parseResumeStamp(event.created_at);
+    lastParsed = parsed;
+    if (parsed && (!best || parsed.at >= best.at)) best = parsed;
+  }
+  if (!sawResume) return null;
+  if (!lastParsed || !best) return false;
+  return best;
+}
+
+/**
+ * Age since the newest mission.resumed while the shell is running after that resume.
+ * There is no resumed status; applyEvent sets running for mission.resumed.
+ * Hidden with no mission, in preview, when status is not running, and when this
+ * running stretch was started or continued by something other than mission.resumed.
+ * A missing feed or unreadable stamp is RESUME AGE unavailable.
+ */
+export function resumeAgeChip(state, options = {}) {
+  if (!state || state.preview === true || options.preview === true || !state.mission) {
+    return RESUME_AGE_HIDDEN;
+  }
+  if (state.mission.status !== "running") return RESUME_AGE_HIDDEN;
+  const events = state.events;
+  if (!Array.isArray(events)) return unavailableResumeAge();
+  const parsed = openResumeStamp(events);
+  if (parsed === null) return RESUME_AGE_HIDDEN;
+  if (parsed === false) return unavailableResumeAge();
+  const now = options.now;
+  const clock = typeof now === "number" && Number.isFinite(now) && now > 0 ? now : null;
+  if (clock !== null && parsed.at - clock > RESUME_AGE_SKEW_MS) return unavailableResumeAge();
+  return knownResumeAge(parsed, now);
+}
 export function alertFromEvent(e) {
   const p = e.payload || {};
   switch (e.event_type) {
