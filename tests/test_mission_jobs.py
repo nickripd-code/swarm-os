@@ -107,7 +107,7 @@ def test_real_mission_task_handler_builds_runtime_inside_worker(monkeypatch, tmp
     store = Store(str(tmp_path / "swarm.db"))
     mission, _, agent, task = _mission_graph(store)
     item = _item(store, mission, agent, task)
-    monkeypatch.setattr(runtime_module, "build_controller", lambda: WorkerController())
+    monkeypatch.setattr(runtime_module, "build_controller", lambda **_kwargs: WorkerController())
     context = WorkerContext(store, WorkQueue(store), "worker-1", str(tmp_path / "swarm.db"))
 
     result = execute_mission_agent_task(item, context)
@@ -132,7 +132,7 @@ def test_process_handler_does_not_overwrite_durable_agent_kill(monkeypatch, tmp_
     mission, _, agent, task = _mission_graph(store)
     item = _item(store, mission, agent, task)
     controller = KillDuringWorkController(store, mission, agent, task)
-    monkeypatch.setattr(runtime_module, "build_controller", lambda: controller)
+    monkeypatch.setattr(runtime_module, "build_controller", lambda **_kwargs: controller)
     context = WorkerContext(store, WorkQueue(store), "worker-1", str(tmp_path / "swarm.db"))
 
     with pytest.raises(asyncio.CancelledError):

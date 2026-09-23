@@ -1,4 +1,7 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
+from sqlalchemy import text
 
 from app.llm import OpenAIProvider, build_controller, build_model_provider, build_router
 from app.models import FailureClass, Mission
@@ -8,10 +11,10 @@ from app.providers import (
 )
 from app.router import (
     CapabilityRequest, ModelRouter, NoRouteError, ProviderHistory,
-    capability_request_for, score_model,
+    capability_request_for, parse_stored_provider_outcome, score_model,
 )
 from app.runtime import SwarmRuntime
-from app.store import Store
+from app.store import ROUTER_OUTCOME_PER_PROVIDER, Store
 
 
 REQUEST = ModelRequest(model="unused-default", instructions="Return JSON", input={"goal": "test"})
@@ -745,4 +748,171 @@ async def test_complete_on_records_failure_without_failover():
     decision = await router.select(CapabilityRequest(reasoning="high", coding="high"))
     assert decision.selected.provider_id == "openrouter"
     assert router.history_for("openai").failures == 1
+
+
+def test_parse_stored_provider_outcome_skips_corrupt_rows():
+    now = datetime.now(timezone.utc)
+    valid = {
+        "provider_id": "openai", "outcome": "success", "failure_class": None,
+        "ts": now, "mission_id": None,
+    }
+    assert parse_stored_provider_outcome(valid) == ("openai", True)
+    assert parse_stored_provider_outcome({**valid, "outcome": "yes"}) is None
+    assert parse_stored_provider_outcome({**valid, "failure_class": "PROVIDER_OUTAGE"}) is None
+    assert parse_stored_provider_outcome({**valid, "provider_id": ""}) is None
+    assert parse_stored_provider_outcome({**valid, "ts": "now"}) is None
+    assert parse_stored_provider_outcome({**valid, "mission_id": "not-a-uuid"}) is None
+
+
+@pytest.mark.asyncio
+async def test_empty_durable_history_is_unknown(tmp_path):
+    store = Store(str(tmp_path / "empty.db"))
+    router = ModelRouter(
+        [openai_like(), openrouter_like(capabilities=EQUAL_CAPS)], outcome_store=store,
+    )
+    assert router.history_for("openai").samples == 0
+    assert router.history_for("openai").score_delta() == 0.0
+    decision = await router.select(CapabilityRequest(reasoning="high", coding="high"))
+    assert decision.selected.provider_id == "openai"
+    assert "no recent outcomes" in decision.selected.reasons
+    assert store.recent_provider_outcomes() == []
+
+
+@pytest.mark.asyncio
+async def test_durable_failures_shift_ranking_across_a_fresh_store(tmp_path):
+    path = tmp_path / "router.db"
+    store = Store(str(path))
+    mission_id = str(Mission(goal="route").id)
+    writer = ModelRouter(
+        [openai_like(), openrouter_like(capabilities=EQUAL_CAPS)], outcome_store=store,
+    )
+    writer.note_mission(mission_id)
+    first = await writer.select(CapabilityRequest(reasoning="high", coding="high"))
+    assert first.selected.provider_id == "openai"
+    assert "no recent outcomes" in first.selected.reasons
+    for _ in range(3):
+        writer.record_outcome("openai", False, failure_class=FailureClass.PROVIDER_OUTAGE)
+    fresh = Store(str(path))
+    reader = ModelRouter(
+        [openai_like(), openrouter_like(capabilities=EQUAL_CAPS)], outcome_store=fresh,
+    )
+    assert reader.history_for("openai").failures == 3
+    assert reader.history_for("openai").successes == 0
+    assert reader.history_for("openrouter").samples == 0
+    second = await reader.select(CapabilityRequest(reasoning="high", coding="high"))
+    assert second.selected.provider_id == "openrouter"
+    openai_candidate = next(item for item in second.chain if item.provider_id == "openai")
+    assert "recent success 0/3" in openai_candidate.reasons
+    rows = fresh.recent_provider_outcomes()
+    assert len(rows) == 3
+    assert {row["outcome"] for row in rows} == {"failure"}
+    assert {row["failure_class"] for row in rows} == {"PROVIDER_OUTAGE"}
+    assert {row["mission_id"] for row in rows} == {mission_id}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_class", [
+    FailureClass.AUTHORIZATION_REQUIRED,
+    FailureClass.POLICY_REFUSAL,
+    FailureClass.INVALID_OUTPUT,
+    FailureClass.RATE_LIMIT,
+    FailureClass.TIMEOUT,
+])
+async def test_durable_memory_does_not_invent_a_secondary(tmp_path, failure_class):
+    store = Store(str(tmp_path / "nofailover.db"))
+    openai = openai_like(error=ProviderError("denied", failure_class))
+    openrouter = openrouter_like(capabilities=EQUAL_CAPS)
+    router = ModelRouter([openai, openrouter], outcome_store=store)
+    with pytest.raises(ProviderError) as error:
+        await router.complete(CapabilityRequest(reasoning="high", coding="high"), REQUEST)
+    assert error.value.failure_class == failure_class
+    assert openai.calls == 1
+    assert openrouter.calls == 0
+    rows = store.recent_provider_outcomes()
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "failure"
+    assert rows[0]["failure_class"] == failure_class.value
+
+
+@pytest.mark.asyncio
+async def test_durable_memory_keeps_provider_outage_failover(tmp_path):
+    store = Store(str(tmp_path / "outage.db"))
+    openai = openai_like(error=ProviderError("down", FailureClass.PROVIDER_OUTAGE))
+    openrouter = openrouter_like(output={"answer": "ok"}, capabilities=EQUAL_CAPS)
+    router = ModelRouter([openai, openrouter], outcome_store=store)
+    response = await router.complete(CapabilityRequest(reasoning="high", coding="high"), REQUEST)
+    assert response.provider == "openrouter"
+    assert response.failover_from == "openai"
+    assert openrouter.calls == 1
+    rows = store.recent_provider_outcomes()
+    assert [row["outcome"] for row in rows] == ["failure", "success"]
+    assert rows[0]["failure_class"] == "PROVIDER_OUTAGE"
+    assert rows[1]["failure_class"] is None
+
+
+def test_corrupt_and_expired_rows_do_not_invent_success(tmp_path):
+    path = tmp_path / "corrupt.db"
+    store = Store(str(path))
+    store.append_provider_outcome("openai", success=False, failure_class="PROVIDER_OUTAGE")
+    now = datetime.now(timezone.utc)
+    expired = now - timedelta(days=2)
+    with store.engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO provider_outcomes (provider_id, outcome, failure_class, ts, mission_id) "
+            "VALUES (:provider_id, :outcome, :failure_class, :ts, :mission_id)"
+        ), [
+            {"provider_id": "openai", "outcome": "yes", "failure_class": None,
+             "ts": now, "mission_id": None},
+            {"provider_id": "openai", "outcome": "success", "failure_class": "PROVIDER_OUTAGE",
+             "ts": now, "mission_id": None},
+            {"provider_id": "openai", "outcome": "success", "failure_class": None,
+             "ts": now, "mission_id": "not-a-uuid"},
+            {"provider_id": "openai", "outcome": "success", "failure_class": None,
+             "ts": expired, "mission_id": None},
+        ])
+    fresh = Store(str(path))
+    router = ModelRouter([openai_like()], outcome_store=fresh)
+    history = router.history_for("openai")
+    assert history.failures == 1
+    assert history.successes == 0
+    assert history.score_delta() < 0
+    assert all(row["outcome"] == "failure" for row in fresh.recent_provider_outcomes())
+
+
+def test_provider_outcome_retention_keeps_latest_per_provider(tmp_path):
+    path = tmp_path / "retain.db"
+    store = Store(str(path))
+    for _ in range(ROUTER_OUTCOME_PER_PROVIDER):
+        store.append_provider_outcome("openai", success=False, failure_class="TIMEOUT")
+    store.append_provider_outcome("openai", success=True)
+    rows = store.recent_provider_outcomes()
+    assert len(rows) == ROUTER_OUTCOME_PER_PROVIDER
+    assert sum(row["outcome"] == "success" for row in rows) == 1
+    assert sum(row["outcome"] == "failure" for row in rows) == ROUTER_OUTCOME_PER_PROVIDER - 1
+    router = ModelRouter([openai_like()], outcome_store=Store(str(path)))
+    assert router.history_for("openai").successes == 1
+    assert router.history_for("openai").failures == ROUTER_OUTCOME_PER_PROVIDER - 1
+
+
+def test_expired_success_is_not_scored(tmp_path):
+    store = Store(str(tmp_path / "ttl.db"))
+    store.append_provider_outcome(
+        "openai", success=True, ts=datetime.now(timezone.utc) - timedelta(days=2),
+    )
+    assert store.recent_provider_outcomes() == []
+    router = ModelRouter([openai_like()], outcome_store=store)
+    assert router.history_for("openai").samples == 0
+    assert router.history_for("openai").score_delta() == 0.0
+
+
+def test_build_router_persists_outcomes_on_the_store(tmp_path):
+    path = tmp_path / "built.db"
+    store = Store(str(path))
+    router = build_router(model_provider=openai_like(), outcome_store=store)
+    router.record_outcome("openai", False, failure_class=FailureClass.TIMEOUT)
+    fresh = Store(str(path))
+    rows = fresh.recent_provider_outcomes()
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "failure"
+    assert rows[0]["failure_class"] == "TIMEOUT"
 

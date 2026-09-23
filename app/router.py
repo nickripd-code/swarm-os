@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Literal
+from collections.abc import Mapping
+from datetime import datetime
+from typing import Any, Literal, Protocol
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -297,6 +300,48 @@ def score_model(descriptor: ModelDescriptor, request: CapabilityRequest, *,
     return score, reasons
 
 
+_FAILURE_CLASS_VALUES = frozenset(item.value for item in FailureClass)
+
+
+class ProviderOutcomeStore(Protocol):
+    """Narrow durable log. ModelRouter does not import Store."""
+
+    def append_provider_outcome(
+        self, provider_id: str, *, success: bool, failure_class: str | None = None,
+        mission_id: str | None = None, ts: datetime | None = None,
+    ) -> None: ...
+
+    def recent_provider_outcomes(self) -> list[dict[str, Any]]: ...
+
+
+def parse_stored_provider_outcome(row: Mapping[str, Any]) -> tuple[str, bool] | None:
+    """Return (provider_id, success) or None. Corrupt rows never become a score."""
+    provider_id = row.get("provider_id")
+    if not isinstance(provider_id, str) or not provider_id.strip() or len(provider_id) > 64:
+        return None
+    outcome = row.get("outcome")
+    if outcome == "success":
+        success = True
+    elif outcome == "failure":
+        success = False
+    else:
+        return None
+    failure_class = row.get("failure_class")
+    if success and failure_class not in (None,):
+        return None
+    if not success and failure_class is not None and failure_class not in _FAILURE_CLASS_VALUES:
+        return None
+    if not isinstance(row.get("ts"), datetime):
+        return None
+    mission_id = row.get("mission_id")
+    if mission_id is not None:
+        try:
+            UUID(str(mission_id))
+        except (TypeError, ValueError):
+            return None
+    return provider_id, success
+
+
 def registered_providers(provider: ModelProvider) -> list[ModelProvider]:
     """Flatten FailoverModelProvider so the router can score each adapter."""
     if isinstance(provider, FailoverModelProvider):
@@ -307,14 +352,18 @@ def registered_providers(provider: ModelProvider) -> list[ModelProvider]:
 class ModelRouter:
     """Select a model from registered ModelProviders by capability, then fall back on outage."""
 
-    def __init__(self, providers: list[ModelProvider]):
+    def __init__(self, providers: list[ModelProvider], *,
+                 outcome_store: ProviderOutcomeStore | None = None):
         if not providers:
             raise ValueError("ModelRouter requires at least one ModelProvider")
         self.providers = list(providers)
         self.last_decision: RouteDecision | None = None
         self._history: dict[str, ProviderHistory] = {}
+        self._outcome_store = outcome_store
+        self._mission_id: str | None = None
         self._last_catalog: list[tuple[ModelProvider, ModelDescriptor, str]] = []
         self._last_rejections: list[RouteRejection] = []
+        self._load_durable_history()
 
     @classmethod
     def wrap(cls, provider: ModelProvider) -> "ModelRouter":
@@ -326,9 +375,57 @@ class ModelRouter:
     def history_for(self, provider_id: str) -> ProviderHistory:
         return self._history.setdefault(provider_id, ProviderHistory())
 
-    def record_outcome(self, provider_id: str, success: bool) -> None:
+    def note_mission(self, mission_id: Any | None) -> None:
+        """Optional mission stamp for the next durable outcome. Invalid ids are not stored."""
+        self._mission_id = None if mission_id is None else str(mission_id)
+
+    def record_outcome(
+        self, provider_id: str, success: bool, *,
+        failure_class: FailureClass | str | None = None, mission_id: str | None = None,
+    ) -> None:
         """Remember a real complete() result. Does not invent success or skip the chain."""
         self.history_for(provider_id).record(success)
+        store = self._outcome_store
+        if store is None:
+            return
+        if isinstance(failure_class, FailureClass):
+            klass: str | None = failure_class.value
+        elif isinstance(failure_class, str):
+            klass = failure_class
+        else:
+            klass = None
+        resolved_mission = self._mission_id if mission_id is None else mission_id
+        store.append_provider_outcome(
+            provider_id, success=bool(success), failure_class=klass, mission_id=resolved_mission,
+        )
+
+    def _load_durable_history(self) -> None:
+        """Replace the in-process window from the store. A failed read keeps the prior window."""
+        store = self._outcome_store
+        if store is None:
+            return
+        try:
+            rows = store.recent_provider_outcomes()
+        except Exception:
+            return
+        if not isinstance(rows, list):
+            return
+        grouped: dict[str, list[bool]] = {}
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            parsed = parse_stored_provider_outcome(row)
+            if parsed is None:
+                continue
+            provider_id, success = parsed
+            grouped.setdefault(provider_id, []).append(success)
+        loaded: dict[str, ProviderHistory] = {}
+        for provider_id, outcomes in grouped.items():
+            history = ProviderHistory()
+            for success in outcomes[-HISTORY_WINDOW:]:
+                history.record(success)
+            loaded[provider_id] = history
+        self._history = loaded
 
     def _provider(self, provider_id: str) -> ModelProvider | None:
         for provider in self.providers:
@@ -409,6 +506,7 @@ class ModelRouter:
     ) -> RouteDecision:
         if not self.configured():
             raise ProviderError("No model provider is configured", FailureClass.AUTHORIZATION_REQUIRED)
+        self._load_durable_history()
         ranked: list[RouteCandidate] = []
         costs: list[tuple[float | None, str]] = []
         for index, (provider, descriptor, health) in enumerate(await self.catalog()):
@@ -485,7 +583,9 @@ class ModelRouter:
                 )
                 response = await provider.complete(targeted)
             except ProviderError as exc:
-                self.record_outcome(candidate.provider_id, False)
+                self.record_outcome(
+                    candidate.provider_id, False, failure_class=exc.failure_class,
+                )
                 if exc.failure_class not in FAILOVER_FAILURE_CLASSES:
                     raise
                 last_error = exc
@@ -526,8 +626,8 @@ class ModelRouter:
         )
         try:
             response = await provider.complete(targeted)
-        except ProviderError:
-            self.record_outcome(candidate.provider_id, False)
+        except ProviderError as exc:
+            self.record_outcome(candidate.provider_id, False, failure_class=exc.failure_class)
             raise
         self.record_outcome(candidate.provider_id, True)
         return response

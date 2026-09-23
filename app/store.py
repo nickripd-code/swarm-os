@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
 
-from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, create_engine, select, update
+from sqlalchemy import (
+    DateTime, Integer, String, Text, UniqueConstraint, create_engine, delete, select, update,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from .events import (
     EventType, coerce_event_type, is_task_event, parse_event_type, task_status_from_event,
 )
 from .migrations import apply_migrations
-from .models import AgentSpec, Mission, MissionAnswer, MissionEvent, MissionStatus, Task, utcnow
+from .models import (
+    AgentSpec, FailureClass, Mission, MissionAnswer, MissionEvent, MissionStatus, Task, utcnow,
+)
 
 
 class AnswerStateError(RuntimeError):
@@ -116,6 +120,49 @@ class MemoryNoteRow(Base):
     agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     body: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+# Matches ModelRouter HISTORY_WINDOW. Extra rows never become a score.
+ROUTER_OUTCOME_PER_PROVIDER = 8
+ROUTER_OUTCOME_GLOBAL_LIMIT = 256
+ROUTER_OUTCOME_TTL_SECONDS = 24 * 60 * 60
+_FAILURE_CLASS_VALUES = frozenset(item.value for item in FailureClass)
+
+
+class ProviderOutcomeRow(Base):
+    __tablename__ = "provider_outcomes"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    provider_id: Mapped[str] = mapped_column(String(64), index=True)
+    outcome: Mapped[str] = mapped_column(String(16))
+    failure_class: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    mission_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+def _aware_ts(value: datetime | None) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _clean_mission_id(mission_id: str | None) -> str | None:
+    if mission_id is None:
+        return None
+    try:
+        return str(UUID(str(mission_id)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _clean_failure_class(failure_class: str | None, *, success: bool) -> str | None:
+    if success or failure_class is None:
+        return None
+    value = str(failure_class)
+    if value not in _FAILURE_CLASS_VALUES:
+        return None
+    return value
 
 
 class Store:
@@ -317,3 +364,98 @@ class Store:
                                  created_at=(r.created_at.replace(tzinfo=timezone.utc)
                                              if r.created_at.tzinfo is None else r.created_at))
                     for r in rows]
+
+    def append_provider_outcome(
+        self,
+        provider_id: str,
+        *,
+        success: bool,
+        failure_class: str | None = None,
+        mission_id: str | None = None,
+        ts: datetime | None = None,
+    ) -> None:
+        """Persist one real provider outcome. Does not invent success."""
+        if not isinstance(provider_id, str) or not provider_id.strip() or len(provider_id) > 64:
+            raise ValueError("provider_id is required")
+        recorded_at = _aware_ts(ts) or utcnow()
+        outcome = "success" if success else "failure"
+        row = ProviderOutcomeRow(
+            provider_id=provider_id,
+            outcome=outcome,
+            failure_class=_clean_failure_class(failure_class, success=bool(success)),
+            ts=recorded_at,
+            mission_id=_clean_mission_id(mission_id),
+        )
+        with self.sessions.begin() as db:
+            db.add(row)
+            db.flush()
+            self._prune_provider_outcomes(db, utcnow())
+
+    def recent_provider_outcomes(self) -> list[dict]:
+        """Oldest-first valid rows inside the retention window. Corrupt rows are omitted."""
+        cutoff = utcnow() - timedelta(seconds=ROUTER_OUTCOME_TTL_SECONDS)
+        with self.sessions() as db:
+            rows = db.scalars(
+                select(ProviderOutcomeRow).order_by(ProviderOutcomeRow.ts.desc(), ProviderOutcomeRow.id.desc())
+            ).all()
+            materialized = [self._outcome_dict(row) for row in rows]
+        newest_first: list[dict] = []
+        per_provider: dict[str, int] = {}
+        for item in materialized:
+            if item is None or item["ts"] < cutoff:
+                continue
+            count = per_provider.get(item["provider_id"], 0)
+            if count >= ROUTER_OUTCOME_PER_PROVIDER or len(newest_first) >= ROUTER_OUTCOME_GLOBAL_LIMIT:
+                continue
+            newest_first.append(item)
+            per_provider[item["provider_id"]] = count + 1
+        newest_first.reverse()
+        return newest_first
+
+    def _outcome_dict(self, row: ProviderOutcomeRow) -> dict | None:
+        provider_id = row.provider_id
+        if not isinstance(provider_id, str) or not provider_id.strip() or len(provider_id) > 64:
+            return None
+        if row.outcome not in {"success", "failure"}:
+            return None
+        success = row.outcome == "success"
+        failure_class = row.failure_class
+        if success and failure_class not in (None,):
+            return None
+        if not success and failure_class is not None and failure_class not in _FAILURE_CLASS_VALUES:
+            return None
+        ts = _aware_ts(row.ts)
+        if ts is None:
+            return None
+        mission_id = row.mission_id
+        if mission_id is not None:
+            mission_id = _clean_mission_id(mission_id)
+            if mission_id is None:
+                return None
+        return {
+            "provider_id": provider_id,
+            "outcome": row.outcome,
+            "failure_class": None if success else failure_class,
+            "ts": ts,
+            "mission_id": mission_id,
+        }
+
+    def _prune_provider_outcomes(self, db, now: datetime) -> None:
+        cutoff = now - timedelta(seconds=ROUTER_OUTCOME_TTL_SECONDS)
+        rows = db.scalars(
+            select(ProviderOutcomeRow).order_by(ProviderOutcomeRow.ts.desc(), ProviderOutcomeRow.id.desc())
+        ).all()
+        keep: set[int] = set()
+        per_provider: dict[str, int] = {}
+        for row in rows:
+            item = self._outcome_dict(row)
+            if item is None or item["ts"] < cutoff:
+                continue
+            count = per_provider.get(row.provider_id, 0)
+            if count >= ROUTER_OUTCOME_PER_PROVIDER or len(keep) >= ROUTER_OUTCOME_GLOBAL_LIMIT:
+                continue
+            keep.add(row.id)
+            per_provider[row.provider_id] = count + 1
+        stale = [row.id for row in rows if row.id not in keep]
+        if stale:
+            db.execute(delete(ProviderOutcomeRow).where(ProviderOutcomeRow.id.in_(stale)))
