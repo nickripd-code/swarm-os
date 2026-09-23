@@ -57,6 +57,62 @@ def test_ui_does_not_claim_unconfigured_capabilities():
     assert "durable mission events appear here" in html
 
 
+def test_phone_layout_stacks_priority_surfaces_without_invented_controls():
+    """Contract for the 320–430px Mission Control seed. No phone lab is required.
+
+    Spot-check in a desktop browser: set the viewport width to 320px, then
+    390px, then 430px. The page should not scroll sideways. The agent map may
+    scroll inside #mapViewport. Launch, STOP ALL, Preview, answer send, kill,
+    command Run, and zoom/fit should be at least 44px tall. Preview must still
+    read PREVIEW and must not claim a model is running.
+    """
+    html = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    css = (ROOT / "app/static/control.css").read_text(encoding="utf-8")
+    control = (ROOT / "app/static/control.js").read_text(encoding="utf-8")
+    marker = "/* phone-mission-control:"
+    assert marker in css
+    phone = css.split(marker, 1)[1]
+    assert "max-width:430px" in phone
+    for token in (
+        "env(safe-area-inset-top)",
+        "env(safe-area-inset-right)",
+        "env(safe-area-inset-bottom)",
+        "env(safe-area-inset-left)",
+        "overflow-x:hidden",
+        "overflow-y:auto",
+        "min-height:44px",
+        "touch-action:manipulation",
+        "touch-action:pan-x pan-y",
+        ".stop-button",
+        ".mission-form button",
+        ".answer-form button",
+        ".kill-agent",
+        ".command-bar-form button",
+        ".command-drawer>summary",
+        "#activity",
+        ".hud-stats",
+        ".hud-chips",
+        "grid-template-columns:1fr",
+        "position:static",
+    ):
+        assert token in phone, token
+    assert "grid-template-columns:minmax(0,1fr) 340px" not in phone
+    assert css.index("grid-template-columns:minmax(0,1fr) 340px") < css.index(marker)
+    assert 'viewport-fit=cover' in html
+    assert "width=device-width" in html
+    assert 'class="pan-hint-touch">Scroll' in html
+    assert 'class="pan-hint-mouse">Drag · scroll' in html
+    assert "estimate unavailable" in html
+    assert 'id="pause"' not in html
+    assert 'id="resume"' not in html
+    assert "Interactive preview · no models or tools are running" in control
+    assert 'state.preview?"PREVIEW"' in control
+    assert 'matchMedia("(max-width: 430px)")' in control
+    assert "Math.max(narrow?280:650," in control
+    assert "layoutTree(state.agents,treeLayoutWidth())" in control
+    assert 'class="kill-agent"' in control
+
+
 def test_control_module_starts_with_a_real_line_break():
     control = (ROOT / "app/static/control.js").read_text(encoding="utf-8")
     first_line, second_line, *_ = control.splitlines()

@@ -124,6 +124,12 @@ function armNotifications(){
   if(typeof Notification!=="undefined"&&Notification.permission==="default")Promise.resolve(Notification.requestPermission()).catch(()=>{});
 }
 function schedule(){if(!frame)frame=requestAnimationFrame(()=>{frame=0;render();});}
+function treeLayoutWidth(){
+  const viewport=$("mapViewport");
+  const width=viewport?viewport.clientWidth:0;
+  const narrow=typeof matchMedia==="function"&&matchMedia("(max-width: 430px)").matches;
+  return Math.max(narrow?280:650,width/(zoom||1));
+}
 function render(){
   const mission=state.mission, status=mission?.status||"idle";
   renderHud();
@@ -140,7 +146,7 @@ function render(){
   if(state.preview)connection("Preview");
   else if(!replayLive)connection("Replay");
   else if(terminal.has(status))connection("Mission "+status,status==="completed"?"live":"disconnected");
-  graph=layoutTree(state.agents,Math.max(650,$("mapViewport").clientWidth/zoom));
+  graph=layoutTree(state.agents,treeLayoutWidth());
   $("world").style.width=graph.width+"px";$("world").style.height=graph.height+"px";
   $("world").style.transform="scale("+zoom+")";
   $("mapSpacer").style.width=graph.width*zoom+"px";$("mapSpacer").style.height=graph.height*zoom+"px";
