@@ -30,6 +30,18 @@ a{color:inherit;text-decoration:none}[hidden]{display:none!important}
 .mission-form button,.answer-form button,.command-bar-form button{border:1px solid #53c9e2;background:#51cee9;color:#03202b;border-radius:8px;font-weight:700;padding:11px 16px}.mission-form button{height:44px;min-width:112px;display:flex;align-items:center;justify-content:space-between}.mission-form button:hover,.answer-form button:hover,.command-bar-form button:hover{background:#81eaff}
 .dock-meta{min-height:36px;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:15px;padding:8px 4px 0;color:var(--muted);font-size:10px}.brain{display:flex;align-items:center;gap:8px;min-width:0}.brain-dot{width:19px;height:19px;border:1px solid #287795;border-radius:50%;background:radial-gradient(circle at 36% 32%,#8cecff,#1a708d 45%,#0b2637);box-shadow:0 0 13px #48dcff38}.brain strong,.brain small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.brain strong{font-size:10px;color:#b8d0dc}.brain small{font:9px var(--mono);color:#5e7b8d;margin-top:1px}.mission-tools{display:flex;justify-content:flex-end;align-items:center;gap:13px}.text-button{border:0;background:transparent;color:#80d8e8;padding:4px}.text-button:hover{color:var(--cyan)}.mission-tools select{max-width:190px;border:0;background:#091723;color:#7995a7;font-size:10px}
 
+.recent-missions{max-width:1120px;margin:0 auto 14px;border:1px solid var(--line);background:#081521;border-radius:11px;padding:11px 14px}
+.recent-missions-heading{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.recent-missions-note{color:#6f8da0;font:9px var(--mono)}
+.recent-missions-empty{margin:8px 0 0;color:#718fa1;font-size:12px}
+.recent-missions-columns,.recent-missions-list button{display:grid;grid-template-columns:minmax(120px,1.15fr) 88px minmax(0,2fr) minmax(148px,1fr);gap:10px;align-items:center}
+.recent-missions-columns{margin-top:8px;color:#617e90;font:8px var(--mono);letter-spacing:.6px}
+.recent-missions-list{list-style:none;margin:0;padding:0;max-height:180px;overflow:auto}
+.recent-missions-list button{width:100%;border:0;border-top:1px solid #142d40;background:transparent;padding:7px 2px;text-align:left;color:#c7dae2;font:10px var(--mono)}
+.recent-missions-list button:hover,.recent-missions-list button[aria-current="true"]{background:#0d2434}
+.recent-mission-goal{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#b7c9d3;font:11px 'DM Sans',system-ui,sans-serif}
+.recent-mission-status{text-transform:uppercase;letter-spacing:.4px;color:#91a7b5}
+.recent-mission-id,.recent-mission-started{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .notice{max-width:1120px;margin:0 auto 12px;border:1px solid #815228;border-radius:9px;background:#2b1d0f;color:#ffd49d;padding:10px 13px}
 .objective-hud{max-width:1120px;margin:0 auto 14px;display:grid;grid-template-columns:minmax(250px,1fr) auto auto;align-items:center;gap:18px;border:1px solid var(--line);background:#081521;border-radius:11px;padding:11px 14px;position:relative}
 .hud-objective{min-width:0}.hud-objective p{margin:4px 0 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font:500 13px 'Space Grotesk'}
@@ -81,5 +93,6 @@ a{color:inherit;text-decoration:none}[hidden]{display:none!important}
   .objective-hud{grid-template-columns:1fr;padding:10px;gap:9px}.hud-chips{position:absolute;right:10px;top:9px}.hud-objective{padding-right:130px}.hud-stats{gap:9px;overflow:auto}.hud-stats div{min-width:54px}.telemetry-drawer{grid-column:auto}
   .map-panel{height:570px}.map-heading{padding:0 10px}.map-stats span:nth-child(n+2){display:none}.map-footer{padding:0 8px}.pan-hint,.legend{display:none}.inspector{height:auto;min-height:650px;display:grid;grid-template-columns:1fr;grid-template-rows:46px auto 330px}.inspector-heading{grid-column:auto}#inspectorContent{border-right:0;border-bottom:1px solid var(--line)}
   .answer-form{flex-direction:column}.cost-hud{grid-template-columns:1fr}.cost-hud-stats{gap:10px;flex-wrap:wrap}.replay-controls{flex-wrap:wrap}.replay-controls input{order:2;flex-basis:100%}.command-drawer>summary span{display:none}
+  .recent-missions-columns,.recent-missions-list button{grid-template-columns:minmax(0,1fr) auto}
 }
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;transition:none!important}.agent-node.new,.agent-node.new:after,.running .node-symbol:after,.running .visor i,.branch-line.active{animation:none!important}.message-packet{display:none}}

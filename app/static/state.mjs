@@ -404,3 +404,33 @@ export function replayView(log, index, options = {}) {
         : "Recorded events only · not a simulation"),
   };
 }
+export const RECENT_MISSION_SNIPPET_LIMIT = 64;
+function recentMissionText(value) {
+  return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+}
+export function recentMissionRows(missions) {
+  if (!Array.isArray(missions)) return [];
+  const rows = [];
+  for (const mission of missions) {
+    if (!mission || typeof mission !== "object" || Array.isArray(mission)) continue;
+    const id = recentMissionText(mission.id);
+    const status = recentMissionText(mission.status);
+    if (!id || !status) continue;
+    const goal = recentMissionText(mission.goal);
+    const explicitStart = recentMissionText(mission.started_at);
+    const created = recentMissionText(mission.created_at);
+    const startedAt = explicitStart || created || null;
+    let snippet = goal;
+    if (snippet.length > RECENT_MISSION_SNIPPET_LIMIT) {
+      snippet = snippet.slice(0, RECENT_MISSION_SNIPPET_LIMIT - 1) + "…";
+    }
+    rows.push({
+      id,
+      status,
+      snippet,
+      startedAt,
+      startedFrom: explicitStart ? "started_at" : (created ? "created_at" : null),
+    });
+  }
+  return rows;
+}
