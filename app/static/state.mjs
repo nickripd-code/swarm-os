@@ -128,6 +128,139 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+export const AVG_TOOL_LATENCY_UNAVAILABLE = "unavailable";
+const AVG_TOOL_LATENCY_LABEL = "AVG TOOL LATENCY ";
+const TOOL_LATENCY_FIELDS = ["latency_ms", "duration_ms", "elapsed_ms"];
+/** Prefix of a loaded event log. A missing feed stays null — never an invented []. */
+export function recordedAvgToolLatencyFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+function toolOutcomePayload(event) {
+  const payload = event?.payload;
+  return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+}
+function toolEventTimeMs(event) {
+  const raw = event?.created_at;
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const parsed = Date.parse(raw.trim());
+  return Number.isFinite(parsed) ? parsed : null;
+}
+/** Same buckets as Mission Control elapsed (`#hudElapsed`). A positive mean must not display as 0ms. */
+export function formatAvgToolLatency(ms) {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return null;
+  if (ms === 0) return "0ms";
+  if (ms < 1000) {
+    const rounded = Math.round(ms);
+    if (rounded <= 0) return null;
+    if (rounded >= 1000) return formatAvgToolLatency(rounded);
+    return rounded + "ms";
+  }
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  if (hours) return hours + "h " + (minutes % 60) + "m";
+  if (minutes) return minutes + "m " + (seconds % 60) + "s";
+  return seconds + "s";
+}
+function explicitToolDuration(payload) {
+  for (const key of TOOL_LATENCY_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(payload, key)) continue;
+    const ms = finiteNumber(payload[key]);
+    if (ms === null || ms < 0) return {status: "invalid"};
+    return {status: "ok", ms};
+  }
+  return {status: "absent"};
+}
+function sameToolCall(start, finished) {
+  const startPayload = toolOutcomePayload(start);
+  const payload = toolOutcomePayload(finished);
+  const actor = finished?.actor_id ?? null;
+  const sameActor = !actor || !start?.actor_id || start.actor_id === actor;
+  if (!sameActor) return false;
+  const tool = typeof payload.tool === "string" ? payload.tool : "";
+  const startTool = typeof startPayload.tool === "string" ? startPayload.tool : "";
+  if (tool && startTool && startTool !== tool) return false;
+  if (Object.prototype.hasOwnProperty.call(payload, "used") && Object.prototype.hasOwnProperty.call(startPayload, "used")) {
+    const used = finiteNumber(payload.used);
+    const startUsed = finiteNumber(startPayload.used);
+    if (used === null || startUsed === null || startUsed !== used) return false;
+  }
+  return true;
+}
+function takeMatchingToolStart(open, finished) {
+  for (let i = open.length - 1; i >= 0; i--) {
+    if (sameToolCall(open[i], finished)) return open.splice(i, 1)[0];
+  }
+  return null;
+}
+/**
+ * Read-only mean duration of tool.completed outcomes on the loaded shell feed.
+ * Distinct from newest-only last-tool latency. An explicit non-negative
+ * latency_ms / duration_ms / elapsed_ms wins. Otherwise the span is the
+ * recorded created_at delta from the matching tool.started. tool.failed closes
+ * that start and is not averaged. Hidden with no mission, in preview, or when
+ * no completed tool outcome is visible yet. A missing feed, or any completed
+ * outcome without an honest duration, is unavailable — never a partial mean
+ * and never an invented 0ms.
+ */
+export function avgToolLatencyView(feed, options = {}) {
+  const visible = options.visible === true;
+  const empty = {hidden: true, known: false, count: null, meanMs: null, label: ""};
+  if (!visible) return empty;
+  if (!Array.isArray(feed)) {
+    return {hidden: false, known: false, count: null, meanMs: null, label: AVG_TOOL_LATENCY_LABEL + AVG_TOOL_LATENCY_UNAVAILABLE};
+  }
+  const open = [];
+  const durations = [];
+  let completed = 0;
+  let unreadable = false;
+  for (const event of feed) {
+    if (!event || typeof event !== "object") continue;
+    if (event.event_type === "tool.started") {
+      open.push(event);
+      continue;
+    }
+    const completedOutcome = event.event_type === "tool.completed";
+    const failedOutcome = event.event_type === "tool.failed";
+    if (!completedOutcome && !failedOutcome) continue;
+    const started = takeMatchingToolStart(open, event);
+    if (!completedOutcome) continue;
+    completed += 1;
+    const explicit = explicitToolDuration(toolOutcomePayload(event));
+    if (explicit.status === "invalid") {
+      unreadable = true;
+      continue;
+    }
+    if (explicit.status === "ok") {
+      durations.push(explicit.ms);
+      continue;
+    }
+    const end = toolEventTimeMs(event);
+    const start = started ? toolEventTimeMs(started) : null;
+    if (start === null || end === null || end < start) {
+      unreadable = true;
+      continue;
+    }
+    durations.push(end - start);
+  }
+  if (completed === 0) {
+    return {hidden: true, known: false, count: 0, meanMs: null, label: ""};
+  }
+  if (unreadable || durations.length !== completed) {
+    return {hidden: false, known: false, count: completed, meanMs: null, label: AVG_TOOL_LATENCY_LABEL + AVG_TOOL_LATENCY_UNAVAILABLE};
+  }
+  const meanMs = durations.reduce((sum, ms) => sum + ms, 0) / completed;
+  const formatted = formatAvgToolLatency(meanMs);
+  if (formatted === null) {
+    return {hidden: false, known: false, count: completed, meanMs: null, label: AVG_TOOL_LATENCY_LABEL + AVG_TOOL_LATENCY_UNAVAILABLE};
+  }
+  return {hidden: false, known: true, count: completed, meanMs, label: AVG_TOOL_LATENCY_LABEL + formatted};
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
