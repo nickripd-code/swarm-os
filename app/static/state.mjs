@@ -128,6 +128,54 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+export const LLM_FAIL_RATE_UNAVAILABLE = "unavailable";
+/** Prefix of a loaded event log. A missing feed stays null — never an invented []. */
+export function recordedLlmFailRateFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+function formatLlmFailRatePercent(percent) {
+  if (percent === 0) return "0%";
+  if (!Number.isFinite(percent) || percent < 0 || percent > 100) return null;
+  const rounded = Math.round(percent * 100) / 100;
+  // A positive rate must not display as a fake zero.
+  if (rounded === 0) return null;
+  return (Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2)) + "%";
+}
+/**
+ * Read-only llm.failed / completed attempts from the loaded shell feed.
+ * A completed attempt is llm.failed or llm.completed. llm.started, llm.retry,
+ * and llm.failover are not attempts. Hidden with no mission, in preview, or
+ * when no completed attempt is visible yet. A missing feed is unavailable, not 0%.
+ */
+export function llmFailRateView(feed, options = {}) {
+  const visible = options.visible === true;
+  const empty = {hidden: true, known: false, fails: null, completed: null, attempts: null, rate: null, label: ""};
+  if (!visible) return empty;
+  if (!Array.isArray(feed)) {
+    return {hidden: false, known: false, fails: null, completed: null, attempts: null, rate: null, label: "LLM FAIL RATE " + LLM_FAIL_RATE_UNAVAILABLE};
+  }
+  let fails = 0;
+  let completed = 0;
+  for (const event of feed) {
+    if (!event || typeof event !== "object") continue;
+    if (event.event_type === "llm.failed") fails += 1;
+    else if (event.event_type === "llm.completed") completed += 1;
+  }
+  const attempts = fails + completed;
+  if (attempts === 0) {
+    return {hidden: true, known: false, fails: 0, completed: 0, attempts: 0, rate: null, label: ""};
+  }
+  const rate = fails / attempts;
+  const percent = formatLlmFailRatePercent(rate * 100);
+  if (percent === null) {
+    return {hidden: false, known: false, fails, completed, attempts, rate: null, label: "LLM FAIL RATE " + LLM_FAIL_RATE_UNAVAILABLE};
+  }
+  return {hidden: false, known: true, fails, completed, attempts, rate, label: "LLM FAIL RATE " + percent};
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
