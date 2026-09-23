@@ -33,7 +33,7 @@ from .tools import ToolCall, ToolError, ToolProvider, build_tool_provider, publi
 from .evidence import public_evidence_runs
 from .verifier import public_verification, verification_accepted
 from .payments import PaymentError, PaymentProvider, resolve_payment_provider
-from .workspace import WorkspaceError, WorkspaceProvider, build_workspace_provider
+from .workspace import WorkspaceError, WorkspaceGcResult, WorkspaceProvider, build_workspace_provider
 from .workers import WorkerPoolError
 
 TERMINAL = {MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.STOPPED, MissionStatus.BLOCKED}
@@ -136,6 +136,41 @@ class SwarmRuntime:
             return await self._require_workspaces().read_file(workspace_id, relative)
         except WorkspaceError as exc:
             raise PolicyError(str(exc), exc.failure_class) from exc
+
+    def _workspace_policy_error(self, exc: WorkspaceError) -> PolicyError:
+        mapped = PolicyError(str(exc), exc.failure_class)
+        mapped.removed = list(exc.removed)
+        return mapped
+
+    async def destroy_workspace(self, workspace_id: UUID):
+        try:
+            return await self._require_workspaces().destroy(workspace_id)
+        except WorkspaceError as exc:
+            raise self._workspace_policy_error(exc) from exc
+
+    async def destroy_mission_workspaces(self, mission_id: UUID) -> list[UUID]:
+        try:
+            return await self._require_workspaces().destroy_mission(mission_id)
+        except WorkspaceError as exc:
+            raise self._workspace_policy_error(exc) from exc
+
+    async def gc_workspaces(
+        self,
+        *,
+        now: datetime | None = None,
+        ttl_seconds: float | None = None,
+        terminal_missions: dict[UUID, datetime] | None = None,
+        terminal_retention_seconds: float | None = None,
+    ) -> WorkspaceGcResult:
+        try:
+            return await self._require_workspaces().gc(
+                now=now,
+                ttl_seconds=ttl_seconds,
+                terminal_missions=terminal_missions,
+                terminal_retention_seconds=terminal_retention_seconds,
+            )
+        except WorkspaceError as exc:
+            raise self._workspace_policy_error(exc) from exc
 
     async def emit(self, mission_id: UUID, event_type: EventType | str, payload: dict[str, Any], actor_id: UUID | None = None):
         event = self.store.append(MissionEvent(mission_id=mission_id, event_type=event_type, actor_id=actor_id, payload=payload))
