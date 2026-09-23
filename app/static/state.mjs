@@ -128,6 +128,48 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+
+export const LLM_STARTED_COUNT_UNAVAILABLE = "LLM STARTED unavailable";
+
+/** Prefix of a loaded event log. A missing feed stays null — never an invented []. */
+export function recordedLlmStartedCountFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+
+/**
+ * Read-only count of llm.started events on the loaded feed.
+ * Hidden with an empty label when there is no mission, in preview, or the metric is not computable yet.
+ * A missing feed or an unreadable event_type is LLM STARTED unavailable, never 0.
+ * An explicit empty list (including a cursor before any event) is LLM STARTED 0.
+ * Completions, failures, retries, failovers, and tool starts are not counted.
+ * The label is a count only and never includes tokens or spend.
+ */
+export function llmStartedCountView(feed, options = {}) {
+  if (options.visible !== true || options.computable === false) {
+    return {hidden: true, known: false, count: null, label: ""};
+  }
+  if (!Array.isArray(feed)) {
+    return {hidden: false, known: false, count: null, label: LLM_STARTED_COUNT_UNAVAILABLE};
+  }
+  let count = 0;
+  for (const event of feed) {
+    if (!event || typeof event !== "object" || Array.isArray(event)) continue;
+    const type = event.event_type;
+    if (typeof type !== "string") {
+      if (type != null) {
+        return {hidden: false, known: false, count: null, label: LLM_STARTED_COUNT_UNAVAILABLE};
+      }
+      continue;
+    }
+    if (type === "llm.started") count += 1;
+  }
+  return {hidden: false, known: true, count, label: "LLM STARTED " + count};
+}
+
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
