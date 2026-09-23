@@ -135,7 +135,8 @@ def test_chip_markup_is_hidden_until_the_shell_is_failed():
     assert 'id="failAgeChip" class="hud-chip fail-age unavailable" hidden' in html
     assert 'FAIL_AGE_UNAVAILABLE = "FAIL AGE unavailable"' in state
     assert "export function failAgeChip" in state
-    assert 'event.event_type !== "mission.failed"' in state
+    assert 'const MISSION_FAIL_EVENT = "mission.failed"' in state
+    assert "event.event_type !== MISSION_FAIL_EVENT" in state
     assert "failAgeChip" in control
     assert "just now" not in html.lower()
     assert "just now" not in state
