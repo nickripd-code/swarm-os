@@ -125,6 +125,8 @@ def _inventory(conn: sqlite3.Connection) -> tuple[list[str], int, bool]:
     ]
     total = 0
     for name in names:
+        if name == "schema_migrations":
+            continue
         count = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
         total += int(count)
     return names, total, total == 0
