@@ -404,3 +404,124 @@ export function replayView(log, index, options = {}) {
         : "Recorded events only · not a simulation"),
   };
 }
+export const FAILURE_REASON_EMPTY = "No recorded failure, park, or blocked approval.";
+const FAILURE_CLEAR = new Set([
+  "mission.completed", "mission.running", "mission.resumed", "mission.stopped",
+  "user.answered", "user.answer_consumed", "llm.completed", "tool.completed",
+  "verification.passed",
+]);
+function recordedText(value) {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  return text ? text : null;
+}
+function failureSignal(payload, source) {
+  const failure_class = recordedText(payload.failure_class);
+  const reason = recordedText(payload.error) || recordedText(payload.rationale);
+  if (!failure_class && !reason) return null;
+  return {
+    recorded: true,
+    kind: "failure",
+    label: source === "mission.failed" || source === "mission.result" ? "FAILURE" : "CLASS",
+    failure_class,
+    reason,
+    approval_action: null,
+    question: null,
+    source,
+    empty: null,
+  };
+}
+function parkSignal(payload, source) {
+  const reason = recordedText(payload.reason);
+  const question = recordedText(payload.question);
+  const approval = payload.kind === "approval";
+  const approval_action = approval ? recordedText(payload.approval_action) : null;
+  if (approval) {
+    if (!reason && !question && !approval_action) return null;
+  } else if (!reason && !question) {
+    return null;
+  }
+  return {
+    recorded: true,
+    kind: approval ? "approval" : "park",
+    label: approval ? "APPROVAL" : "PARKED",
+    failure_class: null,
+    reason,
+    approval_action,
+    question,
+    source,
+    empty: null,
+  };
+}
+function blockedSignal(payload, source) {
+  const reason = recordedText(payload.reason) || recordedText(payload.error);
+  const finding = payload.output && typeof payload.output === "object"
+    ? recordedText(payload.output.finding) : null;
+  const text = reason || finding;
+  if (!text) return null;
+  return {
+    recorded: true,
+    kind: "blocked",
+    label: "BLOCKED",
+    failure_class: recordedText(payload.failure_class),
+    reason: text,
+    approval_action: null,
+    question: null,
+    source,
+    empty: null,
+  };
+}
+function emptyFailureReason() {
+  return {
+    recorded: false,
+    kind: null,
+    label: null,
+    failure_class: null,
+    reason: null,
+    approval_action: null,
+    question: null,
+    source: null,
+    empty: FAILURE_REASON_EMPTY,
+  };
+}
+export function failureReasonView(state) {
+  const empty = emptyFailureReason();
+  if (!state || state.preview || !state.mission) return empty;
+  const events = Array.isArray(state.events) ? state.events : [];
+  for (const event of events) {
+    const type = event && event.event_type;
+    const payload = event && event.payload && typeof event.payload === "object" ? event.payload : {};
+    if (FAILURE_CLEAR.has(type)) return empty;
+    let signal = null;
+    if (type === "mission.failed" || type === "llm.failed" || type === "tool.failed"
+        || type === "verification.failed" || type === "llm.retry") {
+      signal = failureSignal(payload, type);
+    } else if (type === "mission.blocked" || type === "task.blocked") {
+      signal = blockedSignal(payload, type);
+    } else if (type === "mission.question") {
+      signal = parkSignal(payload, type);
+    } else if (type === "mission.waiting" && (payload.kind === "approval" || recordedText(payload.question_id))) {
+      signal = parkSignal(payload, type);
+    }
+    if (signal) return signal;
+  }
+  if (events.length) return empty;
+  const mission = state.mission;
+  const result = mission.result && typeof mission.result === "object" ? mission.result : null;
+  if (mission.status === "failed" && result) {
+    const signal = failureSignal(result, "mission.result");
+    if (signal) return signal;
+  }
+  if (mission.status === "blocked" && result) {
+    const signal = blockedSignal(result, "mission.result");
+    if (signal) return signal;
+  }
+  const pending = mission.pending_question;
+  if (pending && typeof pending === "object"
+      && mission.status !== "failed" && mission.status !== "completed"
+      && mission.status !== "stopped" && mission.status !== "blocked") {
+    const signal = parkSignal(pending, "pending_question");
+    if (signal) return signal;
+  }
+  return empty;
+}

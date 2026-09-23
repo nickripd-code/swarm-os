@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,failureReasonView} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -191,6 +191,7 @@ function render(){
   renderInspector();
   renderActivity();
   renderQuestion();
+  renderFailure();
   renderReplayHud();
   $("resultPanel").hidden=!mission?.result||state.preview||!replayLive;
   if(mission?.result){
@@ -288,6 +289,33 @@ function applyQuestionEvent(e){
   if(e.event_type==="mission.running")state.mission.status="running";
   if(e.event_type.startsWith("mission.")&&terminal.has(e.event_type.split(".")[1]))state.mission.pending_question=null;
 }
+function renderFailure(){
+  const panel=$("failurePanel");
+  if(!panel)return;
+  const view=failureReasonView(state);
+  const show=!!state.mission&&!state.preview;
+  panel.hidden=!show;
+  panel.dataset.recorded=view.recorded?"true":"false";
+  panel.dataset.kind=view.kind||"";
+  const empty=$("failureEmpty");
+  const facts=$("failureFacts");
+  if(empty){empty.hidden=!!view.recorded;if(!view.recorded)empty.textContent=view.empty||"";}
+  if(facts)facts.hidden=!view.recorded;
+  const setRow=(rowId,valueId,value)=>{
+    const row=$(rowId),node=$(valueId);
+    const on=!!view.recorded&&typeof value==="string"&&value.length>0;
+    if(row)row.hidden=!on;
+    if(node)node.textContent=on?value:"";
+  };
+  setRow("failureClassRow","failureClass",view.failure_class);
+  setRow("failureReasonRow","failureReason",view.reason);
+  setRow("failureApprovalRow","failureApproval",view.approval_action);
+  setRow("failureQuestionRow","failureQuestion",view.question);
+  const kind=$("failureKind");
+  if(kind){kind.hidden=!view.recorded||!view.label;kind.textContent=view.label||"";kind.className="hud-chip status "+(view.kind==="approval"||view.kind==="park"?"waiting":view.kind||"idle");}
+  const source=$("failureSource");
+  if(source){source.hidden=!view.recorded||!view.source;source.textContent=view.recorded&&view.source?view.source:"";}
+}
 function renderQuestion(){
   const panel=$("questionPanel");
   if(!panel)return;
@@ -312,6 +340,7 @@ function reset(mission){
   state=newState(mission);selected=null;elements.clear();$("nodes").replaceChildren();$("activity").replaceChildren();
   $("resultPanel").hidden=true;if($("resultMeta")){$("resultMeta").hidden=true;$("resultMeta").textContent="";}
   if($("questionPanel"))$("questionPanel").hidden=!mission?.pending_question;
+  renderFailure();
   if($("answerText"))$("answerText").value="";
   showNotice("");setCommandStatus("");zoom=1;$("zoomValue").textContent="100%";clearAlerts();
   if(hudTick){clearInterval(hudTick);hudTick=null;}
