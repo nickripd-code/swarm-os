@@ -141,7 +141,8 @@ def test_shell_mounts_a_hidden_last_llm_chip_on_the_objective_hud():
     assert tag.startswith("<span ")
     assert "hidden" in tag
     assert "hud-chip" in tag
-    assert tag.endswith("></span>")
+    assert tag.endswith("hidden>")
+    assert html[html.index(">", start) + 1:].startswith("</span>")
     assert html.index('id="objectiveHud"') < start < html.index('id="hudElapsed"')
     assert ".hud-chip.last-llm[data-known=\"false\"]" in css
     assert "animation" not in css.split(".hud-chip.last-llm")[1].split("}")[0]
