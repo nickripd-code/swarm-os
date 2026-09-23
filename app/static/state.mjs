@@ -128,6 +128,45 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+export const TASK_BLOCKED_COUNT_UNAVAILABLE = "unavailable";
+const TASK_BLOCKED_COUNT_EVENT = "task.blocked";
+export function recordedTaskBlockedCountFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+/**
+ * Read-only count of recorded task.blocked events on the loaded feed.
+ * The runtime emits that catalog type when a worker result status is blocked
+ * and the task row is saved as blocked. Controller action "blocked" emits
+ * mission.blocked instead and is not counted. Other events are ignored unless
+ * the type matches. Hidden with no mission or in preview. A missing or
+ * unreadable feed is TASK BLOCKS unavailable, not 0. An explicit empty list
+ * (including a cursor before any event) is 0. A non-string event_type is
+ * unreadable and fails closed. The label is a count only — never spend.
+ */
+export function taskBlockedCountView(feed, options = {}) {
+  const visible = options.visible === true;
+  if (!visible) return {hidden: true, known: false, count: null, label: ""};
+  if (!Array.isArray(feed)) {
+    return {hidden: false, known: false, count: null, label: "TASK BLOCKS " + TASK_BLOCKED_COUNT_UNAVAILABLE};
+  }
+  let count = 0;
+  for (const event of feed) {
+    if (!event || typeof event !== "object" || Array.isArray(event)) continue;
+    const type = event.event_type;
+    if (typeof type !== "string") {
+      if (type != null) {
+        return {hidden: false, known: false, count: null, label: "TASK BLOCKS " + TASK_BLOCKED_COUNT_UNAVAILABLE};
+      }
+      continue;
+    }
+    if (type === TASK_BLOCKED_COUNT_EVENT) count += 1;
+  }
+  return {hidden: false, known: true, count, label: "TASK BLOCKS " + count};
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
