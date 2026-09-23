@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,tokenSpendChip,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -42,6 +42,15 @@ function formatElapsed(ms){
 function renderHud(){
   const mission=state.mission, status=mission?.status||"idle", mode=missionMode(state);
   if($("objectiveText"))$("objectiveText").textContent=mission?.goal||"Awaiting a mission.";
+  if($("tokenSpendChip")){
+    const spendChip=tokenSpendChip(mission,state.usage,{preview:state.preview===true});
+    $("tokenSpendChip").hidden=!spendChip.visible;
+    $("tokenSpendChip").textContent=spendChip.visible?spendChip.label:"";
+    $("tokenSpendChip").dataset.known=spendChip.known?"true":"false";
+    if(spendChip.visible){
+      $("tokenSpendChip").setAttribute("aria-label",spendChip.known?"Token spend "+spendChip.label:"Token spend estimate unavailable");
+    }else $("tokenSpendChip").removeAttribute("aria-label");
+  }
   if($("missionMode")){
     $("missionMode").textContent=String(mode).replaceAll("_"," ").toUpperCase();
     $("missionMode").className="hud-chip mode "+mode;
