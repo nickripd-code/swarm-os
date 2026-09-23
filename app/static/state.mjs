@@ -1,5 +1,6 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const USER_ANSWER_UNAVAILABLE = "unavailable";
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -127,6 +128,43 @@ export function costHudView(usage = {}) {
     remainingLabel,
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
+}
+const USER_ANSWERED_EVENT = "user.answered";
+/** Prefix of a loaded event log. A missing feed stays null — never an invented []. */
+export function recordedUserAnswerFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+/**
+ * Read-only count of user.answered events on the loaded feed.
+ * Hidden with no mission or in preview. A missing or unreadable feed is
+ * USER ANSWERS unavailable, not 0. An explicit empty list (including a
+ * cursor before any event) is 0. A non-string event_type is unreadable and fails closed.
+ * Questions, consumed answers, and other events are not counted.
+ * The label is a count only — never spend.
+ */
+export function userAnswerCountView(feed, options = {}) {
+  const visible = options.visible === true;
+  if (!visible) return {hidden: true, known: false, count: null, label: ""};
+  if (!Array.isArray(feed)) {
+    return {hidden: false, known: false, count: null, label: "USER ANSWERS " + USER_ANSWER_UNAVAILABLE};
+  }
+  let count = 0;
+  for (const event of feed) {
+    if (!event || typeof event !== "object" || Array.isArray(event)) continue;
+    const type = event.event_type;
+    if (typeof type !== "string") {
+      if (type != null) {
+        return {hidden: false, known: false, count: null, label: "USER ANSWERS " + USER_ANSWER_UNAVAILABLE};
+      }
+      continue;
+    }
+    if (type === USER_ANSWERED_EVENT) count += 1;
+  }
+  return {hidden: false, known: true, count, label: "USER ANSWERS " + count};
 }
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
