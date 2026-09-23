@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,spendRemainingChip,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -49,6 +49,15 @@ function renderHud(){
   if($("missionStatus")){
     $("missionStatus").textContent=status.toUpperCase();
     $("missionStatus").className="hud-chip status "+status;
+  }
+  if($("spendRemainingChip")){
+    const spendChip=spendRemainingChip(mission,state.usage,{preview:state.preview===true});
+    $("spendRemainingChip").hidden=!spendChip.visible;
+    $("spendRemainingChip").textContent=spendChip.visible?spendChip.label:"";
+    $("spendRemainingChip").dataset.known=spendChip.known?"true":"false";
+    if(spendChip.visible){
+      $("spendRemainingChip").setAttribute("aria-label",spendChip.known?"Token budget "+spendChip.label:"Token spend estimate unavailable");
+    }else $("spendRemainingChip").removeAttribute("aria-label");
   }
   if($("hudAgents"))$("hudAgents").textContent=state.agents.size;
   if($("hudTasks"))$("hudTasks").textContent=[...state.tasks.values()].filter(t=>t.status==="completed").length;
