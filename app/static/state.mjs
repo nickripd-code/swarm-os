@@ -128,6 +128,47 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+export const VERIFICATION_PASSED_UNAVAILABLE = "unavailable";
+const VERIFICATION_PASSED_EVENT = "verification.passed";
+/** Prefix of a loaded event log. A missing feed stays null — never an invented []. */
+export function recordedVerificationPassedFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+/**
+ * Read-only count of recorded verification.passed events.
+ * That catalog type is the success half of a completed verification attempt:
+ * the same numerator verification pass-rate uses. There is no
+ * verification.completed event. verification.failed, verification.started,
+ * verification.evidence.*, llm.completed, and mission.completed are not passes.
+ * Hidden with no mission or in preview. A missing or unreadable feed is
+ * VERIFICATION PASSED unavailable, not 0. An explicit empty list (including a
+ * cursor before any event) is 0. A non-string event_type is unreadable and
+ * fails closed. The label is a count only.
+ */
+export function verificationPassedCountView(feed, options = {}) {
+  const visible = options.visible === true;
+  if (!visible) return {hidden: true, known: false, count: null, label: ""};
+  if (!Array.isArray(feed)) {
+    return {hidden: false, known: false, count: null, label: "VERIFICATION PASSED " + VERIFICATION_PASSED_UNAVAILABLE};
+  }
+  let count = 0;
+  for (const event of feed) {
+    if (!event || typeof event !== "object" || Array.isArray(event)) continue;
+    const type = event.event_type;
+    if (typeof type !== "string") {
+      if (type != null) {
+        return {hidden: false, known: false, count: null, label: "VERIFICATION PASSED " + VERIFICATION_PASSED_UNAVAILABLE};
+      }
+      continue;
+    }
+    if (type === VERIFICATION_PASSED_EVENT) count += 1;
+  }
+  return {hidden: false, known: true, count, label: "VERIFICATION PASSED " + count};
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
