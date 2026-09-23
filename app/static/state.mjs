@@ -128,6 +128,46 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+export const CONNECTION_STATE_UNAVAILABLE = "unavailable";
+const CONNECTION_STATE_LABELS = new Set([
+  "Connecting",
+  "Preview",
+  "Replay",
+  "Live connection",
+  "Connection interrupted",
+  "Reconnecting…",
+  "All execution stopped",
+  "Ready to think",
+  "API key needed",
+  "Server unavailable",
+]);
+function hiddenConnectionState() {
+  return {known: false, hidden: true, label: ""};
+}
+function shownConnectionState(label, known) {
+  return {known, hidden: false, label};
+}
+function connectionLabelView(text) {
+  if (typeof text !== "string") return shownConnectionState(CONNECTION_STATE_UNAVAILABLE, false);
+  const label = text.trim();
+  if (!label) return shownConnectionState(CONNECTION_STATE_UNAVAILABLE, false);
+  if (CONNECTION_STATE_LABELS.has(label)) return shownConnectionState(label, true);
+  const mission = label.startsWith("Mission ") ? label.slice("Mission ".length) : "";
+  if (mission && terminal.has(mission)) return shownConnectionState(label, true);
+  return shownConnectionState(CONNECTION_STATE_UNAVAILABLE, false);
+}
+export function connectionStateChipView(source) {
+  if (source == null || source === false) return hiddenConnectionState();
+  if (typeof source === "object") {
+    if (source.present === false) return hiddenConnectionState();
+    if (source.preview === true && source.connectionHidden === true) return hiddenConnectionState();
+    const hasLabel = Object.prototype.hasOwnProperty.call(source, "label")
+      || Object.prototype.hasOwnProperty.call(source, "text");
+    if (!hasLabel && source.present !== true) return hiddenConnectionState();
+    return connectionLabelView(source.label ?? source.text);
+  }
+  return connectionLabelView(source);
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
