@@ -15,6 +15,7 @@ from .runtime import PolicyError, SwarmRuntime
 from .store import Store
 from .health import (
     anthropic_status, azure_status, bedrock_status, browser_health_status, cerebras_status,
+    exa_health_status,
     cohere_status, deepseek_status, fireworks_status, gemini_status, groq_status,
     huggingface_status, llamacpp_health_status, mistral_status, ollama_health_status,
     openai_status, openrouter_status, perplexity_status, sambanova_status,
@@ -81,6 +82,7 @@ async def health():
             "ollama": await ollama_health_status(), "vllm": await vllm_health_status(),
             "llamacpp": await llamacpp_health_status(),
             "tools": tools_status(runtime.tools),
+            "exa": await exa_health_status(),
             "browser": await browser_health_status(),
             "selfmod": await selfmod_health_status(),
             "workspace": await workspace_health_status(),

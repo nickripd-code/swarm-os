@@ -20,7 +20,7 @@ DANGEROUS_TOOLS = frozenset({
     "shell", "bash", "sh", "exec", "code_exec", "code_execution",
     "filesystem", "write_file", "read_file", "fs.write",
     "browser", "playwright", "computer_use",
-    "network", "http", "fetch", "web.search",
+    "network", "http", "fetch", "web.search", "search.web",
     "payment", "wallet", "stripe", "live_payment",
     "credential", "secrets",
     "self_modify", "deploy", "ssh",
@@ -28,16 +28,18 @@ DANGEROUS_TOOLS = frozenset({
 DANGEROUS_PREFIXES = (
     "shell.", "bash.", "fs.", "file.", "browser.", "http.", "net.",
     "pay.", "wallet.", "secret.", "deploy.", "ssh.", "selfmod.", "self_modify.",
-    "composio.",
+    "composio.", "exa.",
 )
 CLOUD_EXFIL_TOOLS = frozenset({
     "browser", "playwright", "computer_use", "network", "http", "fetch",
-    "web.search", "payment", "wallet", "stripe", "live_payment",
+    "web.search", "search.web", "payment", "wallet", "stripe", "live_payment",
 })
 # Operator-opted Playwright tools. Still denied unless SWARM_BROWSER is set.
 OPTED_IN_BROWSER_TOOLS = frozenset({
     "browser.navigate", "browser.snapshot", "browser.click",
 })
+# Operator-opted Exa tools. Still denied unless EXA_API_KEY or SWARM_EXA is set.
+OPTED_IN_EXA_TOOLS = frozenset({"exa.search", "search.web", "exa.contents"})
 # Operator-opted self-mod tools. Propose/diff need SWARM_SELFMOD; apply also needs WRITE.
 OPTED_IN_SELFMOD_DIFF_TOOLS = frozenset({"selfmod.propose", "selfmod.diff"})
 OPTED_IN_SELFMOD_WRITE_TOOLS = frozenset({"selfmod.apply"})
@@ -126,7 +128,7 @@ def tool_exfiltrates(name: str) -> bool:
     if lowered in CLOUD_EXFIL_TOOLS:
         return True
     return any(lowered.startswith(prefix) for prefix in (
-        "browser.", "http.", "net.", "pay.", "wallet.", "composio.",
+        "browser.", "http.", "net.", "pay.", "wallet.", "composio.", "exa.",
     ))
 
 
@@ -157,6 +159,16 @@ def tool_is_opted_in_selfmod(name: str) -> bool:
 
 def tool_is_opted_in_composio(name: str) -> bool:
     return name.strip().lower().startswith("composio.") and bool(os.getenv("COMPOSIO_API_KEY", "").strip())
+
+
+def exa_capability_enabled() -> bool:
+    if os.getenv("SWARM_EXA", "").strip().lower() in TRUE_ENV:
+        return True
+    return bool(os.getenv("EXA_API_KEY", "").strip())
+
+
+def tool_is_opted_in_exa(name: str) -> bool:
+    return name.strip().lower() in OPTED_IN_EXA_TOOLS and exa_capability_enabled()
 
 
 class PolicyGate:
@@ -250,6 +262,7 @@ class PolicyGate:
             and not tool_is_opted_in_browser(name)
             and not tool_is_opted_in_selfmod(name)
             and not tool_is_opted_in_composio(name)
+            and not tool_is_opted_in_exa(name)
         ):
             raise PolicyError(f"Tool '{name}' is denied by default", FailureClass.POLICY_REFUSAL)
 
