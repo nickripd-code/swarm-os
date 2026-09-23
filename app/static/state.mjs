@@ -1,5 +1,6 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const WORKSPACE_UNAVAILABLE = "unavailable";
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -215,6 +216,50 @@ export function applyEvent(state, e) {
   if (state.events.length > 120) state.events.length = 120;
   return true;
 }
+function workspaceToken(value) {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  return text ? text : null;
+}
+
+function workspaceRecord(mission, healthWorkspace) {
+  const missionWorkspace = mission && mission.workspace;
+  if (missionWorkspace && typeof missionWorkspace === "object" && !Array.isArray(missionWorkspace)) {
+    return missionWorkspace;
+  }
+  if (healthWorkspace && typeof healthWorkspace === "object" && !Array.isArray(healthWorkspace)) {
+    return healthWorkspace;
+  }
+  return null;
+}
+
+export function workspaceChipView(mission, healthWorkspace, options = {}) {
+  const hidden = {
+    visible: false,
+    present: false,
+    kind: null,
+    path: null,
+    status: WORKSPACE_UNAVAILABLE,
+    label: "UNAVAILABLE",
+  };
+  if (!mission || options.preview === true) return hidden;
+  const source = workspaceRecord(mission, healthWorkspace);
+  if (!source) return {...hidden, visible: true};
+  const provider = workspaceToken(source.provider);
+  const kindName = provider ? provider.toLowerCase() : null;
+  const kind = kindName === "local" || kindName === "remote" ? kindName : null;
+  const statusToken = workspaceToken(source.status);
+  const knownStatus = statusToken === "healthy" || statusToken === "unavailable" || statusToken === "unconfigured"
+    ? statusToken
+    : null;
+  const status = knownStatus || WORKSPACE_UNAVAILABLE;
+  const root = workspaceToken(source.root);
+  const path = root && (knownStatus === "healthy" || knownStatus === "unavailable") ? root : null;
+  const present = path !== null;
+  const label = present && kind ? kind.toUpperCase() : "UNAVAILABLE";
+  return {visible: true, present, kind, path, status, label};
+}
+
 export function missionMode(state) {
   if (state.preview) return "preview";
   return state.mission?.mode || state.mission?.result?.mode || (state.mission ? "pending" : "standby");

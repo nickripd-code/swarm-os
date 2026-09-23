@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,workspaceChipView} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -78,9 +78,30 @@ function renderHud(){
     $("replayChip").textContent=state.preview?"PREVIEW":(replayLive?"LIVE":"REPLAY");
     $("replayChip").className="hud-chip mode "+(state.preview?"preview":replayLive?"replay-live":"replay");
   }
+  renderWorkspaceChip();
   const running=!!mission&&!terminal.has(status)&&replayLive&&!state.preview;
   if(running&&!hudTick)hudTick=setInterval(renderHud,1000);
   if(!running&&hudTick){clearInterval(hudTick);hudTick=null;}
+}
+function renderWorkspaceChip(){
+  const el=$("workspaceChip");
+  if(!el)return;
+  const view=workspaceChipView(state.mission, health?health.workspace:null, {preview:!!state.preview});
+  el.hidden=!view.visible;
+  el.dataset.present=view.present?"true":"false";
+  el.dataset.status=view.status;
+  if(view.kind)el.dataset.kind=view.kind;else el.removeAttribute("data-kind");
+  const tone=view.present&&view.kind&&view.status==="healthy"?view.kind:"unavailable";
+  el.className="hud-chip workspace "+tone;
+  const labelEl=$("workspaceChipLabel");
+  const pathEl=$("workspaceChipPath");
+  if(labelEl)labelEl.textContent=view.label;
+  if(pathEl)pathEl.textContent=view.path||"";
+  el.title=view.path||"";
+  let aria="Workspace unavailable";
+  if(view.present&&view.kind)aria="Workspace "+view.kind+", root present";
+  else if(view.present)aria="Workspace root present";
+  el.setAttribute("aria-label", aria);
 }
 function clearAlerts(){if($("alerts"))$("alerts").replaceChildren();}
 function pushAlert(alert){
