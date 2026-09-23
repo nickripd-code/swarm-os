@@ -1,5 +1,6 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const VERIFICATION_UNAVAILABLE = "UNAVAILABLE";
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -77,7 +78,40 @@ export function resolveCommand(parsed, context = {}) {
 }
 export function newState(mission = null) {
   return {mission, agents: new Map(), tasks: new Map(), seen: new Set(), events: [],
-    usage: {input: 0, output: 0, reasoning: 0, cost: null, budget: null, known: false}, decisions: 0, preview: false};
+    usage: {input: 0, output: 0, reasoning: 0, cost: null, budget: null, known: false},
+    verification: null, decisions: 0, preview: false};
+}
+const VERIFICATION_LABELS = {
+  pass: "PASS",
+  fail: "FAIL",
+  pending: "PENDING",
+  inconclusive: "INCONCLUSIVE",
+  unavailable: VERIFICATION_UNAVAILABLE,
+};
+function recordedVerification(event) {
+  const type = event?.event_type;
+  if (type === "verification.started") return {known: true, status: "pending"};
+  if (type !== "verification.passed" && type !== "verification.failed") return null;
+  const payload = event?.payload;
+  const verdict = payload && typeof payload === "object" && !Array.isArray(payload)
+    ? payload.verdict
+    : undefined;
+  if (type === "verification.passed" && verdict === "pass") return {known: true, status: "pass"};
+  if (type === "verification.failed" && (verdict === "fail" || verdict === "inconclusive")) {
+    return {known: true, status: verdict};
+  }
+  return {known: false, status: "unavailable"};
+}
+export function verificationStatusChip(state = {}) {
+  const hidden = {visible: false, known: false, status: null, label: ""};
+  if (!state || state.preview === true || !state.mission) return hidden;
+  const recorded = state.verification;
+  if (!recorded) return hidden;
+  const label = VERIFICATION_LABELS[recorded.status];
+  if (!label || recorded.known !== true) {
+    return {visible: true, known: false, status: "unavailable", label: VERIFICATION_UNAVAILABLE};
+  }
+  return {visible: true, known: true, status: recorded.status, label};
 }
 function finiteNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -176,6 +210,8 @@ export function applyEvent(state, e) {
       state.usage.known = true;
     }
   }
+  const verification = recordedVerification(e);
+  if (verification) state.verification = verification;
   if (e.event_type === "controller.decision") state.decisions++;
   if (e.event_type === "mission.started" && state.mission) {
     state.mission.status = "running"; state.mission.mode = p.mode;
