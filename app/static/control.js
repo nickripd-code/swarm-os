@@ -275,7 +275,10 @@ function renderToolStrip(){
   const view=toolCallStrip(state);
   strip.hidden=view.hidden;
   strip.dataset.empty=view.empty?"true":"false";
-  if($("toolStripNote"))$("toolStripNote").textContent=view.note;
+  if($("toolStripNote")){
+    $("toolStripNote").hidden=view.empty;
+    $("toolStripNote").textContent=view.empty?"":view.note;
+  }
   if($("toolStripEmpty")){
     $("toolStripEmpty").hidden=!view.empty||view.hidden;
     $("toolStripEmpty").textContent=view.note;
