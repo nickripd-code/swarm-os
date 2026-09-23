@@ -74,6 +74,20 @@ def test_answer_requires_open_question_and_text(cases):
     assert cases["resolveAnswerPreview"]["ok"] is False
 
 
+def test_inject_maps_to_live_mission_and_requires_text(cases):
+    assert cases["injectEmpty"]["ok"] is False
+    assert "text" in cases["injectEmpty"]["error"].lower()
+    assert cases["injectText"]["action"] == "inject"
+    assert cases["injectText"]["text"] == "the customer is Ada"
+    resolved = cases["resolveInject"]
+    assert resolved["ok"] is True
+    assert resolved["method"] == "POST"
+    assert resolved["path"] == f"/api/missions/{MISSION}/inject"
+    assert resolved["body"] == {"text": "the customer is Ada"}
+    assert cases["resolveInjectPreview"]["ok"] is False
+    assert cases["resolveInjectNoMission"]["ok"] is False
+
+
 def test_kill_is_fail_closed_unless_route_present(cases):
     assert cases["killExtra"]["ok"] is False
     assert cases["killPresent"] is True
@@ -131,6 +145,7 @@ def test_static_command_bar_is_served_and_maps_live_routes(tmp_path, monkeypatch
         assert "post" in paths["/api/stop-all"]
         assert "post" in paths["/api/missions/{mission_id}/stop"]
         assert "post" in paths["/api/missions/{mission_id}/answers/{question_id}"]
+        assert "post" in paths["/api/missions/{mission_id}/inject"]
         kill_path = "/api/missions/{mission_id}/agents/{agent_id}/kill"
         assert "post" in paths[kill_path]
         stopped = client.post("/api/stop-all")

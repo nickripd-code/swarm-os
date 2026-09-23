@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .models import AnswerRequest, Mission, MissionCreate, PaymentIntent
+from .models import AnswerRequest, InjectRequest, Mission, MissionCreate, PaymentIntent
 from .runtime import PolicyError, SwarmRuntime
 from .store import Store
 from .health import (
@@ -205,6 +205,19 @@ async def answer_question(mission_id: UUID, question_id: str, request: AnswerReq
         record = await runtime.submit_answer(mission_id, question_id, request.answer)
     except PolicyError as exc:
         raise HTTPException(409, str(exc)) from exc
+    return {"accepted": True, **record}
+
+
+@app.post("/api/missions/{mission_id}/inject")
+async def inject_info(mission_id: UUID, request: InjectRequest | None = None):
+    if not store.get_mission(mission_id):
+        raise HTTPException(404, "Mission not found")
+    payload = request or InjectRequest()
+    try:
+        record = await runtime.submit_inject(mission_id, payload.text, payload.data)
+    except PolicyError as exc:
+        code = 404 if "not found" in str(exc).lower() else 409
+        raise HTTPException(code, str(exc)) from exc
     return {"accepted": True, **record}
 
 

@@ -33,6 +33,10 @@ export function parseCommand(raw) {
     if (!rest) return {ok: false, error: "answer requires text"};
     return {ok: true, action: "answer", text: rest};
   }
+  if (verb === "inject") {
+    if (!rest) return {ok: false, error: "inject requires text"};
+    return {ok: true, action: "inject", text: rest};
+  }
   return {ok: false, error: "Unknown command: " + tokens[0]};
 }
 export function resolveCommand(parsed, context = {}) {
@@ -71,6 +75,16 @@ export function resolveCommand(parsed, context = {}) {
       method: "POST",
       path: "/api/missions/" + missionId + "/answers/" + encodeURIComponent(questionId),
       body: {answer: parsed.text},
+    };
+  }
+  if (parsed.action === "inject") {
+    if (!missionId) return {ok: false, error: "No live mission to inject"};
+    return {
+      ok: true,
+      action: "inject",
+      method: "POST",
+      path: "/api/missions/" + missionId + "/inject",
+      body: {text: parsed.text},
     };
   }
   return {ok: false, error: "Unknown command"};

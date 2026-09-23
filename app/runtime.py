@@ -629,13 +629,21 @@ class SwarmRuntime:
 
     async def _persist_status(self, mission: Mission, status: MissionStatus):
         mission.status, mission.updated_at = status, utcnow()
-        self.store.save_mission(mission)
+        self._save_mission(mission)
+
+    def _save_mission(self, mission: Mission) -> None:
+        """Persist the live mission without dropping an inject accepted during this step."""
+        try:
+            self.store.save_mission_with_injects(mission)
+        except AnswerStateError as exc:
+            raise PolicyError(str(exc), FailureClass.INVALID_OUTPUT) from exc
 
     def _sync_answers(self, mission: Mission, saved: Mission | None) -> None:
         if saved is None:
             return
         mission.pending_question = saved.pending_question
         mission.answers = list(saved.answers)
+        mission.injects = list(saved.injects)
 
     def _answer_recorded(self, mission: Mission | None, question_id: str) -> bool:
         if mission is None:
@@ -663,6 +671,29 @@ class SwarmRuntime:
         for record in list(mission.answers):
             if record.consumed_at is None:
                 await self._mark_answer_consumed(mission, record.question_id, root, source=source)
+
+    async def _mark_inject_consumed(self, mission: Mission, inject_id: str, actor: AgentSpec,
+                                    *, source: str) -> None:
+        """Mark one accepted inject as available to the continuing controller or worker exactly once."""
+        try:
+            saved, record, changed = self.store.mark_inject_consumed(mission.id, inject_id)
+        except AnswerStateError as exc:
+            raise PolicyError(str(exc), FailureClass.AUTHORIZATION_REQUIRED) from exc
+        self._sync_answers(mission, saved)
+        if changed:
+            await self.emit(mission.id, EventType.USER_INJECT_CONSUMED, {
+                "inject_id": record.inject_id,
+                "created_at": record.created_at.isoformat(),
+                "consumed_at": record.consumed_at.isoformat() if record.consumed_at else None,
+                "source": source,
+            }, actor.id)
+
+    async def _consume_injects_for_step(self, mission: Mission, actor: AgentSpec, *, source: str) -> None:
+        """Load injects accepted since the last step and consume each one before the model sees state."""
+        self._sync_answers(mission, self.store.get_mission(mission.id))
+        pending = [item.inject_id for item in mission.injects if item.consumed_at is None]
+        for inject_id in pending:
+            await self._mark_inject_consumed(mission, inject_id, actor, source=source)
 
     async def _await_answer(self, mission: Mission, question_id: str) -> None:
         """Wait on the local signal and poll persistence for cross-worker answers."""
@@ -805,6 +836,45 @@ class SwarmRuntime:
             resume = "paused"
         return {**payload, "resume": resume}
 
+    async def submit_inject(self, mission_id: UUID, text: str | None = None,
+                            data: Any = None) -> dict[str, Any]:
+        """Accept operator context for the next decide or worker step. Not an answer or approval."""
+        body, payload = self._normalize_inject(text, data)
+        try:
+            _mission, record = self.store.accept_inject(mission_id, body, payload)
+        except AnswerStateError as exc:
+            failure_class = (
+                FailureClass.INVALID_OUTPUT
+                if exc.code in {"not_found", "conflict", "status", "terminal"}
+                else FailureClass.AUTHORIZATION_REQUIRED
+            )
+            raise PolicyError(str(exc), failure_class) from exc
+        dumped = record.model_dump(mode="json")
+        await self.emit(mission_id, EventType.USER_INJECTED, dumped)
+        return dumped
+
+    def _normalize_inject(self, text: str | None, data: Any) -> tuple[str, dict[str, Any] | None]:
+        body = (text or "").strip()
+        if len(body) > 4000:
+            raise PolicyError("Inject text is too long", FailureClass.INVALID_OUTPUT)
+        cleaned: dict[str, Any] | None
+        if data is None:
+            cleaned = None
+        elif not isinstance(data, dict):
+            raise PolicyError("Inject data must be an object", FailureClass.INVALID_OUTPUT)
+        else:
+            try:
+                encoded = json.dumps(data)
+            except (TypeError, ValueError) as exc:
+                raise PolicyError("Inject data must be JSON", FailureClass.INVALID_OUTPUT) from exc
+            if len(encoded.encode("utf-8")) > 8192:
+                raise PolicyError("Inject data exceeds the size limit", FailureClass.INVALID_OUTPUT)
+            public = public_tool_data(data)
+            cleaned = public or None
+        if not body and not cleaned:
+            raise PolicyError("Inject must include text or structured data", FailureClass.INVALID_OUTPUT)
+        return body, cleaned
+
     async def _assign_unassigned_tasks(self, mission: Mission) -> list[Task]:
         assigned = {task.agent_id for task in self.tasks[mission.id]
                     if task.status not in {TaskStatus.STOPPED, TaskStatus.FAILED}}
@@ -900,7 +970,7 @@ class SwarmRuntime:
         }
         payload = self.resources.snapshot(mission, outcome.estimate, **extra)
         mission.updated_at = utcnow()
-        self.store.save_mission(mission)
+        self._save_mission(mission)
         await self.emit(mission.id, EventType.BUDGET_UPDATED, payload, actor.id)
         if outcome.warning_crossed:
             await self.emit(mission.id, EventType.BUDGET_WARNING, {
@@ -950,7 +1020,7 @@ class SwarmRuntime:
             )
             mission.status, mission.updated_at = MissionStatus.RUNNING, utcnow()
             self.started_at[mission.id] = execution_anchor
-            self.store.save_mission(mission)
+            self._save_mission(mission)
             remaining = self.remaining_runtime(mission)
             if remaining <= 0:
                 raise TimeoutError("Mission runtime limit reached before recovery")
@@ -999,6 +1069,7 @@ class SwarmRuntime:
                 if mission.pending_question is not None:
                     await self._park_for_human_answer(mission, root, mission.pending_question, asked_now=False)
                 for _ in range(mission.limits.max_agents * 2 + 2):
+                    await self._consume_injects_for_step(mission, root, source="controller_decide")
                     decision = await self.model_call(mission, root, "decision", lambda: self.controller.decide(self._state(mission)))
                     await self.emit(mission.id, EventType.CONTROLLER_DECISION, decision, root.id)
                     action = decision.get("action")
@@ -1116,7 +1187,7 @@ class SwarmRuntime:
                 if suspended:
                     if mission.pending_question is not None:
                         mission.status = MissionStatus.WAITING
-                    self.store.save_mission(mission)
+                    self._save_mission(mission)
                     await self.emit(mission.id, EventType.MISSION_SUSPENDED, {
                         "reason": "Runtime is shutting down; unfinished work remains recoverable",
                         "mode": self.controller.mode,
@@ -1135,7 +1206,7 @@ class SwarmRuntime:
                             status = AgentStatus.STOPPED if mission.status == MissionStatus.STOPPED else AgentStatus.FAILED
                             await self.agent_status(agent, status)
                     mission.updated_at = utcnow()
-                    self.store.save_mission(mission)
+                    self._save_mission(mission)
                     await self.emit(mission.id, event_type_for_mission(mission.status), mission.result or {})
             finally:
                 await self.release_work(mission, "mission", str(mission.id))
@@ -1226,6 +1297,7 @@ class SwarmRuntime:
                 "pending_question": (mission.pending_question.model_dump(mode="json")
                                      if mission.pending_question else None),
                 "answers": [item.model_dump(mode="json") for item in mission.answers],
+                "injects": [item.model_dump(mode="json") for item in mission.injects],
                 "privacy": mission.privacy,
                 "memory": self._memory_for_context(mission.id, agent_id)}
 
@@ -1251,6 +1323,7 @@ class SwarmRuntime:
         max_rounds = max(mission.limits.max_tool_calls + 1, 1)
         for _ in range(max_rounds):
             self.check_agent(mission.id, agent.id)
+            await self._consume_injects_for_step(mission, agent, source="worker_step")
             result = await self.model_call(
                 mission, agent, "work",
                 lambda: self.controller.work(self._state(mission, agent.id), agent.model_dump(mode="json")),
@@ -1501,7 +1574,7 @@ class SwarmRuntime:
         mission.result = None
         mission.paused_at = mission.paused_at or utcnow()
         mission.updated_at = mission.paused_at
-        self.store.save_mission(mission)
+        self._save_mission(mission)
         await self.emit(mission.id, EventType.MISSION_PAUSED, {
             "reason": "Execution paused by user",
             "pending_question_id": (mission.pending_question.question_id
@@ -1564,7 +1637,7 @@ class SwarmRuntime:
         mission = self.store.get_mission(mission_id)
         if mission and mission.status not in TERMINAL:
             mission.status, mission.updated_at = MissionStatus.STOPPED, utcnow()
-            self.store.save_mission(mission)
+            self._save_mission(mission)
             await self.emit(mission_id, EventType.MISSION_STOPPED, {"reason": "Execution stopped"})
         return mission
 
@@ -1612,7 +1685,7 @@ class SwarmRuntime:
         intent = await self.wallet.pay(intent, mission)
         mission.spent += amount
         mission.updated_at = utcnow()
-        self.store.save_mission(mission)
+        self._save_mission(mission)
         self.idempotency.record(str(mission.id), key, "payment", {"intent": intent.model_dump(mode="json")})
         await self.emit(mission.id, EventType.PAYMENT_CREATED, intent.model_dump(mode="json"))
         return intent
