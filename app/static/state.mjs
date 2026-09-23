@@ -228,6 +228,144 @@ export function resultMetaText(mission) {
   if (result.failure_class) bits.push(result.failure_class);
   return bits.join(" · ");
 }
+export const FAIL_AGE_UNAVAILABLE = "FAIL AGE unavailable";
+const FAIL_AGE_SKEW_MS = 120000;
+const FAIL_AGE_HIDDEN = Object.freeze({
+  hidden: true, label: "", known: false, at: null, title: "",
+});
+const FAIL_STAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})$/;
+/** Catalog mission failure is exactly mission.failed. Stop, complete, and block do not count. */
+const MISSION_FAIL_EVENT = "mission.failed";
+const CLEARS_FAIL = new Set([
+  "mission.started",
+  "mission.running",
+  "mission.waiting",
+  "mission.paused",
+  "mission.resumed",
+  "mission.question",
+  "mission.completed",
+  "mission.stopped",
+  "mission.blocked",
+]);
+
+/** UTC clock from a recorded event stamp. Epoch and naive times are rejected. */
+function parseFailStamp(raw) {
+  if (typeof raw !== "string" || raw === "" || raw !== raw.trim()) return null;
+  const match = FAIL_STAMP.exec(raw);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const fraction = match[7] ? Number(match[7].padEnd(3, "0").slice(0, 3)) : 0;
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return null;
+  let offsetMinutes = 0;
+  if (match[8] !== "Z") {
+    const sign = match[8][0] === "-" ? -1 : 1;
+    const offsetHour = Number(match[8].slice(1, 3));
+    const offsetMinute = Number(match[8].slice(4, 6));
+    if (offsetHour > 23 || offsetMinute > 59) return null;
+    offsetMinutes = sign * (offsetHour * 60 + offsetMinute);
+  }
+  const utc = Date.UTC(year, month - 1, day, hour, minute, second, fraction) - offsetMinutes * 60000;
+  if (!Number.isFinite(utc) || utc <= 0) return null;
+  const wall = new Date(utc + offsetMinutes * 60000);
+  if (
+    wall.getUTCFullYear() !== year ||
+    wall.getUTCMonth() !== month - 1 ||
+    wall.getUTCDate() !== day ||
+    wall.getUTCHours() !== hour ||
+    wall.getUTCMinutes() !== minute ||
+    wall.getUTCSeconds() !== second
+  ) return null;
+  return {stamp: raw, at: utc};
+}
+
+function unavailableFailAge() {
+  return {
+    hidden: false,
+    label: FAIL_AGE_UNAVAILABLE,
+    known: false,
+    at: null,
+    title: "",
+  };
+}
+
+function relativeFailAge(ageMs) {
+  const seconds = Math.floor(ageMs / 1000);
+  if (seconds < 60) return seconds + "s ago";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + "m ago";
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + "h ago";
+  return Math.floor(hours / 24) + "d ago";
+}
+
+function knownFailAge(parsed, now) {
+  const clock = typeof now === "number" && Number.isFinite(now) && now > 0 ? now : null;
+  const label = clock === null
+    ? "Failed " + parsed.stamp
+    : "Failed " + relativeFailAge(Math.max(0, clock - parsed.at));
+  return {
+    hidden: false,
+    label,
+    known: true,
+    at: parsed.stamp,
+    title: parsed.stamp,
+  };
+}
+
+/**
+ * Newest mission.failed stamp that still holds on this feed.
+ * Same failure definition as last-mission-fail-at: only event_type mission.failed counts.
+ * The log-order last failure event in the open period must itself parse.
+ * Stop, complete, and block do not supply the stamp.
+ */
+function openFailStamp(events) {
+  const chronological = [];
+  for (let i = events.length - 1; i >= 0; i--) chronological.push(events[i]);
+  let start = 0;
+  for (let i = 0; i < chronological.length; i++) {
+    const event = chronological[i];
+    if (event && CLEARS_FAIL.has(event.event_type)) start = i + 1;
+  }
+  let lastParsed = null;
+  let sawFail = false;
+  let best = null;
+  for (let i = start; i < chronological.length; i++) {
+    const event = chronological[i];
+    if (!event || typeof event !== "object" || event.event_type !== MISSION_FAIL_EVENT) continue;
+    sawFail = true;
+    const parsed = parseFailStamp(event.created_at);
+    lastParsed = parsed;
+    if (parsed && (!best || parsed.at >= best.at)) best = parsed;
+  }
+  if (!sawFail || !lastParsed || !best) return null;
+  return best;
+}
+
+/**
+ * Age of the shell's current failed state.
+ * Hidden with no mission, in preview, and whenever status is not failed.
+ * The clock is the current period's mission.failed created_at.
+ * A missing feed or unreadable stamp is FAIL AGE unavailable.
+ */
+export function failAgeChip(state, options = {}) {
+  if (!state || state.preview === true || options.preview === true || !state.mission) {
+    return FAIL_AGE_HIDDEN;
+  }
+  if (state.mission.status !== "failed") return FAIL_AGE_HIDDEN;
+  const events = state.events;
+  if (!Array.isArray(events)) return unavailableFailAge();
+  const parsed = openFailStamp(events);
+  if (!parsed) return unavailableFailAge();
+  const now = options.now;
+  const clock = typeof now === "number" && Number.isFinite(now) && now > 0 ? now : null;
+  if (clock !== null && parsed.at - clock > FAIL_AGE_SKEW_MS) return unavailableFailAge();
+  return knownFailAge(parsed, now);
+}
 export function alertFromEvent(e) {
   const p = e.payload || {};
   switch (e.event_type) {
