@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,failureClassChip,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -49,6 +49,14 @@ function renderHud(){
   if($("missionStatus")){
     $("missionStatus").textContent=status.toUpperCase();
     $("missionStatus").className="hud-chip status "+status;
+  }
+  if($("failureClassChip")){
+    const failure=failureClassChip(state);
+    const chip=$("failureClassChip");
+    chip.hidden=failure.hidden;
+    chip.textContent=failure.hidden?"":failure.label;
+    chip.className="hud-chip failure "+(failure.known?"known":"unavailable");
+    chip.title=failure.hidden?"":(failure.known?"Recorded failure class":"Failure class unavailable");
   }
   if($("hudAgents"))$("hudAgents").textContent=state.agents.size;
   if($("hudTasks"))$("hudTasks").textContent=[...state.tasks.values()].filter(t=>t.status==="completed").length;
