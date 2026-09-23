@@ -123,3 +123,14 @@ Mission, agent, task, event, worker-lease, and idempotency state is durable in S
 - Implement an isolated EVM wallet service behind `PaymentProvider` / `WalletAdapter` with recipient/asset/amount policy checks. Do not enable live spend from the agent process.
 
 See [ImplementationStatus.md](ImplementationStatus.md) for the recommended next slice.
+
+## Local data export
+
+Snapshot the local SQLite file without printing secrets or replacing the live database:
+
+```powershell
+py scripts/export_swarm_data.py --dry-run
+py scripts/export_swarm_data.py --dest .\backups\swarm-snapshot.db
+```
+
+`SWARM_DATABASE_PATH` selects the source (default `swarm.db` in the repo root, the same file the server opens). A missing file, a zero-byte file, or anything that is not SQLite is refused and nothing is written. A valid database with no rows is copied and the manifest says `empty: true`. An existing destination is refused, including the live database and its `-wal` / `-shm` / `-journal` sidecars. `.env` is not copied. `SWARM_WORKSPACE_ROOT` (default `{tempdir}/swarm-workspaces`) is recorded in `<dest>.manifest.json` and the workspace files are not copied. Stdout is a JSON manifest; environment secret values and database rows are not printed. The snapshot is local data — do not commit it.

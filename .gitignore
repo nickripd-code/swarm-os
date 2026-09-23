@@ -8,4 +8,6 @@ swarm.db
 .env.*
 !.env.example
 swarm.db-*
+swarm-export-*.db
+swarm-export-*.db.manifest.json
 .worktrees/
