@@ -1,5 +1,14 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const TOOL_STRIP_EMPTY = "No recorded tool calls.";
+export const TOOL_STRIP_PREVIEW = "Preview runs no tools.";
+export const TOOL_STRIP_NOTE = "Recorded tool events only";
+const TOOL_STATUS = {
+  "tool.started": "started",
+  "tool.completed": "completed",
+  "tool.failed": "failed",
+};
+const TOOL_NAME = /^[A-Za-z0-9_.:-]{1,80}$/;
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -96,6 +105,44 @@ export function formatUsd(value) {
 }
 export function tokenTotal(usage) {
   return (usage?.input || 0) + (usage?.output || 0) + (usage?.reasoning || 0);
+}
+function agentRole(state, actorId) {
+  if (actorId == null || actorId === "") return "unattributed";
+  const agent = state?.agents?.get?.(actorId);
+  const role = typeof agent?.role === "string" ? agent.role.trim() : "";
+  if (!role || role.length > 80 || /[\r\n<>]/.test(role)) return "unattributed";
+  return role;
+}
+export function toolCallStrip(state, limit = 8) {
+  const cap = typeof limit === "number" && Number.isFinite(limit) && limit > 0
+    ? Math.min(8, Math.trunc(limit))
+    : 8;
+  const hidden = {empty: true, hidden: true, note: TOOL_STRIP_EMPTY, calls: []};
+  if (!state || !state.mission) return hidden;
+  if (state.preview) {
+    return {empty: true, hidden: false, note: TOOL_STRIP_PREVIEW, calls: []};
+  }
+  const events = Array.isArray(state.events) ? state.events : [];
+  const calls = [];
+  for (const event of events) {
+    const status = TOOL_STATUS[event?.event_type];
+    if (!status) continue;
+    const tool = typeof event.payload?.tool === "string" ? event.payload.tool.trim() : "";
+    if (!TOOL_NAME.test(tool)) continue;
+    calls.push({
+      id: event.id,
+      tool,
+      status,
+      agent: agentRole(state, event.actor_id),
+    });
+    if (calls.length >= cap) break;
+  }
+  return {
+    empty: calls.length === 0,
+    hidden: false,
+    note: calls.length ? TOOL_STRIP_NOTE : TOOL_STRIP_EMPTY,
+    calls,
+  };
 }
 export function costHudView(usage = {}) {
   const input = usage.input || 0;

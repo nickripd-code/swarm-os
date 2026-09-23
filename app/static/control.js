@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,toolCallStrip} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -190,6 +190,7 @@ function render(){
   if(!selected&&state.agents.size)selected=state.agents.keys().next().value;
   renderInspector();
   renderActivity();
+  renderToolStrip();
   renderQuestion();
   renderReplayHud();
   $("resultPanel").hidden=!mission?.result||state.preview||!replayLive;
@@ -250,6 +251,14 @@ function describe(e){
     case "verification.started":return "<b>Verifier</b> is checking the claimed result";
     case "verification.passed":return "<b>Verifier</b> accepted the claimed result";
     case "verification.failed":return "<b>Verifier</b> rejected the claim"+(p.failure_class?" · "+esc(p.failure_class):"")+(p.rationale?" · "+esc(p.rationale):"");
+    case "tool.started":
+    case "tool.completed":
+    case "tool.failed":{
+      const tool=typeof p.tool==="string"?p.tool.trim():"";
+      if(!/^[A-Za-z0-9_.:-]{1,80}$/.test(tool))return "";
+      const who=state.agents.get(e.actor_id)?.role;
+      return "<b>"+esc(tool)+"</b> "+esc(e.event_type.split(".")[1])+" · "+esc(label(who||"unattributed"));
+    }
     case "task.completed":return "<b>"+esc(name)+"</b> delivered a result";
     case "task.blocked":return "<b>"+esc(name)+"</b> needs a missing capability";
     case "mission.started":return "The mission is underway";
@@ -259,6 +268,26 @@ function describe(e){
     case "mission.blocked":return "<b>Mission blocked</b> · "+esc(p.reason||"");
     default:return "";
   }
+}
+function renderToolStrip(){
+  const strip=$("toolStrip");
+  if(!strip)return;
+  const view=toolCallStrip(state);
+  strip.hidden=view.hidden;
+  strip.dataset.empty=view.empty?"true":"false";
+  if($("toolStripNote")){
+    $("toolStripNote").hidden=view.empty;
+    $("toolStripNote").textContent=view.empty?"":view.note;
+  }
+  if($("toolStripEmpty")){
+    $("toolStripEmpty").hidden=!view.empty||view.hidden;
+    $("toolStripEmpty").textContent=view.note;
+  }
+  const list=$("toolCalls");
+  if(!list)return;
+  list.hidden=view.empty;
+  const html=view.calls.map(call=>'<li data-status="'+esc(call.status)+'"><b>'+esc(call.tool)+'</b><span>'+esc(call.status)+'</span><span>'+esc(label(call.agent))+'</span></li>').join("");
+  if(list.innerHTML!==html)list.innerHTML=html;
 }
 function renderActivity(){
   const html=state.events.filter(e=>describe(e)).slice(0,30).map(e=>'<li>'+describe(e)+'<time>'+
@@ -315,6 +344,7 @@ function reset(mission){
   if($("answerText"))$("answerText").value="";
   showNotice("");setCommandStatus("");zoom=1;$("zoomValue").textContent="100%";clearAlerts();
   if(hudTick){clearInterval(hudTick);hudTick=null;}
+  renderToolStrip();
 }
 function stopReplayPlay(){
   if(replayTimer){clearInterval(replayTimer);replayTimer=null;}
