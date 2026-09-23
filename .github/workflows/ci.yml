@@ -53,6 +53,24 @@ jobs:
       - name: Bytecode compile
         run: python -m compileall -q -f app tests scripts
 
+  js:
+    name: js
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Node syntax check
+        run: |
+          node --check app/static/state.mjs
+          node --check tests/command_bar_cases.mjs
+          node --check tests/cost_hud_cases.mjs
+          node --check tests/replay_cases.mjs
+          # Browser ESM entry (index.html type=module) keeps a .js extension.
+          node --experimental-detect-module --check app/static/control.js
+
   test:
     name: test
     runs-on: ubuntu-latest
@@ -68,5 +86,8 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Pytest
         run: python -m pytest tests/ -q --tb=short
