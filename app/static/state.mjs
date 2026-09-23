@@ -1,5 +1,6 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const ACTIVE_VERIFY_UNAVAILABLE = "ACTIVE VERIFY unavailable";
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -127,6 +128,61 @@ export function costHudView(usage = {}) {
     remainingLabel,
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
+}
+/**
+ * Prefix of a loaded mission event log. A missing or unloaded feed stays null
+ * so callers cannot treat it as an empty in-flight set.
+ */
+export function recordedActiveVerificationFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+function verificationActorKey(event) {
+  const actor = event && event.actor_id;
+  if (typeof actor !== "string" || actor.length === 0) return null;
+  return actor;
+}
+function unknownActiveVerification() {
+  return {hidden: false, known: false, count: null, label: ACTIVE_VERIFY_UNAVAILABLE};
+}
+const VERIFICATION_LIFECYCLE = new Set(["verification.started", "verification.passed", "verification.failed"]);
+/**
+ * Read-only in-flight verification count: verification.started still unmatched
+ * by a later verification.passed or verification.failed for the same actor.
+ * verification.evidence.* is ignored. These events share no run id, so
+ * overlapping starts for one actor are a stack. Hidden with an empty label
+ * when no mission is visible. Missing feed is ACTIVE VERIFY unavailable, never 0.
+ * An explicit empty list is a known 0. Payload fields are never the count.
+ */
+export function activeVerificationCountView(feed, options = {}) {
+  if (options.visible !== true) return {hidden: true, known: false, count: null, label: ""};
+  if (!Array.isArray(feed)) return unknownActiveVerification();
+  const open = new Map();
+  const seen = new Set();
+  for (const event of feed) {
+    if (!event || typeof event !== "object") continue;
+    const type = event.event_type;
+    if (!VERIFICATION_LIFECYCLE.has(type)) continue;
+    if (event.id == null || event.id === "") return unknownActiveVerification();
+    if (seen.has(event.id)) continue;
+    seen.add(event.id);
+    const key = verificationActorKey(event);
+    if (!key) return unknownActiveVerification();
+    const depth = open.get(key) || 0;
+    if (type === "verification.started") {
+      open.set(key, depth + 1);
+      continue;
+    }
+    if (depth < 1) return unknownActiveVerification();
+    if (depth === 1) open.delete(key);
+    else open.set(key, depth - 1);
+  }
+  let count = 0;
+  for (const depth of open.values()) count += depth;
+  return {hidden: false, known: true, count, label: String(count)};
 }
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
