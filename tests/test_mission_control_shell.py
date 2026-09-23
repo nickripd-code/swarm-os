@@ -30,7 +30,8 @@ def test_compact_shell_preserves_every_javascript_mount_point():
         "hudTokens", "hudSpend", "costHud", "replayHud", "questionPanel",
         "answerForm", "mapViewport", "world", "connections", "nodes", "emptyMap",
         "agentCount", "taskCount", "tokenCount", "inspectorContent", "activity",
-        "commandBar", "commandForm", "resultPanel", "stopAll", "alerts",
+        "commandBar", "commandForm", "shortcutHints", "shortcutHintStatus",
+        "shortcutHintList", "resultPanel", "stopAll", "alerts",
     }
     assert required <= set(parser.ids)
     assert len(parser.ids) == len(set(parser.ids))
