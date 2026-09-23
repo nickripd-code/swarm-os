@@ -1,5 +1,6 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const CONFIGURATION_UNAVAILABLE = "configuration unavailable";
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -96,6 +97,42 @@ export function formatUsd(value) {
 }
 export function tokenTotal(usage) {
   return (usage?.input || 0) + (usage?.output || 0) + (usage?.reasoning || 0);
+}
+export function providerStripView(health) {
+  const connectivity = health && typeof health === "object" ? health.connectivity : null;
+  const raw = connectivity && Array.isArray(connectivity.providers) ? connectivity.providers : null;
+  if (!raw || raw.length === 0) {
+    return {known: false, configured: 0, missing: 0, note: CONFIGURATION_UNAVAILABLE, items: []};
+  }
+  const items = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const id = typeof entry.id === "string" ? entry.id.trim() : "";
+    if (!id) continue;
+    const configured = entry.configured === true;
+    const label = typeof entry.label === "string" && entry.label.trim() ? entry.label.trim() : id;
+    const local = configured && entry.detail === "local";
+    items.push({
+      id,
+      kind: entry.kind === "tool" ? "tool" : "model",
+      label,
+      configured,
+      state: configured ? "configured" : "missing",
+      stateLabel: configured ? (local ? "local" : "configured") : "missing",
+    });
+  }
+  if (!items.length) {
+    return {known: false, configured: 0, missing: 0, note: CONFIGURATION_UNAVAILABLE, items: []};
+  }
+  const configuredCount = items.filter((item) => item.configured).length;
+  const missingCount = items.length - configuredCount;
+  return {
+    known: true,
+    configured: configuredCount,
+    missing: missingCount,
+    note: configuredCount + " configured · " + missingCount + " missing",
+    items,
+  };
 }
 export function costHudView(usage = {}) {
   const input = usage.input || 0;
