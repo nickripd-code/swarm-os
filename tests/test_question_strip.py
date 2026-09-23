@@ -81,7 +81,7 @@ def test_question_event_and_human_waiting_payload_are_read_only(cases):
     assert cases["waitingOnly"] == {
         "pending": True,
         "questionId": "q-wait",
-        "summary": "Approve the finish?",
+        "summary": "Approve this step?",
     }
     blob = json.dumps({"question": cases["question"], "waiting": cases["waitingOnly"]})
     assert REASON not in blob

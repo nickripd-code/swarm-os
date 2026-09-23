@@ -58,7 +58,7 @@ const waitingOnly = [
   event(1, "mission.started", {mode: "openai"}),
   event(2, "mission.waiting", {
     question_id: "q-wait",
-    question: "Approve the finish?",
+    question: "Approve this step?",
     reason: REASON,
     kind: "approval",
     approval_action: "finish",
