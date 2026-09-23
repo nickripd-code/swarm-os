@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,serverHealthChip} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -38,6 +38,14 @@ function formatElapsed(ms){
   if(h)return h+"h "+(m%60)+"m";
   if(m)return m+"m "+(s%60)+"s";
   return s+"s";
+}
+function renderServerHealth(payload){
+  const el=$("serverHealth");
+  if(!el)return;
+  const view=serverHealthChip(payload);
+  el.textContent=view.label;
+  el.dataset.known=view.known?"true":"false";
+  el.title=view.title;
 }
 function renderHud(){
   const mission=state.mission, status=mission?.status||"idle", mode=missionMode(state);
@@ -641,11 +649,11 @@ async function initialize(){
     const spec=await request("/openapi.json");
     killAvailable=killRoutePresent(spec);
   }catch{killAvailable=false;}
-  try{health=await request("/api/health");const o=health.openai;
+  try{health=await request("/api/health");renderServerHealth(health);const o=health.openai;
     $("brain").innerHTML='<span class="brain-dot"></span><div><strong>'+esc(o.model)+'</strong><small>'+esc(o.reasoning_effort)+' reasoning · '+(o.configured?'connected':'key needed')+'</small></div>';
     connection(o.configured?"Ready to think":"API key needed",o.configured?"live":"disconnected");
     if(!o.configured)showNotice("OpenAI is not configured on the server yet.");
-  }catch{connection("Server unavailable","disconnected");showNotice("Cannot reach the local server.");}
+  }catch{renderServerHealth(null);connection("Server unavailable","disconnected");showNotice("Cannot reach the local server.");}
   const missions=await refreshHistory(),urlId=new URL(location.href).searchParams.get("mission"),saved=urlId||localStorage.getItem("swarm.mission");
   if(saved&&missions.some(m=>m.id===saved))await loadMission(saved);else schedule();
 }
