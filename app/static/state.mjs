@@ -1,5 +1,6 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const EVENT_RATE_UNAVAILABLE = "unavailable";
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -127,6 +128,67 @@ export function costHudView(usage = {}) {
     remainingLabel,
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
+}
+/** Prefix of a loaded event log. A missing or unread feed stays null — never an invented []. */
+export function recordedEventRateFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+function eventLogTimestamp(event) {
+  if (!event || typeof event !== "object" || event.created_at == null || event.created_at === "") return null;
+  const ms = Date.parse(event.created_at);
+  return Number.isFinite(ms) ? ms : null;
+}
+function formatEventRateLabel(rate) {
+  if (rate === 0) return "0/min";
+  if (!Number.isFinite(rate) || rate < 0) return EVENT_RATE_UNAVAILABLE;
+  const rounded = Math.round(rate * 100) / 100;
+  // A positive rate must not display as a fake zero.
+  if (rounded === 0) return EVENT_RATE_UNAVAILABLE;
+  return (Number.isInteger(rounded) ? String(rounded) : String(rounded)) + "/min";
+}
+/**
+ * Read-only events/min from shell event-log timestamps.
+ * Hidden with no mission or in preview. An unread feed or a missing timestamp is
+ * unavailable, not 0. An empty loaded feed is 0 only when windowMs is a known
+ * non-negative duration. A zero-width timestamp span does not invent a rate.
+ */
+export function eventRateView(feed, options = {}) {
+  const visible = options.visible === true;
+  if (!visible) return {hidden: true, known: false, rate: null, label: ""};
+  if (!Array.isArray(feed)) {
+    return {hidden: false, known: false, rate: null, label: EVENT_RATE_UNAVAILABLE};
+  }
+  const stamps = [];
+  for (const event of feed) {
+    if (event == null) continue;
+    const ms = eventLogTimestamp(event);
+    if (ms === null) {
+      return {hidden: false, known: false, rate: null, label: EVENT_RATE_UNAVAILABLE};
+    }
+    stamps.push(ms);
+  }
+  if (stamps.length === 0) {
+    const windowMs = options.windowMs;
+    const knownWindow = typeof windowMs === "number" && Number.isFinite(windowMs) && windowMs >= 0;
+    if (!knownWindow) {
+      return {hidden: false, known: false, rate: null, label: EVENT_RATE_UNAVAILABLE};
+    }
+    return {hidden: false, known: true, rate: 0, label: "0/min"};
+  }
+  const span = Math.max(...stamps) - Math.min(...stamps);
+  if (!(span > 0)) {
+    return {hidden: false, known: false, rate: null, label: EVENT_RATE_UNAVAILABLE};
+  }
+  const rate = stamps.length * 60000 / span;
+  const label = formatEventRateLabel(rate);
+  if (label === EVENT_RATE_UNAVAILABLE) {
+    return {hidden: false, known: false, rate: null, label};
+  }
+  return {hidden: false, known: true, rate, label};
 }
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
