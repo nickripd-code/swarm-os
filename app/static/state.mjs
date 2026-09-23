@@ -1,5 +1,6 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const ACTIVE_TOOLS_UNAVAILABLE = "unavailable";
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -127,6 +128,60 @@ export function costHudView(usage = {}) {
     remainingLabel,
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
+}
+/**
+ * Prefix of a loaded mission event log. A missing or unloaded feed stays null
+ * so callers cannot treat it as an empty in-flight set.
+ */
+export function recordedActiveToolFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+function chargeKey(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  const used = payload.used;
+  const tool = payload.tool;
+  if (typeof used !== "number" || !Number.isInteger(used) || used < 1) return null;
+  if (typeof tool !== "string" || tool.length === 0) return null;
+  return tool + "\0" + used;
+}
+function unknownActiveTools() {
+  return {hidden: false, known: false, count: null, label: ACTIVE_TOOLS_UNAVAILABLE};
+}
+/**
+ * Read-only in-flight tool count: tool.started still unmatched by a later
+ * tool.completed or tool.failed with the same tool name and charge counter.
+ * Hidden with an empty label when no mission is visible. Missing feed is
+ * unavailable, never 0. An explicit empty list is a known 0.
+ * payload.used is a match key only — it is never displayed as the count.
+ */
+export function activeToolCountView(feed, options = {}) {
+  if (options.visible !== true) return {hidden: true, known: false, count: null, label: ""};
+  if (!Array.isArray(feed)) return unknownActiveTools();
+  const open = new Set();
+  const started = new Set();
+  for (const event of feed) {
+    if (!event || typeof event !== "object") continue;
+    const type = event.event_type;
+    if (type !== "tool.started" && type !== "tool.completed" && type !== "tool.failed") continue;
+    const key = chargeKey(event.payload);
+    if (type === "tool.started") {
+      if (!key || started.has(key)) return unknownActiveTools();
+      started.add(key);
+      open.add(key);
+      continue;
+    }
+    if (type === "tool.completed") {
+      if (!key || !started.has(key)) return unknownActiveTools();
+      open.delete(key);
+      continue;
+    }
+    if (key && open.has(key)) open.delete(key);
+  }
+  return {hidden: false, known: true, count: open.size, label: String(open.size)};
 }
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
