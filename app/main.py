@@ -11,7 +11,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .models import AnswerRequest, Mission, MissionCreate, PaymentIntent
+from .payments import build_payment_provider
 from .runtime import PolicyError, SwarmRuntime
+from .spend_summary import summarize_mission_spend
 from .store import Store
 from .health import (
     anthropic_status, azure_status, bedrock_status, browser_health_status, cerebras_status,
@@ -119,6 +121,38 @@ async def get_mission(mission_id: UUID):
     mission = store.get_mission(mission_id)
     if not mission: raise HTTPException(404, "Mission not found")
     return mission
+
+
+def _providers_configured() -> bool:
+    checker = getattr(runtime.controller, "configured", None)
+    if not callable(checker):
+        return False
+    return bool(checker())
+
+
+def _spend_payload(mission: Mission | None) -> dict:
+    events = store.events(mission.id) if mission is not None else []
+    return summarize_mission_spend(
+        mission,
+        events,
+        providers_configured=_providers_configured(),
+        live_spend_enabled=build_payment_provider().spend_enabled(),
+    )
+
+
+@app.get("/api/spend-summary")
+async def spend_summary():
+    """Read-only empty summary. Does not create a mission or contact a provider."""
+    return _spend_payload(None)
+
+
+@app.get("/api/missions/{mission_id}/spend-summary")
+async def mission_spend_summary(mission_id: UUID):
+    """Read-only recorded token estimate and payment ledger. Never settles spend."""
+    mission = store.get_mission(mission_id)
+    if not mission:
+        raise HTTPException(404, "Mission not found")
+    return _spend_payload(mission)
 
 
 @app.get("/api/missions/{mission_id}/events")

@@ -1,0 +1,13 @@
+.spend-summary{max-width:1120px;margin:0 auto 14px;border:1px solid #142e40;border-radius:11px;background:#081521;padding:11px 14px}
+.spend-summary-heading{display:flex;justify-content:space-between;gap:12px;align-items:baseline}
+.spend-summary-note{color:#6f8da0;font:9px var(--mono);text-align:right}
+.spend-summary-stats{display:flex;flex-wrap:wrap;gap:14px 22px;margin:8px 0 0}
+.spend-summary-stats div{min-width:108px}
+.spend-summary-stats dt{color:#58798d;font:8px var(--mono);letter-spacing:.08em}
+.spend-summary-stats dd{margin:3px 0 0;color:#d5e8ee;font:12px var(--mono)}
+.spend-summary[data-state="unavailable"] .spend-estimate{color:#728b99}
+@media(max-width:620px){
+  .spend-summary-heading{flex-direction:column;align-items:flex-start}
+  .spend-summary-note{text-align:left}
+  .spend-summary-stats{gap:10px 14px}
+}
