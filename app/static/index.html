@@ -69,6 +69,17 @@
       </details>
     </section>
 
+    <section class="model-call-strip" id="modelCallStrip" aria-label="Last model call" hidden>
+      <div class="model-call-heading"><span class="eyebrow">LAST MODEL CALL</span><span id="modelCallNote">No recorded model call.</span></div>
+      <p id="modelCallEmpty" class="model-call-empty">No recorded model call.</p>
+      <dl id="modelCallFields" hidden>
+        <div><dt>Provider</dt><dd id="modelCallProvider"></dd></div>
+        <div><dt>Model</dt><dd id="modelCallModel"></dd></div>
+        <div><dt>Role</dt><dd id="modelCallRole"></dd></div>
+        <div><dt>Status</dt><dd id="modelCallStatus"></dd></div>
+      </dl>
+    </section>
+
     <section class="question-panel" id="questionPanel" hidden>
       <div><span class="eyebrow">AUTHORIZATION REQUIRED</span><h2>The swarm needs your answer.</h2></div><p id="questionText"></p>
       <form id="answerForm" class="answer-form"><label class="sr-only" for="answerText">Your answer</label><textarea id="answerText" name="answer" required minlength="1" maxlength="4000" rows="2" placeholder="Type an answer…"></textarea><button id="answerSend" type="submit">Send <span aria-hidden="true">↗</span></button></form>

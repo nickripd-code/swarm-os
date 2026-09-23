@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,lastModelCall} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -190,6 +190,7 @@ function render(){
   if(!selected&&state.agents.size)selected=state.agents.keys().next().value;
   renderInspector();
   renderActivity();
+  renderModelCallStrip();
   renderQuestion();
   renderReplayHud();
   $("resultPanel").hidden=!mission?.result||state.preview||!replayLive;
@@ -260,6 +261,27 @@ function describe(e){
     default:return "";
   }
 }
+function renderModelCallStrip(){
+  const strip=$("modelCallStrip");
+  if(!strip)return;
+  const view=lastModelCall(state);
+  const call=view.call;
+  strip.hidden=view.hidden;
+  strip.dataset.empty=view.empty?"true":"false";
+  if(call)strip.dataset.status=call.status;
+  else delete strip.dataset.status;
+  if($("modelCallNote"))$("modelCallNote").textContent=view.note;
+  if($("modelCallEmpty")){
+    $("modelCallEmpty").hidden=!view.empty||view.hidden;
+    $("modelCallEmpty").textContent=view.note;
+  }
+  const fields=$("modelCallFields");
+  if(fields)fields.hidden=!call;
+  if($("modelCallProvider"))$("modelCallProvider").textContent=call?call.provider:"";
+  if($("modelCallModel"))$("modelCallModel").textContent=call?call.model:"";
+  if($("modelCallRole"))$("modelCallRole").textContent=call?call.role:"";
+  if($("modelCallStatus"))$("modelCallStatus").textContent=call?call.status:"";
+}
 function renderActivity(){
   const html=state.events.filter(e=>describe(e)).slice(0,30).map(e=>'<li>'+describe(e)+'<time>'+
     new Date(e.created_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"})+'</time></li>').join("");
@@ -315,6 +337,7 @@ function reset(mission){
   if($("answerText"))$("answerText").value="";
   showNotice("");setCommandStatus("");zoom=1;$("zoomValue").textContent="100%";clearAlerts();
   if(hudTick){clearInterval(hudTick);hudTick=null;}
+  renderModelCallStrip();
 }
 function stopReplayPlay(){
   if(replayTimer){clearInterval(replayTimer);replayTimer=null;}
@@ -601,7 +624,7 @@ $("mapViewport").addEventListener("pointermove",e=>{if(drag){$("mapViewport").sc
 for(const type of ["pointerup","pointercancel"])$("mapViewport").addEventListener(type,()=>{drag=null;$("mapViewport").classList.remove("panning");});
 new ResizeObserver(()=>schedule()).observe($("mapViewport"));
 function preview(){
-  disconnect();reset({id:"preview",goal:"Design a launch plan for a small business",status:"running",created_at:new Date().toISOString()});state.preview=true;
+  disconnect();reset({id:"preview",goal:"Design a launch plan for a small business",status:"running",created_at:new Date().toISOString()});state.preview=true;renderModelCallStrip();
   const specs=[
     ["root",null,"mission_controller","Turn the goal into useful work",["spawn","coordinate","reason"],"running"],
     ["strategy","root","strategist","Define the audience and launch priorities",["reason","write"],"completed"],
