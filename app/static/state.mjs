@@ -1,5 +1,6 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const AGENT_COUNT_UNAVAILABLE = "agents unavailable";
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -96,6 +97,23 @@ export function formatUsd(value) {
 }
 export function tokenTotal(usage) {
   return (usage?.input || 0) + (usage?.output || 0) + (usage?.reasoning || 0);
+}
+function explicitAgentCount(value) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) return null;
+  return value;
+}
+function listedAgentCount(source) {
+  if (Array.isArray(source)) return source.length;
+  if (!source || typeof source !== "object") return null;
+  if (Array.isArray(source.agents)) return source.agents.length;
+  const named = explicitAgentCount(source.agent_count);
+  if (named !== null) return named;
+  return explicitAgentCount(source.agents_count);
+}
+export function missionAgentCount(source) {
+  const count = listedAgentCount(source);
+  if (count === null) return {known: false, count: null, label: AGENT_COUNT_UNAVAILABLE};
+  return {known: true, count, label: count === 1 ? "1 agent" : count + " agents"};
 }
 export function costHudView(usage = {}) {
   const input = usage.input || 0;

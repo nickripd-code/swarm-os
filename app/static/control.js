@@ -1,11 +1,11 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,missionAgentCount,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
 const statusName = status => ({created:"Ready",running:"Thinking",completed:"Done",blocked:"Blocked",failed:"Failed",stopped:"Stopped",pending:"Queued",paused:"Paused",waiting:"Waiting"}[status] || status);
 const symbol = status => ({created:"·",running:"",completed:"✓",blocked:"?",failed:"!",stopped:"■"}[status] || "·");
 const colors = ["#c6b4ef","#edbd9e","#aed8cf","#e6cd90","#b5cbe3","#dfb9ca"];
-let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null, hudTick=null, notifyArmed=false, killAvailable=false;
+let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null, hudTick=null, notifyArmed=false, killAvailable=false, listedAgents, listedAgentsTicket=0, listedRefreshTimer=null;
 let eventLog=[], replayCursor=-1, replayLive=true, replayTimer=null, sourceMission=null;
 const elements=new Map();
 const bot = color => '<span class="bot" style="--agent-color:'+color+'" aria-hidden="true"><span class="ear ear-left"></span><span class="ear ear-right"></span><span class="visor"><i></i><i></i><b class="mouth"></b></span></span>';
@@ -77,6 +77,17 @@ function renderHud(){
     $("replayChip").hidden=state.preview||!mission;
     $("replayChip").textContent=state.preview?"PREVIEW":(replayLive?"LIVE":"REPLAY");
     $("replayChip").className="hud-chip mode "+(state.preview?"preview":replayLive?"replay-live":"replay");
+  }
+  if($("missionAgentCount")){
+    const el=$("missionAgentCount");
+    if(!mission||state.preview){
+      el.hidden=true;
+    }else{
+      const view=missionAgentCount(listedAgents);
+      el.hidden=false;
+      el.dataset.known=view.known?"true":"false";
+      el.textContent=view.label;
+    }
   }
   const running=!!mission&&!terminal.has(status)&&replayLive&&!state.preview;
   if(running&&!hudTick)hudTick=setInterval(renderHud,1000);
@@ -306,8 +317,32 @@ async function request(path,options){
 function disconnect(){
   generation++;clearTimeout(retry);clearTimeout(previewTimer);stopReplayPlay();if(ws){ws.onclose=null;ws.close();ws=null;}
 }
+function clearListedAgents(){
+  listedAgentsTicket++;
+  listedAgents=undefined;
+  clearTimeout(listedRefreshTimer);
+  listedRefreshTimer=null;
+}
+function queueListedAgentsRefresh(id,gen){
+  if(!id)return;
+  clearTimeout(listedRefreshTimer);
+  listedRefreshTimer=setTimeout(()=>{listedRefreshTimer=null;refreshListedAgents(id,gen);},40);
+}
+async function refreshListedAgents(id,gen){
+  const ticket=++listedAgentsTicket;
+  try{
+    const listed=await request("/api/missions/"+encodeURIComponent(id)+"/agents");
+    if(gen!==generation||ticket!==listedAgentsTicket||state.preview)return;
+    listedAgents=Array.isArray(listed)?listed:null;
+  }catch{
+    if(gen!==generation||ticket!==listedAgentsTicket||state.preview)return;
+    listedAgents=null;
+  }
+  schedule();
+}
 function reset(mission){
   stopReplayPlay();
+  clearListedAgents();
   eventLog=[];replayCursor=-1;replayLive=true;sourceMission=mission||null;
   state=newState(mission);selected=null;elements.clear();$("nodes").replaceChildren();$("activity").replaceChildren();
   $("resultPanel").hidden=true;if($("resultMeta")){$("resultMeta").hidden=true;$("resultMeta").textContent="";}
@@ -411,6 +446,7 @@ function connect(id,gen){
           }
           if(e.event_type==='agent.message')setTimeout(schedule,9100);
         }
+        if(e.event_type==="agent.spawned"||e.event_type==="agent.retired")queueListedAgentsRefresh(id,gen);
         if(e.event_type.startsWith("mission.")&&terminal.has(e.event_type.split(".")[1]))refreshHistory();
       }
     }catch{showNotice("An event could not be read. Reconnect to restore the mission.");}
@@ -429,6 +465,7 @@ async function loadMission(id){
   try{
     const m=await request("/api/missions/"+id);if(gen!==generation)return;
     reset(m);localStorage.setItem("swarm.mission",id);$("goal").value=m.goal;
+    queueListedAgentsRefresh(id,gen);
     try{
       const events=await request("/api/missions/"+id+"/events");
       if(gen!==generation)return;
@@ -451,7 +488,7 @@ $("missionForm").addEventListener("submit",async e=>{
   showNotice("");$("launch").disabled=true;armNotifications();
   try{
     const m=await request("/api/missions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({goal:$("goal").value})});
-    disconnect();reset(m);localStorage.setItem("swarm.mission",m.id);connect(m.id,generation);
+    disconnect();reset(m);localStorage.setItem("swarm.mission",m.id);queueListedAgentsRefresh(m.id,generation);connect(m.id,generation);
     schedule();refreshHistory();
   }catch(error){showNotice(error.message);$("launch").disabled=false;}
 });
