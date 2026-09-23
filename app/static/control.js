@@ -1,11 +1,11 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,limitsReadoutView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
 const statusName = status => ({created:"Ready",running:"Thinking",completed:"Done",blocked:"Blocked",failed:"Failed",stopped:"Stopped",pending:"Queued",paused:"Paused",waiting:"Waiting"}[status] || status);
 const symbol = status => ({created:"·",running:"",completed:"✓",blocked:"?",failed:"!",stopped:"■"}[status] || "·");
 const colors = ["#c6b4ef","#edbd9e","#aed8cf","#e6cd90","#b5cbe3","#dfb9ca"];
-let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null, hudTick=null, notifyArmed=false, killAvailable=false;
+let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null, launchLimits=null, hudTick=null, notifyArmed=false, killAvailable=false;
 let eventLog=[], replayCursor=-1, replayLive=true, replayTimer=null, sourceMission=null;
 const elements=new Map();
 const bot = color => '<span class="bot" style="--agent-color:'+color+'" aria-hidden="true"><span class="ear ear-left"></span><span class="ear ear-right"></span><span class="visor"><i></i><i></i><b class="mouth"></b></span></span>';
@@ -81,6 +81,23 @@ function renderHud(){
   const running=!!mission&&!terminal.has(status)&&replayLive&&!state.preview;
   if(running&&!hudTick)hudTick=setInterval(renderHud,1000);
   if(!running&&hudTick){clearInterval(hudTick);hudTick=null;}
+  renderLimits();
+}
+function renderLimits(){
+  const root=$("limitsReadout"), list=$("limitsChips");
+  if(!root||!list)return;
+  const view=limitsReadoutView({health:launchLimits, mission:state.mission, preview:!!state.preview});
+  root.dataset.available=view.available?"true":"false";
+  root.dataset.phase=view.phase||"";
+  if($("limitsNote"))$("limitsNote").textContent=view.note||"";
+  list.replaceChildren();
+  for(const chip of view.chips||[]){
+    const li=document.createElement("li");
+    li.className="limits-chip";
+    li.dataset.kind=chip.kind||"";
+    li.textContent=chip.label;
+    list.append(li);
+  }
 }
 function clearAlerts(){if($("alerts"))$("alerts").replaceChildren();}
 function pushAlert(alert){
@@ -641,7 +658,7 @@ async function initialize(){
     const spec=await request("/openapi.json");
     killAvailable=killRoutePresent(spec);
   }catch{killAvailable=false;}
-  try{health=await request("/api/health");const o=health.openai;
+  try{health=await request("/api/health");launchLimits=health.mission_limits||null;const o=health.openai;
     $("brain").innerHTML='<span class="brain-dot"></span><div><strong>'+esc(o.model)+'</strong><small>'+esc(o.reasoning_effort)+' reasoning · '+(o.configured?'connected':'key needed')+'</small></div>';
     connection(o.configured?"Ready to think":"API key needed",o.configured?"live":"disconnected");
     if(!o.configured)showNotice("OpenAI is not configured on the server yet.");
