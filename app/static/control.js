@@ -1,5 +1,6 @@
 import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
 const $ = id => document.getElementById(id);
+import {timelinePanel} from "./timeline.mjs";
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
 const statusName = status => ({created:"Ready",running:"Thinking",completed:"Done",blocked:"Blocked",failed:"Failed",stopped:"Stopped",pending:"Queued",paused:"Paused",waiting:"Waiting"}[status] || status);
@@ -310,6 +311,7 @@ function reset(mission){
   stopReplayPlay();
   eventLog=[];replayCursor=-1;replayLive=true;sourceMission=mission||null;
   state=newState(mission);selected=null;elements.clear();$("nodes").replaceChildren();$("activity").replaceChildren();
+  showTimelineNow();
   $("resultPanel").hidden=true;if($("resultMeta")){$("resultMeta").hidden=true;$("resultMeta").textContent="";}
   if($("questionPanel"))$("questionPanel").hidden=!mission?.pending_question;
   if($("answerText"))$("answerText").value="";
@@ -412,6 +414,7 @@ function connect(id,gen){
           if(e.event_type==='agent.message')setTimeout(schedule,9100);
         }
         if(e.event_type.startsWith("mission.")&&terminal.has(e.event_type.split(".")[1]))refreshHistory();
+        scheduleTimeline();
       }
     }catch{showNotice("An event could not be read. Reconnect to restore the mission.");}
   };
@@ -423,6 +426,72 @@ function connect(id,gen){
     connection("Reconnecting…","disconnected");
     retry=setTimeout(()=>connect(id,gen),2000);
   };
+}
+const MISSION_ID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+let timelineTicket=0, timelineMission=null, timelineTimer=null;
+function activeMissionId(){
+  if(state.preview)return null;
+  const id=state.mission&&state.mission.id;
+  return typeof id==="string"&&MISSION_ID.test(id)?id:null;
+}
+function timelineTime(value){
+  if(!value)return "time unavailable";
+  const date=new Date(value);
+  if(!Number.isFinite(date.getTime()))return "time unavailable";
+  return date.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+}
+function renderTimelinePanel(view){
+  const list=$("eventTimelineList"), count=$("eventTimelineCount");
+  if(!list)return;
+  if(count)count.textContent=view.state==="ok"?String(view.events.length):(view.state==="empty"?"0":"—");
+  list.replaceChildren();
+  if(view.state!=="ok"){
+    const item=document.createElement("li");
+    item.className="empty-activity";
+    item.textContent=view.message;
+    list.append(item);
+    return;
+  }
+  for(const event of view.events){
+    const item=document.createElement("li");
+    const time=document.createElement("time");
+    if(event.created_at)time.dateTime=event.created_at;
+    time.textContent=timelineTime(event.created_at);
+    const type=document.createElement("b");
+    type.textContent=event.event_type;
+    item.append(time, document.createTextNode(" "), type);
+    if(event.summary)item.append(document.createTextNode(" · "+event.summary));
+    list.append(item);
+  }
+}
+async function refreshTimeline(){
+  const ticket=++timelineTicket;
+  const id=activeMissionId();
+  if(!id){
+    timelineMission=null;
+    renderTimelinePanel(timelinePanel({preview:!!state.preview, missionId:null}));
+    return;
+  }
+  if(timelineMission!==id){
+    timelineMission=id;
+    renderTimelinePanel(timelinePanel({missionId:id, pending:true}));
+  }
+  try{
+    const body=await request("/api/missions/"+id+"/timeline?limit=12");
+    if(ticket!==timelineTicket)return;
+    renderTimelinePanel(timelinePanel({missionId:id, ok:true, body}));
+  }catch{
+    if(ticket!==timelineTicket)return;
+    renderTimelinePanel(timelinePanel({missionId:id, ok:false}));
+  }
+}
+function showTimelineNow(){
+  clearTimeout(timelineTimer);timelineTimer=null;
+  return refreshTimeline();
+}
+function scheduleTimeline(){
+  clearTimeout(timelineTimer);
+  timelineTimer=setTimeout(()=>{timelineTimer=null;refreshTimeline();},120);
 }
 async function loadMission(id){
   disconnect();const gen=generation;
@@ -647,6 +716,6 @@ async function initialize(){
     if(!o.configured)showNotice("OpenAI is not configured on the server yet.");
   }catch{connection("Server unavailable","disconnected");showNotice("Cannot reach the local server.");}
   const missions=await refreshHistory(),urlId=new URL(location.href).searchParams.get("mission"),saved=urlId||localStorage.getItem("swarm.mission");
-  if(saved&&missions.some(m=>m.id===saved))await loadMission(saved);else schedule();
+  if(saved&&missions.some(m=>m.id===saved))await loadMission(saved);else{showTimelineNow();schedule();}
 }
 initialize();

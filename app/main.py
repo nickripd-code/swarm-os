@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from .models import AnswerRequest, Mission, MissionCreate, PaymentIntent
 from .runtime import PolicyError, SwarmRuntime
 from .store import Store
+from .timeline import mission_timeline
 from .health import (
     anthropic_status, azure_status, bedrock_status, browser_health_status, cerebras_status,
     cohere_status, deepseek_status, fireworks_status, gemini_status, groq_status,
@@ -123,6 +124,13 @@ async def get_mission(mission_id: UUID):
 
 @app.get("/api/missions/{mission_id}/events")
 async def get_events(mission_id: UUID): return [e.model_dump(mode="json") for e in store.events(mission_id)]
+
+
+@app.get("/api/missions/{mission_id}/timeline")
+async def get_timeline(mission_id: UUID, limit: int = 20):
+    if limit < 1 or limit > 50:
+        raise HTTPException(400, "limit must be between 1 and 50")
+    return mission_timeline(store, mission_id, limit=limit)
 
 
 @app.get("/api/missions/{mission_id}/agents")
