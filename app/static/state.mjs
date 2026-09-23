@@ -404,3 +404,95 @@ export function replayView(log, index, options = {}) {
         : "Recorded events only · not a simulation"),
   };
 }
+
+const RUNTIME_ACTIVE = new Set(["running", "waiting"]);
+const RUNTIME_TERMINAL = new Set(["completed", "failed", "stopped", "blocked"]);
+export const RUNTIME_UNAVAILABLE = "unavailable";
+
+function parseInstant(value) {
+  if (typeof value !== "string" || value === "") return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function pausedSeconds(mission) {
+  if (mission.paused_seconds == null) return 0;
+  const raw = mission.paused_seconds;
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) return null;
+  return raw;
+}
+
+function firstRuntimeStart(events) {
+  for (const event of events) {
+    if (!event) continue;
+    if (event.event_type !== "mission.started" && event.event_type !== "mission.resumed") continue;
+    const ms = parseInstant(event.created_at);
+    if (ms == null) return {startedAt: null, startedMs: null};
+    return {startedAt: event.created_at, startedMs: ms};
+  }
+  return {startedAt: null, startedMs: null};
+}
+
+function terminalEndMs(events, status) {
+  let end = null;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (!event || event.event_type !== "mission." + status) continue;
+    end = event;
+    break;
+  }
+  if (!end) return null;
+  return parseInstant(end.created_at);
+}
+
+export function formatRuntimeElapsed(ms) {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return RUNTIME_UNAVAILABLE;
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  if (hours) return hours + "h " + (minutes % 60) + "m";
+  if (minutes) return minutes + "m " + (seconds % 60) + "s";
+  return seconds + "s";
+}
+
+export function runtimeClockView(mission, events, nowMs) {
+  const hidden = {
+    visible: false,
+    status: null,
+    startedAt: null,
+    elapsedMs: null,
+    startedLabel: "",
+    elapsedLabel: "",
+    statusLabel: "",
+  };
+  if (!mission || typeof mission !== "object" || mission.id == null || mission.id === "" || mission.id === "preview") {
+    return hidden;
+  }
+  const status = typeof mission.status === "string" && mission.status !== "" ? mission.status : null;
+  const log = Array.isArray(events) ? events : [];
+  const start = firstRuntimeStart(log);
+  const pause = pausedSeconds(mission);
+  let endMs = null;
+  if (start.startedMs != null && pause != null && status) {
+    if (RUNTIME_ACTIVE.has(status)) {
+      endMs = typeof nowMs === "number" && Number.isFinite(nowMs) ? nowMs : null;
+    } else if (status === "paused") {
+      endMs = parseInstant(mission.paused_at);
+    } else if (RUNTIME_TERMINAL.has(status)) {
+      endMs = terminalEndMs(log, status);
+    }
+  }
+  let elapsedMs = null;
+  if (start.startedMs != null && endMs != null && pause != null) {
+    elapsedMs = Math.max(0, endMs - start.startedMs - pause * 1000);
+  }
+  return {
+    visible: true,
+    status,
+    startedAt: start.startedAt,
+    elapsedMs,
+    startedLabel: start.startedAt || RUNTIME_UNAVAILABLE,
+    elapsedLabel: elapsedMs == null ? RUNTIME_UNAVAILABLE : formatRuntimeElapsed(elapsedMs),
+    statusLabel: status ? status.toUpperCase() : RUNTIME_UNAVAILABLE,
+  };
+}
