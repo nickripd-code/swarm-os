@@ -219,6 +219,46 @@ export function missionMode(state) {
   if (state.preview) return "preview";
   return state.mission?.mode || state.mission?.result?.mode || (state.mission ? "pending" : "standby");
 }
+const WORKSPACE_PATH_LIMIT = 24;
+
+function hiddenWorkspacePath() {
+  return {visible: false, path: null, label: ""};
+}
+
+function reportedWorkspaceRoot(workspace) {
+  if (!workspace || typeof workspace !== "object" || Array.isArray(workspace)) return null;
+  const root = workspace.root;
+  if (typeof root !== "string") return null;
+  const text = root.trim();
+  if (!text || /[\u0000-\u001f\u007f]/.test(text)) return null;
+  return text;
+}
+
+export function shortenWorkspacePath(path, limit = WORKSPACE_PATH_LIMIT) {
+  if (typeof path !== "string" || path.length <= limit) return path;
+  const slash = path.lastIndexOf("/");
+  const back = path.lastIndexOf("\\");
+  const sepAt = Math.max(slash, back);
+  if (sepAt < 0) return "…" + path.slice(-(limit - 1));
+  const leaf = "…" + path.slice(sepAt);
+  if (leaf.length > limit) return "…" + path.slice(-(limit - 1));
+  const parentAt = Math.max(path.lastIndexOf("/", sepAt - 1), path.lastIndexOf("\\", sepAt - 1));
+  if (parentAt >= 0) {
+    const withParent = "…" + path.slice(parentAt);
+    if (withParent.length <= limit) return withParent;
+  }
+  return leaf;
+}
+
+export function workspacePathChip(mission, workspace, options = {}) {
+  if (options.preview === true || !mission || typeof mission !== "object" || Array.isArray(mission)) {
+    return hiddenWorkspacePath();
+  }
+  if (mission.id === "preview") return hiddenWorkspacePath();
+  const path = reportedWorkspaceRoot(workspace);
+  if (!path) return hiddenWorkspacePath();
+  return {visible: true, path, label: shortenWorkspacePath(path)};
+}
 export function resultMetaText(mission) {
   const result = mission?.result;
   if (!result) return "";
