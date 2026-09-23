@@ -26,7 +26,7 @@ def test_compact_shell_preserves_every_javascript_mount_point():
 
     required = {
         "missionForm", "goal", "launch", "brain", "history", "objectiveHud",
-        "missionMode", "missionStatus", "hudElapsed", "hudAgents", "hudTasks",
+        "missionMode", "missionStatus", "pendingApprovalCountChip", "hudElapsed", "hudAgents", "hudTasks",
         "hudTokens", "hudSpend", "costHud", "replayHud", "questionPanel",
         "answerForm", "mapViewport", "world", "connections", "nodes", "emptyMap",
         "agentCount", "taskCount", "tokenCount", "inspectorContent", "activity",
@@ -34,6 +34,9 @@ def test_compact_shell_preserves_every_javascript_mount_point():
     }
     assert required <= set(parser.ids)
     assert len(parser.ids) == len(set(parser.ids))
+    hud = html.split('id="objectiveHud"', 1)[1].split("</section>", 1)[0]
+    assert 'id="pendingApprovalCountChip"' in hud
+    assert "hud-chips" in hud
 
 
 def test_shell_is_tree_first_and_secondary_controls_are_collapsible():

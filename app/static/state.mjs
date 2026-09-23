@@ -128,6 +128,40 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+/**
+ * Read-only count of org-op / human-approval items parked on the loaded mission.
+ * The shell stores at most one `pending_question`. `kind: "approval"` (finish,
+ * live payment, or org change) is 1. An explicit null, or `kind: "question"`, is 0.
+ * Hidden with an empty label when there is no mission or the shell is in preview.
+ * A missing field or an unclassified parked item is "unavailable" — never an invented count.
+ */
+export function pendingApprovalCountView(state) {
+  const mission = state?.mission;
+  if (!mission || state.preview) {
+    return {hidden: true, known: false, count: null, label: ""};
+  }
+  if (!Object.prototype.hasOwnProperty.call(mission, "pending_question")) {
+    return {hidden: false, known: false, count: null, label: "unavailable"};
+  }
+  const pending = mission.pending_question;
+  if (pending == null) {
+    return {hidden: false, known: true, count: 0, label: "0"};
+  }
+  if (typeof pending !== "object" || Array.isArray(pending)) {
+    return {hidden: false, known: false, count: null, label: "unavailable"};
+  }
+  if (pending.kind === "question") {
+    return {hidden: false, known: true, count: 0, label: "0"};
+  }
+  if (pending.kind === "approval") {
+    const id = pending.question_id;
+    if (typeof id !== "string" || !id.trim()) {
+      return {hidden: false, known: false, count: null, label: "unavailable"};
+    }
+    return {hidden: false, known: true, count: 1, label: "1"};
+  }
+  return {hidden: false, known: false, count: null, label: "unavailable"};
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
