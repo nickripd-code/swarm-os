@@ -128,6 +128,47 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+export const CONTROLLER_DECISION_UNAVAILABLE = "unavailable";
+const CONTROLLER_DECISION_EVENT = "controller.decision";
+/** Prefix of a loaded event log. A missing feed stays null — never an invented []. */
+export function recordedControllerDecisionFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+/**
+ * Read-only count of recorded controller.decision events on the loaded feed.
+ * Each runtime decide loop emits that catalog type once. planner.proposal,
+ * judge.decision, org.changed, agent.message, llm.completed, and
+ * mission.completed are not controller decisions. Payload action fields and
+ * numeric counters are not a count.
+ * Hidden with no mission or in preview. A missing or unreadable feed is
+ * CONTROLLER DECISIONS unavailable, not 0. An explicit empty list (including a
+ * cursor before any event) is 0. A non-string event_type is unreadable and
+ * fails closed. The label is a count only.
+ */
+export function controllerDecisionCountView(feed, options = {}) {
+  const visible = options.visible === true;
+  if (!visible) return {hidden: true, known: false, count: null, label: ""};
+  if (!Array.isArray(feed)) {
+    return {hidden: false, known: false, count: null, label: "CONTROLLER DECISIONS " + CONTROLLER_DECISION_UNAVAILABLE};
+  }
+  let count = 0;
+  for (const event of feed) {
+    if (!event || typeof event !== "object" || Array.isArray(event)) continue;
+    const type = event.event_type;
+    if (typeof type !== "string") {
+      if (type != null) {
+        return {hidden: false, known: false, count: null, label: "CONTROLLER DECISIONS " + CONTROLLER_DECISION_UNAVAILABLE};
+      }
+      continue;
+    }
+    if (type === CONTROLLER_DECISION_EVENT) count += 1;
+  }
+  return {hidden: false, known: true, count, label: "CONTROLLER DECISIONS " + count};
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
