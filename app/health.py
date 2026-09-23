@@ -244,3 +244,73 @@ async def workspace_health_status() -> dict:
         "docker": False,
         "fallback": False,
     }
+
+
+_MODEL_CONNECTIVITY = (
+    ("openai", "OpenAI", openai_status),
+    ("openrouter", "OpenRouter", openrouter_status),
+    ("xai", "xAI", xai_status),
+    ("anthropic", "Anthropic", anthropic_status),
+    ("mistral", "Mistral", mistral_status),
+    ("gemini", "Gemini", gemini_status),
+    ("cohere", "Cohere", cohere_status),
+    ("deepseek", "DeepSeek", deepseek_status),
+    ("together", "Together", together_status),
+    ("groq", "Groq", groq_status),
+    ("fireworks", "Fireworks", fireworks_status),
+    ("azure", "Azure OpenAI", azure_status),
+    ("perplexity", "Perplexity", perplexity_status),
+    ("bedrock", "Bedrock", bedrock_status),
+    ("huggingface", "Hugging Face", huggingface_status),
+    ("cerebras", "Cerebras", cerebras_status),
+    ("sambanova", "SambaNova", sambanova_status),
+    ("vertex", "Vertex AI", vertex_status),
+    ("ollama", "Ollama", ollama_status),
+    ("vllm", "vLLM", vllm_status),
+    ("llamacpp", "llama.cpp", llamacpp_status),
+)
+
+
+def _connectivity_entry(kind: str, provider_id: str, label: str, configured: bool,
+                        detail: str | None = None) -> dict:
+    flag = configured is True
+    entry = {
+        "id": provider_id,
+        "kind": kind,
+        "label": label,
+        "configured": flag,
+        "state": "configured" if flag else "missing",
+    }
+    if detail:
+        entry["detail"] = detail
+    return entry
+
+
+def connectivity_snapshot() -> dict:
+    """Configured vs missing from env opt-in checks. Does not call provider APIs."""
+    from .browser import browser_opted_in
+    from .composio import ComposioToolProvider
+    from .selfmod import selfmod_opted_in
+    from .tools import local_tools_from_env
+
+    providers = [
+        _connectivity_entry("model", provider_id, label, status().get("configured") is True)
+        for provider_id, label, status in _MODEL_CONNECTIVITY
+    ]
+    providers.extend((
+        _connectivity_entry("tool", "local", "Local tools", bool(local_tools_from_env())),
+        _connectivity_entry(
+            "tool", "mcp", "MCP", bool((os.getenv("MCP_SERVER_URL") or "").strip()),
+        ),
+        _connectivity_entry("tool", "browser", "Browser", browser_opted_in() is True),
+        _connectivity_entry("tool", "selfmod", "Self-mod", selfmod_opted_in() is True),
+        _connectivity_entry("tool", "composio", "Composio", ComposioToolProvider().configured() is True),
+        _connectivity_entry("tool", "workspace", "Workspace", True, detail="local"),
+    ))
+    configured = sum(1 for item in providers if item["configured"])
+    return {
+        "probed": False,
+        "providers": providers,
+        "configured": configured,
+        "missing": len(providers) - configured,
+    }

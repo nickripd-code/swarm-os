@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,providerStripView} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -11,6 +11,24 @@ const elements=new Map();
 const bot = color => '<span class="bot" style="--agent-color:'+color+'" aria-hidden="true"><span class="ear ear-left"></span><span class="ear ear-right"></span><span class="visor"><i></i><i></i><b class="mouth"></b></span></span>';
 function colorFor(a) {if(!a.parent_id)return colors[0];let n=0;for(const c of a.role)n=(n*31+c.charCodeAt(0))>>>0;return colors[1+n%(colors.length-1)];}
 function showNotice(message) {$("notice").textContent=message;$("notice").hidden=!message;}
+function renderProviderStrip(payload){
+  const note=$("providerStripNote"), list=$("providerStripList");
+  if(!note||!list)return;
+  const view=providerStripView(payload);
+  note.textContent=view.note;
+  list.replaceChildren(...view.items.map(item=>{
+    const li=document.createElement("li");
+    li.className="provider-chip"+(item.configured?" configured":" missing");
+    li.dataset.provider=item.id;
+    li.dataset.state=item.state;
+    const name=document.createElement("span");
+    name.textContent=item.label;
+    const state=document.createElement("b");
+    state.textContent=item.stateLabel;
+    li.append(name, state);
+    return li;
+  }));
+}
 function setCommandStatus(message,kind){
   const el=$("commandBarStatus");
   if(!el)return;
@@ -642,10 +660,11 @@ async function initialize(){
     killAvailable=killRoutePresent(spec);
   }catch{killAvailable=false;}
   try{health=await request("/api/health");const o=health.openai;
+    renderProviderStrip(health);
     $("brain").innerHTML='<span class="brain-dot"></span><div><strong>'+esc(o.model)+'</strong><small>'+esc(o.reasoning_effort)+' reasoning · '+(o.configured?'connected':'key needed')+'</small></div>';
     connection(o.configured?"Ready to think":"API key needed",o.configured?"live":"disconnected");
     if(!o.configured)showNotice("OpenAI is not configured on the server yet.");
-  }catch{connection("Server unavailable","disconnected");showNotice("Cannot reach the local server.");}
+  }catch{renderProviderStrip(null);connection("Server unavailable","disconnected");showNotice("Cannot reach the local server.");}
   const missions=await refreshHistory(),urlId=new URL(location.href).searchParams.get("mission"),saved=urlId||localStorage.getItem("swarm.mission");
   if(saved&&missions.some(m=>m.id===saved))await loadMission(saved);else schedule();
 }
