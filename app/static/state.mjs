@@ -347,12 +347,82 @@ export function isReplayLive(index, length) {
   if (!length || length < 1) return true;
   return clampReplayIndex(index, length) === length - 1;
 }
+const MISSION_STAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})$/;
+const UPDATED_FUTURE_SKEW_MS = 120000;
+const HIDDEN_UPDATED = Object.freeze({visible: false, label: "", title: "", ariaLabel: "", updatedAt: null, ageMs: null});
+
+function parseMissionUpdatedAt(raw) {
+  if (typeof raw !== "string") return null;
+  const stamp = raw.trim();
+  const match = MISSION_STAMP.exec(stamp);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const frac = match[7] || "";
+  const zone = match[8];
+  if (month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59 || second > 59) return null;
+  let offsetMin = 0;
+  if (zone !== "Z") {
+    const sign = zone[0] === "-" ? -1 : 1;
+    const zh = Number(zone.slice(1, 3));
+    const zm = Number(zone.slice(4, 6));
+    if (zh > 23 || zm > 59) return null;
+    offsetMin = sign * (zh * 60 + zm);
+  }
+  const ms = Number((frac + "000").slice(0, 3));
+  const at = Date.UTC(year, month - 1, day, hour, minute - offsetMin, second, ms);
+  if (!Number.isFinite(at)) return null;
+  const zoned = new Date(at + offsetMin * 60000);
+  if (
+    zoned.getUTCFullYear() !== year
+    || zoned.getUTCMonth() !== month - 1
+    || zoned.getUTCDate() !== day
+    || zoned.getUTCHours() !== hour
+    || zoned.getUTCMinutes() !== minute
+    || zoned.getUTCSeconds() !== second
+  ) return null;
+  return {stamp, at};
+}
+
+function relativeAgeLabel(ageMs) {
+  const seconds = Math.floor(ageMs / 1000);
+  if (seconds < 60) return seconds + "s ago";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + "m ago";
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + "h ago";
+  return Math.floor(hours / 24) + "d ago";
+}
+
+export function missionUpdatedView(mission, options = {}) {
+  if (!mission || options.preview === true) return HIDDEN_UPDATED;
+  const parsed = parseMissionUpdatedAt(mission.updated_at);
+  const now = options.now;
+  if (!parsed || typeof now !== "number" || !Number.isFinite(now)) return HIDDEN_UPDATED;
+  if (parsed.at - now > UPDATED_FUTURE_SKEW_MS) return HIDDEN_UPDATED;
+  const ageMs = Math.max(0, now - parsed.at);
+  const label = "Updated " + relativeAgeLabel(ageMs);
+  return {
+    visible: true,
+    label,
+    title: parsed.stamp,
+    ariaLabel: label + " (" + parsed.stamp + ")",
+    updatedAt: parsed.stamp,
+    ageMs,
+  };
+}
+
 export function missionSnapshot(mission) {
   if (!mission) return null;
   return {
     id: mission.id,
     goal: mission.goal,
     created_at: mission.created_at,
+    updated_at: mission.updated_at,
     mode: mission.mode,
     budget: mission.budget,
     status: "pending",

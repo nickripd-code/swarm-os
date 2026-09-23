@@ -1,11 +1,11 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,missionUpdatedView} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
 const statusName = status => ({created:"Ready",running:"Thinking",completed:"Done",blocked:"Blocked",failed:"Failed",stopped:"Stopped",pending:"Queued",paused:"Paused",waiting:"Waiting"}[status] || status);
 const symbol = status => ({created:"·",running:"",completed:"✓",blocked:"?",failed:"!",stopped:"■"}[status] || "·");
 const colors = ["#c6b4ef","#edbd9e","#aed8cf","#e6cd90","#b5cbe3","#dfb9ca"];
-let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null, hudTick=null, notifyArmed=false, killAvailable=false;
+let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null, hudTick=null, updatedTick=null, notifyArmed=false, killAvailable=false;
 let eventLog=[], replayCursor=-1, replayLive=true, replayTimer=null, sourceMission=null;
 const elements=new Map();
 const bot = color => '<span class="bot" style="--agent-color:'+color+'" aria-hidden="true"><span class="ear ear-left"></span><span class="ear ear-right"></span><span class="visor"><i></i><i></i><b class="mouth"></b></span></span>';
@@ -38,6 +38,21 @@ function formatElapsed(ms){
   if(h)return h+"h "+(m%60)+"m";
   if(m)return m+"m "+(s%60)+"s";
   return s+"s";
+}
+function renderUpdatedChip(now=Date.now()){
+  const el=$("missionUpdated");
+  if(!el)return false;
+  const view=missionUpdatedView(state.mission,{preview:!!state.preview,now});
+  el.hidden=!view.visible;
+  el.textContent=view.visible?view.label:"";
+  if(view.visible){
+    el.title=view.title;
+    el.setAttribute("aria-label",view.ariaLabel);
+  }else{
+    el.removeAttribute("title");
+    el.removeAttribute("aria-label");
+  }
+  return view.visible;
 }
 function renderHud(){
   const mission=state.mission, status=mission?.status||"idle", mode=missionMode(state);
@@ -81,6 +96,13 @@ function renderHud(){
   const running=!!mission&&!terminal.has(status)&&replayLive&&!state.preview;
   if(running&&!hudTick)hudTick=setInterval(renderHud,1000);
   if(!running&&hudTick){clearInterval(hudTick);hudTick=null;}
+  const showUpdated=renderUpdatedChip();
+  if(showUpdated&&!updatedTick){
+    updatedTick=setInterval(()=>{
+      if(!renderUpdatedChip()){clearInterval(updatedTick);updatedTick=null;}
+    },1000);
+  }
+  if(!showUpdated&&updatedTick){clearInterval(updatedTick);updatedTick=null;}
 }
 function clearAlerts(){if($("alerts"))$("alerts").replaceChildren();}
 function pushAlert(alert){
@@ -315,6 +337,7 @@ function reset(mission){
   if($("answerText"))$("answerText").value="";
   showNotice("");setCommandStatus("");zoom=1;$("zoomValue").textContent="100%";clearAlerts();
   if(hudTick){clearInterval(hudTick);hudTick=null;}
+  if(updatedTick){clearInterval(updatedTick);updatedTick=null;}
 }
 function stopReplayPlay(){
   if(replayTimer){clearInterval(replayTimer);replayTimer=null;}
