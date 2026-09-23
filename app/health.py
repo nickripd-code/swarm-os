@@ -206,10 +206,11 @@ async def browser_health_status() -> dict:
     health = await provider.health()
     return {
         "configured": provider.configured(),
-        "provider": "playwright",
+        "provider": provider.provider_id,
         "status": health.status,
         "detail": health.detail,
         "tools": health.tools,
+        "remote": provider.uses_remote,
         "fallback": False,
     }
 
