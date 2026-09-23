@@ -88,7 +88,7 @@ class SwarmRuntime:
         self.started_at: dict[UUID, datetime] = {}
         self.runs: dict[UUID, asyncio.Task] = {}
         self.wallet = WalletAdapter()
-        self.controller = controller or build_controller()
+        self.controller = controller or build_controller(outcome_store=store)
         self.lock = asyncio.Lock()
         self.max_retries = max_retries
         self.retry_base_seconds = retry_base_seconds
@@ -834,6 +834,10 @@ class SwarmRuntime:
 
     async def model_call(self, mission: Mission, actor: AgentSpec, kind: str, call):
         self.check_agent(mission.id, actor.id)
+        router = getattr(self.controller, "router", None)
+        note_mission = getattr(router, "note_mission", None)
+        if callable(note_mission):
+            note_mission(mission.id)
         self.resources.authorize_start(mission)
         model = getattr(self.controller, "model", "demo")
         await self.emit(mission.id, EventType.LLM_STARTED, {"kind": kind, "model": model,

@@ -3642,7 +3642,8 @@ def build_router(model_provider: ModelProvider | None = None,
                  vertex: ModelProvider | None = None,
                  local: ModelProvider | None = None,
                  vllm: ModelProvider | None = None,
-                 llamacpp: ModelProvider | None = None, **kwargs) -> ModelRouter:
+                 llamacpp: ModelProvider | None = None,
+                 outcome_store: Any | None = None, **kwargs) -> ModelRouter:
     """Register configured ModelProviders. OpenAI-only stays a one-entry catalog."""
     provider = model_provider or build_model_provider(
         xai=xai, anthropic=anthropic, mistral=mistral, gemini=gemini, cohere=cohere,
@@ -3742,12 +3743,13 @@ def build_router(model_provider: ModelProvider | None = None,
     _register_if_configured(providers, ollama)
     _register_if_configured(providers, extra_vllm)
     _register_if_configured(providers, extra_llamacpp)
-    return ModelRouter(providers)
+    return ModelRouter(providers, outcome_store=outcome_store)
 
 
-def build_controller(model_provider: ModelProvider | None = None, **kwargs) -> OpenAIProvider:
+def build_controller(model_provider: ModelProvider | None = None,
+                     outcome_store: Any | None = None, **kwargs) -> OpenAIProvider:
     provider = model_provider or build_model_provider(**kwargs)
-    router = build_router(provider, **kwargs)
+    router = build_router(provider, outcome_store=outcome_store, **kwargs)
     if isinstance(provider, FailoverModelProvider):
         model = getattr(provider.primary, "model", None)
     else:
