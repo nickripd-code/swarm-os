@@ -404,3 +404,67 @@ export function replayView(log, index, options = {}) {
         : "Recorded events only · not a simulation"),
   };
 }
+
+const EVENT_STAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})$/;
+
+function hiddenLastEvent() {
+  return {visible: false, label: "", title: "", ariaLabel: "", createdAt: null};
+}
+
+function unavailableLastEvent() {
+  return {visible: true, label: "unavailable", title: "", ariaLabel: "unavailable", createdAt: null};
+}
+
+function parseEventCreatedAt(raw) {
+  if (typeof raw !== "string" || raw === "" || raw !== raw.trim()) return null;
+  const match = EVENT_STAMP.exec(raw);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const fraction = match[7] ? Number(match[7].padEnd(3, "0").slice(0, 3)) : 0;
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return null;
+  let offsetMinutes = 0;
+  if (match[8] !== "Z") {
+    const sign = match[8][0] === "-" ? -1 : 1;
+    const offsetHour = Number(match[8].slice(1, 3));
+    const offsetMinute = Number(match[8].slice(4, 6));
+    if (offsetHour > 23 || offsetMinute > 59) return null;
+    offsetMinutes = sign * (offsetHour * 60 + offsetMinute);
+  }
+  const utc = Date.UTC(year, month - 1, day, hour, minute, second, fraction) - offsetMinutes * 60000;
+  if (!Number.isFinite(utc) || utc <= 0) return null;
+  const wall = new Date(utc + offsetMinutes * 60000);
+  if (
+    wall.getUTCFullYear() !== year ||
+    wall.getUTCMonth() !== month - 1 ||
+    wall.getUTCDate() !== day ||
+    wall.getUTCHours() !== hour ||
+    wall.getUTCMinutes() !== minute ||
+    wall.getUTCSeconds() !== second
+  ) return null;
+  const shown = new Date(utc);
+  const hh = String(shown.getUTCHours()).padStart(2, "0");
+  const mm = String(shown.getUTCMinutes()).padStart(2, "0");
+  const ss = String(shown.getUTCSeconds()).padStart(2, "0");
+  return {label: hh + ":" + mm + ":" + ss + "Z", stamp: raw};
+}
+
+export function lastEventAtView(events, options = {}) {
+  if (!options.mission || options.preview === true) return hiddenLastEvent();
+  if (!Array.isArray(events) || events.length < 1) return hiddenLastEvent();
+  const newest = events[events.length - 1];
+  if (!newest || typeof newest !== "object") return unavailableLastEvent();
+  const parsed = parseEventCreatedAt(newest.created_at);
+  if (!parsed) return unavailableLastEvent();
+  return {
+    visible: true,
+    label: parsed.label,
+    title: parsed.stamp,
+    ariaLabel: parsed.label,
+    createdAt: parsed.stamp,
+  };
+}
