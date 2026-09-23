@@ -128,6 +128,44 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+export const ANSWER_CONSUMED_UNAVAILABLE = "unavailable";
+const ANSWER_CONSUMED_EVENT = "user.answer_consumed";
+/** Prefix of a loaded event log. A missing feed stays null — never an invented []. */
+export function recordedAnswerConsumedFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+/**
+ * Read-only count of user.answer_consumed events on the loaded feed.
+ * Hidden with no mission or in preview. A missing or unreadable feed is
+ * ANSWERS CONSUMED unavailable, not 0. An explicit empty list (including a
+ * cursor before any event) is 0. A non-string event_type is unreadable and fails closed.
+ * user.answered, mission.question, and other events are not counted.
+ * The label is a count only — never spend.
+ */
+export function answerConsumedCountView(feed, options = {}) {
+  const visible = options.visible === true;
+  if (!visible) return {hidden: true, known: false, count: null, label: ""};
+  if (!Array.isArray(feed)) {
+    return {hidden: false, known: false, count: null, label: "ANSWERS CONSUMED " + ANSWER_CONSUMED_UNAVAILABLE};
+  }
+  let count = 0;
+  for (const event of feed) {
+    if (!event || typeof event !== "object" || Array.isArray(event)) continue;
+    const type = event.event_type;
+    if (typeof type !== "string") {
+      if (type != null) {
+        return {hidden: false, known: false, count: null, label: "ANSWERS CONSUMED " + ANSWER_CONSUMED_UNAVAILABLE};
+      }
+      continue;
+    }
+    if (type === ANSWER_CONSUMED_EVENT) count += 1;
+  }
+  return {hidden: false, known: true, count, label: "ANSWERS CONSUMED " + count};
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
