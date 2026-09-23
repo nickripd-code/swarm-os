@@ -82,6 +82,14 @@
           <div id="emptyMap" class="empty-map">
             <div class="empty-orb bot"><span class="visor"><i></i><i></i></span><span class="mouth"></span><span class="ear ear-left"></span><span class="ear ear-right"></span></div>
             <h3>Your organization appears here.</h3><p>Agents spawn top-to-bottom. Select one to inspect its task, model, capabilities and communications.</p>
+            <section class="setup-checklist-wrap" aria-labelledby="setupChecklistTitle">
+              <span class="eyebrow" id="setupChecklistTitle">FIRST RUN</span>
+              <ul id="setupChecklist" class="setup-checklist">
+                <li data-status="unavailable"><span>Model providers</span><b>unavailable</b><small>unavailable</small></li>
+                <li data-status="unavailable"><span>Database path</span><b>unavailable</b><small>unavailable</small></li>
+                <li data-status="unavailable"><span>Docker Compose</span><b>unavailable</b><small>unavailable</small></li>
+              </ul>
+            </section>
             <button id="emptyPreview" class="secondary-button" type="button">Explore a recorded-style preview <span aria-hidden="true">↗</span></button>
           </div>
         </div>

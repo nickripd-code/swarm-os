@@ -21,6 +21,7 @@ from .health import (
     selfmod_health_status, together_status, vertex_status, vllm_health_status,
     workspace_health_status, xai_status,
 )
+from .setup_checklist import first_run_checklist
 from .tools import tools_status
 from .mission_jobs import build_mission_worker_pool
 
@@ -67,29 +68,33 @@ async def index(): return FileResponse(BASE / "static" / "index.html")
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "openai": openai_status(), "openrouter": openrouter_status(),
-            "xai": xai_status(), "anthropic": anthropic_status(),
-            "mistral": mistral_status(), "gemini": gemini_status(), "cohere": cohere_status(),
-            "deepseek": deepseek_status(), "together": together_status(),
-            "groq": groq_status(), "fireworks": fireworks_status(),
-            "azure": azure_status(), "perplexity": perplexity_status(),
-            "bedrock": bedrock_status(),
-            "huggingface": huggingface_status(),
-            "cerebras": cerebras_status(),
-            "sambanova": sambanova_status(),
-            "vertex": vertex_status(),
-            "ollama": await ollama_health_status(), "vllm": await vllm_health_status(),
-            "llamacpp": await llamacpp_health_status(),
-            "tools": tools_status(runtime.tools),
-            "browser": await browser_health_status(),
-            "selfmod": await selfmod_health_status(),
-            "workspace": await workspace_health_status(),
-            "process_workers": {
-                "enabled": process_pool is not None,
-                "running": bool(process_pool and process_pool.running),
-                "workers": len(process_pool.workers) if process_pool else 0,
-            },
-            "active_missions": len(runtime.runs)}
+    payload = {"ok": True, "openai": openai_status(), "openrouter": openrouter_status(),
+               "xai": xai_status(), "anthropic": anthropic_status(),
+               "mistral": mistral_status(), "gemini": gemini_status(), "cohere": cohere_status(),
+               "deepseek": deepseek_status(), "together": together_status(),
+               "groq": groq_status(), "fireworks": fireworks_status(),
+               "azure": azure_status(), "perplexity": perplexity_status(),
+               "bedrock": bedrock_status(),
+               "huggingface": huggingface_status(),
+               "cerebras": cerebras_status(),
+               "sambanova": sambanova_status(),
+               "vertex": vertex_status(),
+               "ollama": await ollama_health_status(), "vllm": await vllm_health_status(),
+               "llamacpp": await llamacpp_health_status(),
+               "tools": tools_status(runtime.tools),
+               "browser": await browser_health_status(),
+               "selfmod": await selfmod_health_status(),
+               "workspace": await workspace_health_status(),
+               "process_workers": {
+                   "enabled": process_pool is not None,
+                   "running": bool(process_pool and process_pool.running),
+                   "workers": len(process_pool.workers) if process_pool else 0,
+               },
+               "active_missions": len(runtime.runs)}
+    payload["setup"] = first_run_checklist(
+        payload, database_path=database_path, compose_root=BASE.parent,
+    )
+    return payload
 
 
 @app.get("/api/missions")
