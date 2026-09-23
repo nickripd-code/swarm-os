@@ -228,6 +228,122 @@ export function resultMetaText(mission) {
   if (result.failure_class) bits.push(result.failure_class);
   return bits.join(" · ");
 }
+export const QUESTION_AGE_UNAVAILABLE = "unavailable";
+const QUESTION_AGE_SKEW_MS = 120000;
+const QUESTION_AGE_HIDDEN = Object.freeze({
+  hidden: true, label: "", known: false, at: null, title: "",
+});
+const QUESTION_STAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})$/;
+
+function questionRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function questionToken(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+function questionStamp(raw) {
+  if (typeof raw !== "string") return null;
+  const stamp = raw.trim();
+  const match = QUESTION_STAMP.exec(stamp);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const frac = match[7] || "";
+  const zone = match[8];
+  if (month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59 || second > 59) return null;
+  let offsetMin = 0;
+  if (zone !== "Z") {
+    const sign = zone[0] === "-" ? -1 : 1;
+    const zh = Number(zone.slice(1, 3));
+    const zm = Number(zone.slice(4, 6));
+    if (zh > 23 || zm > 59) return null;
+    offsetMin = sign * (zh * 60 + zm);
+  }
+  const ms = Number((frac + "000").slice(0, 3));
+  const at = Date.UTC(year, month - 1, day, hour, minute - offsetMin, second, ms);
+  if (!Number.isFinite(at) || at <= 0) return null;
+  const zoned = new Date(at + offsetMin * 60000);
+  if (
+    zoned.getUTCFullYear() !== year
+    || zoned.getUTCMonth() !== month - 1
+    || zoned.getUTCDate() !== day
+    || zoned.getUTCHours() !== hour
+    || zoned.getUTCMinutes() !== minute
+    || zoned.getUTCSeconds() !== second
+  ) return null;
+  return {stamp, at};
+}
+function unavailableQuestionAge() {
+  return {
+    hidden: false,
+    label: QUESTION_AGE_UNAVAILABLE,
+    known: false,
+    at: null,
+    title: "",
+  };
+}
+function relativeQuestionAge(ageMs) {
+  const seconds = Math.floor(ageMs / 1000);
+  if (seconds < 60) return seconds + "s ago";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + "m ago";
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + "h ago";
+  return Math.floor(hours / 24) + "d ago";
+}
+function knownQuestionAge(parsed, now) {
+  const clock = typeof now === "number" && Number.isFinite(now) && now > 0 ? now : null;
+  const label = clock === null
+    ? "Asked " + parsed.stamp
+    : "Asked " + relativeQuestionAge(Math.max(0, clock - parsed.at));
+  return {
+    hidden: false,
+    label,
+    known: true,
+    at: parsed.stamp,
+    title: parsed.stamp,
+  };
+}
+/**
+ * Age of the shell's single pending question.
+ * Pending matches a count of 1: one object with a readable question_id and prompt.
+ * null and a missing key are not pending. Any other present value is unreadable.
+ * The clock is the oldest mission.question created_at for that question_id.
+ * Hidden with no mission, in preview, and when nothing is pending.
+ */
+export function questionAgeChip(state, options = {}) {
+  if (!state || state.preview === true || options.preview === true || !state.mission) {
+    return QUESTION_AGE_HIDDEN;
+  }
+  const field = state.mission.pending_question;
+  if (field == null) return QUESTION_AGE_HIDDEN;
+  if (!questionRecord(field)) return unavailableQuestionAge();
+  const questionId = questionToken(field.question_id);
+  const question = questionToken(field.question);
+  if (!questionId || !question) return unavailableQuestionAge();
+  const events = state.events;
+  if (!Array.isArray(events)) return unavailableQuestionAge();
+  let oldest = null;
+  let matched = false;
+  for (const event of events) {
+    if (!event || event.event_type !== "mission.question") continue;
+    const payload = event.payload;
+    if (!questionRecord(payload) || questionToken(payload.question_id) !== questionId) continue;
+    matched = true;
+    const parsed = questionStamp(event.created_at);
+    if (!parsed) return unavailableQuestionAge();
+    if (!oldest || parsed.at < oldest.at) oldest = parsed;
+  }
+  if (!matched || !oldest) return unavailableQuestionAge();
+  const now = options.now;
+  const clock = typeof now === "number" && Number.isFinite(now) && now > 0 ? now : null;
+  if (clock !== null && oldest.at - clock > QUESTION_AGE_SKEW_MS) return unavailableQuestionAge();
+  return knownQuestionAge(oldest, now);
+}
 export function alertFromEvent(e) {
   const p = e.payload || {};
   switch (e.event_type) {
