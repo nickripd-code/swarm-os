@@ -95,6 +95,9 @@ async def test_unconfigured_live_provider_fails_closed():
 def test_factory_never_enables_live_spend(monkeypatch):
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_should_never_be_read")
     monkeypatch.setenv("WALLET_PRIVATE_KEY", "0xshould-never-be-read")
+    monkeypatch.delenv("SWARM_LIVE_PAYMENTS", raising=False)
+    monkeypatch.delenv("SWARM_STRIPE_MERCHANT_ALLOWLIST", raising=False)
+    monkeypatch.delenv("SWARM_STRIPE_OBJECTIVE_CAP_USD", raising=False)
     assert live_wallet_configured() is False
     default = build_payment_provider()
     live = build_live_payment_provider()
