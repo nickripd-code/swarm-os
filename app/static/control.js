@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,recentMissionRows} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -434,17 +434,39 @@ async function loadMission(id){
       if(gen!==generation)return;
       for(const e of events)ingestRecorded(e);
     }catch{}
-    connect(id,gen);schedule();
+    connect(id,gen);schedule();refreshHistory();
   }catch(error){showNotice(error.message);}
+}
+function renderRecentMissions(rows){
+  const empty=$("recentMissionsEmpty"),table=$("recentMissionsTable"),list=$("recentMissionsList");
+  if(!empty||!table||!list)return;
+  list.replaceChildren();
+  if(!rows.length){empty.hidden=false;table.hidden=true;return;}
+  empty.hidden=true;table.hidden=false;
+  const current=state.mission&&!state.preview?state.mission.id:"";
+  for(const row of rows){
+    const item=document.createElement("li");
+    const button=document.createElement("button");
+    button.type="button";
+    button.dataset.missionId=row.id;
+    if(row.id===current)button.setAttribute("aria-current","true");
+    const started=row.startedAt
+      ? '<time class="recent-mission-started" datetime="'+esc(row.startedAt)+'">'+esc(row.startedAt)+'</time>'
+      : '<span class="recent-mission-started">unknown</span>';
+    button.innerHTML='<span class="recent-mission-id">'+esc(row.id)+'</span><span class="recent-mission-status">'+esc(row.status)+'</span><span class="recent-mission-goal">'+(row.snippet?esc(row.snippet):"—")+'</span>'+started;
+    item.append(button);
+    list.append(item);
+  }
 }
 async function refreshHistory(){
   try{
     const missions=await request("/api/missions");
+    renderRecentMissions(recentMissionRows(missions));
     $("history").replaceChildren(new Option("Mission history",""));
     for(const m of missions)$("history").add(new Option(m.goal.slice(0,60)+" · "+m.status,m.id));
     if(state.mission&&!state.preview)$("history").value=state.mission.id;
     return missions;
-  }catch{return [];}
+  }catch{renderRecentMissions([]);return [];}
 }
 $("missionForm").addEventListener("submit",async e=>{
   e.preventDefault();if($("launch").disabled)return;
@@ -562,6 +584,12 @@ if($("commandForm"))$("commandForm").addEventListener("submit",e=>{
   runCommand($("commandInput")?$("commandInput").value:"");
 });
 $("history").addEventListener("change",()=>{if($("history").value)loadMission($("history").value);});
+if($("recentMissionsList"))$("recentMissionsList").addEventListener("click",event=>{
+  const button=event.target.closest("button[data-mission-id]");
+  if(!button||!$("recentMissionsList").contains(button))return;
+  const id=button.getAttribute("data-mission-id");
+  if(id)loadMission(id);
+});
 $("answerForm").addEventListener("submit",async e=>{
   e.preventDefault();
   const open=pendingQuestion(),id=state.mission?.id;

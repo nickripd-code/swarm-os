@@ -40,6 +40,15 @@
       </div>
     </section>
 
+    <section class="recent-missions" id="recentMissions" aria-label="Recent missions">
+      <div class="recent-missions-heading"><span class="eyebrow">RECENT MISSIONS</span><span class="recent-missions-note">Recorded missions only</span></div>
+      <p id="recentMissionsEmpty" class="recent-missions-empty">No recorded missions.</p>
+      <div id="recentMissionsTable" hidden>
+        <div class="recent-missions-columns" aria-hidden="true"><span>id</span><span>status</span><span>goal</span><span>started_at</span></div>
+        <ol id="recentMissionsList" class="recent-missions-list"></ol>
+      </div>
+    </section>
+
     <div class="notice" id="notice" role="alert" hidden></div>
 
     <section class="objective-hud" id="objectiveHud" aria-label="Mission status">
