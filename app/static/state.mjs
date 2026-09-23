@@ -404,3 +404,46 @@ export function replayView(log, index, options = {}) {
         : "Recorded events only · not a simulation"),
   };
 }
+
+export const BUDGET_WARNING_COUNT_UNAVAILABLE = "BUDGET WARNINGS unavailable";
+
+/** Same acceptance as the activity budget-warning line: finite, non-negative token_spent and token_budget. */
+function isAcceptedBudgetWarning(event) {
+  if (!event || typeof event !== "object" || event.event_type !== "budget.warning") return false;
+  const payload = event.payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const spent = finiteNumber(payload.token_spent);
+  const budget = finiteNumber(payload.token_budget);
+  return spent !== null && spent >= 0 && budget !== null && budget >= 0;
+}
+
+/** Prefix of a loaded event log. A missing feed stays null — never an invented []. */
+export function recordedBudgetWarningCountFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+
+/**
+ * Read-only count of accepted budget.warning events on the loaded feed.
+ * Hidden with no mission, in preview, or when the caller marks the chip not visible.
+ * A missing or unreadable feed is BUDGET WARNINGS unavailable, never 0.
+ * An explicit empty list (including a cursor before any event) is BUDGET WARNINGS 0.
+ * budget.updated, payment events, and warnings without finite non-negative spent/budget are not counted.
+ * The label never includes a spend amount.
+ */
+export function budgetWarningCountView(feed, options = {}) {
+  if (options.visible !== true) {
+    return {hidden: true, known: false, count: null, label: ""};
+  }
+  if (!Array.isArray(feed)) {
+    return {hidden: false, known: false, count: null, label: BUDGET_WARNING_COUNT_UNAVAILABLE};
+  }
+  let count = 0;
+  for (const event of feed) {
+    if (isAcceptedBudgetWarning(event)) count += 1;
+  }
+  return {hidden: false, known: true, count, label: "BUDGET WARNINGS " + count};
+}
