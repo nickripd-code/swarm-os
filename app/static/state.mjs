@@ -128,6 +128,46 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+export const COMPLETE_COUNT_UNAVAILABLE = "unavailable";
+const COMPLETE_COUNT_EVENT = "mission.completed";
+/** Prefix of a loaded event log. A missing feed stays null — never an invented []. */
+export function recordedCompleteCountFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+/**
+ * Read-only count of recorded mission.completed events on the loaded feed.
+ * Same completion type as last-mission-complete-at / complete-age: the catalog
+ * value is exactly mission.completed. task.completed, llm.completed,
+ * job.completed, tool.completed, verification.passed, and mission.succeeded /
+ * mission.finished are not completions. Hidden with no mission or in preview.
+ * A missing or unreadable feed is COMPLETES unavailable, not 0. An explicit
+ * empty list (including a cursor before any event) is 0. A non-string
+ * event_type is unreadable and fails closed. The label is a count only.
+ */
+export function completeCountView(feed, options = {}) {
+  const visible = options.visible === true;
+  if (!visible) return {hidden: true, known: false, count: null, label: ""};
+  if (!Array.isArray(feed)) {
+    return {hidden: false, known: false, count: null, label: "COMPLETES " + COMPLETE_COUNT_UNAVAILABLE};
+  }
+  let count = 0;
+  for (const event of feed) {
+    if (!event || typeof event !== "object" || Array.isArray(event)) continue;
+    const type = event.event_type;
+    if (typeof type !== "string") {
+      if (type != null) {
+        return {hidden: false, known: false, count: null, label: "COMPLETES " + COMPLETE_COUNT_UNAVAILABLE};
+      }
+      continue;
+    }
+    if (type === COMPLETE_COUNT_EVENT) count += 1;
+  }
+  return {hidden: false, known: true, count, label: "COMPLETES " + count};
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
