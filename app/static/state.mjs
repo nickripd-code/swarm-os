@@ -1,5 +1,19 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const MODEL_CALL_EMPTY = "No recorded model call.";
+export const MODEL_CALL_PREVIEW = "Preview runs no models.";
+export const MODEL_CALL_NOTE = "Recorded model events only";
+export const MODEL_CALL_UNKNOWN = "unknown";
+const MODEL_CALL_STATUS = {
+  "llm.started": "started",
+  "llm.completed": "completed",
+  "llm.failed": "failed",
+  "llm.retry": "retrying",
+  "llm.failover": "failover",
+};
+const PROVIDER_ID = /^[a-z][a-z0-9-]{0,31}$/;
+const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$/;
+const ROLE_ID = /^[a-z][a-z0-9_]{0,31}$/;
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -96,6 +110,58 @@ export function formatUsd(value) {
 }
 export function tokenTotal(usage) {
   return (usage?.input || 0) + (usage?.output || 0) + (usage?.reasoning || 0);
+}
+function identifier(value, pattern) {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  return pattern.test(text) ? text : null;
+}
+function modelCallPayload(event) {
+  const payload = event?.payload;
+  return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+}
+function providerId(payload) {
+  const direct = identifier(payload.provider, PROVIDER_ID);
+  if (direct) return direct;
+  const route = payload.route && typeof payload.route === "object" && !Array.isArray(payload.route)
+    ? payload.route
+    : null;
+  const routed = identifier(route?.provider, PROVIDER_ID);
+  if (routed) return routed;
+  return identifier(payload.to_provider, PROVIDER_ID);
+}
+function modelId(payload) {
+  const direct = identifier(payload.model, MODEL_ID);
+  if (direct) return direct;
+  const route = payload.route && typeof payload.route === "object" && !Array.isArray(payload.route)
+    ? payload.route
+    : null;
+  return identifier(route?.model, MODEL_ID);
+}
+export function lastModelCall(state) {
+  const hidden = {empty: true, hidden: true, note: MODEL_CALL_EMPTY, call: null};
+  if (!state || !state.mission) return hidden;
+  if (state.preview) {
+    return {empty: true, hidden: false, note: MODEL_CALL_PREVIEW, call: null};
+  }
+  const events = Array.isArray(state.events) ? state.events : [];
+  for (const event of events) {
+    const status = MODEL_CALL_STATUS[event?.event_type];
+    if (!status) continue;
+    const payload = modelCallPayload(event);
+    return {
+      empty: false,
+      hidden: false,
+      note: MODEL_CALL_NOTE,
+      call: {
+        provider: providerId(payload) || MODEL_CALL_UNKNOWN,
+        model: modelId(payload) || MODEL_CALL_UNKNOWN,
+        role: identifier(payload.kind, ROLE_ID) || MODEL_CALL_UNKNOWN,
+        status,
+      },
+    };
+  }
+  return {empty: true, hidden: false, note: MODEL_CALL_EMPTY, call: null};
 }
 export function costHudView(usage = {}) {
   const input = usage.input || 0;
