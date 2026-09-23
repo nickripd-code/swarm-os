@@ -31,6 +31,7 @@ def test_compact_shell_preserves_every_javascript_mount_point():
         "answerForm", "mapViewport", "world", "connections", "nodes", "emptyMap",
         "agentCount", "taskCount", "tokenCount", "inspectorContent", "activity",
         "commandBar", "commandForm", "resultPanel", "stopAll", "alerts",
+        "agentRoster", "rosterCount", "rosterNote", "rosterEmpty", "rosterList",
     }
     assert required <= set(parser.ids)
     assert len(parser.ids) == len(set(parser.ids))

@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,agentRosterView} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -124,9 +124,51 @@ function armNotifications(){
   if(typeof Notification!=="undefined"&&Notification.permission==="default")Promise.resolve(Notification.requestPermission()).catch(()=>{});
 }
 function schedule(){if(!frame)frame=requestAnimationFrame(()=>{frame=0;render();});}
+function rosterParentText(row){
+  if(row.parentLink==="known")return row.parentRole?label(row.parentRole):"parent recorded";
+  if(row.parentLink==="missing")return "parent not in this mission";
+  if(row.parentLink==="self")return "parent is self";
+  return "no parent recorded";
+}
+function rosterRow(row,depth){
+  const li=document.createElement("li");
+  li.className="roster-row"+(depth==null?" unlinked":"");
+  if(typeof depth==="number")li.style.paddingLeft=(8+depth*14)+"px";
+  const role=row.role?label(row.role):"role not recorded";
+  const status=row.status?statusName(row.status):"status not recorded";
+  li.textContent=role+" · "+status+" · "+rosterParentText(row);
+  return li;
+}
+function renderRoster(){
+  const empty=$("rosterEmpty"),list=$("rosterList"),count=$("rosterCount"),note=$("rosterNote");
+  if(!empty||!list||!count)return;
+  const view=agentRosterView(state.agents,{
+    preview:state.preview===true,
+    replay:state.preview!==true&&!!state.mission&&!replayLive,
+    missionLoaded:state.preview!==true&&!!state.mission,
+  });
+  count.textContent=String(view.count);
+  if(note)note.textContent=view.note;
+  empty.hidden=!view.empty;
+  empty.textContent=view.message;
+  list.hidden=view.empty;
+  list.replaceChildren();
+  if(view.empty)return;
+  const byId=new Map(view.rows.map(row=>[row.id,row]));
+  const seen=new Set();
+  for(const item of view.outline){
+    const row=byId.get(item.id);if(!row||seen.has(row.id))continue;
+    seen.add(row.id);list.append(rosterRow(row,item.depth));
+  }
+  for(const id of view.unlinked){
+    const row=byId.get(id);if(!row||seen.has(row.id))continue;
+    seen.add(row.id);list.append(rosterRow(row,null));
+  }
+}
 function render(){
   const mission=state.mission, status=mission?.status||"idle";
   renderHud();
+  renderRoster();
   $("modeLabel").textContent=state.preview?"PREVIEW":(!replayLive?"REPLAY":status.toUpperCase());
   $("modeLabel").className="mode-tag "+(state.preview?"preview":(!replayLive?"replay":status));
   $("agentCount").textContent=state.agents.size;

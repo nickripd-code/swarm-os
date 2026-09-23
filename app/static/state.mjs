@@ -141,6 +141,18 @@ export function applyEvent(state, e) {
       state.agents.set(id, {...state.agents.get(id), ...p, id, status: p.status || "stopped"});
     }
   }
+  if (e.event_type === "agent.reparented") {
+    const id = p.id || p.agent_id;
+    const agent = id ? state.agents.get(id) : null;
+    if (agent && Object.prototype.hasOwnProperty.call(p, "parent_id")) {
+      agent.parent_id = p.parent_id;
+    }
+  }
+  if (e.event_type === "agent.retired") {
+    const id = p.id || p.agent_id;
+    const agent = id ? state.agents.get(id) : null;
+    if (agent) agent.status = p.status || "stopped";
+  }
   if (e.event_type.startsWith("task.")) {
     const id = p.id || p.task_id;
     if (id) {
@@ -324,6 +336,105 @@ export function layoutTree(agents, minimumWidth = 700) {
   for(const a of list) if(!visited.has(a.id)) {spans.set(a.id,250);place(a,50,0);}
   const depth=Math.max(0,...[...positions.values()].map(p=>p.depth));
   return {positions,width,height:Math.max(420,depth*230+320)};
+}
+export const ROSTER_NO_MISSION = "No mission loaded.";
+export const ROSTER_EMPTY = "No agents recorded for this mission.";
+export const ROSTER_PREVIEW = "Preview is not a live roster.";
+export const ROSTER_REPLAY_EMPTY = "No agents recorded at this point.";
+export const ROSTER_NOTE_LIVE = "Recorded role, status, and parent · missing parents stay unlinked";
+export const ROSTER_NOTE_PREVIEW = "Synthetic preview · not recorded agents";
+export const ROSTER_NOTE_REPLAY = "Replay · recorded agents only";
+function rosterId(value) {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return "";
+}
+function rosterText(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+function compareRoster(a, b) {
+  if (a.role < b.role) return -1;
+  if (a.role > b.role) return 1;
+  if (a.id < b.id) return -1;
+  if (a.id > b.id) return 1;
+  return 0;
+}
+function rosterRows(agents) {
+  const byId = new Map();
+  const list = agents instanceof Map ? [...agents.values()] : (Array.isArray(agents) ? agents : []);
+  for (const agent of list) {
+    if (!agent || typeof agent !== "object") continue;
+    const id = rosterId(agent.id);
+    if (!id) continue;
+    byId.set(id, agent);
+  }
+  const rows = [];
+  for (const [id, agent] of byId) {
+    const parentId = rosterId(agent.parent_id);
+    let parentLink = "none";
+    let parentRole = null;
+    let recordedParent = null;
+    if (!parentId) {
+      parentLink = "none";
+    } else if (parentId === id) {
+      parentLink = "self";
+      recordedParent = parentId;
+    } else if (byId.has(parentId)) {
+      parentLink = "known";
+      recordedParent = parentId;
+      parentRole = rosterText(byId.get(parentId).role);
+    } else {
+      parentLink = "missing";
+      recordedParent = parentId;
+    }
+    rows.push({
+      id,
+      role: rosterText(agent.role),
+      status: rosterText(agent.status),
+      parentId: recordedParent,
+      parentRole,
+      parentLink,
+    });
+  }
+  rows.sort(compareRoster);
+  return rows;
+}
+function linkRoster(rows) {
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const children = new Map();
+  for (const row of rows) {
+    if (row.parentLink !== "known") continue;
+    if (!children.has(row.parentId)) children.set(row.parentId, []);
+    children.get(row.parentId).push(row.id);
+  }
+  for (const ids of children.values()) ids.sort((a, b) => compareRoster(byId.get(a), byId.get(b)));
+  const outline = [];
+  const seen = new Set();
+  function walk(id, depth, trail) {
+    if (seen.has(id) || trail.has(id)) return;
+    seen.add(id);
+    outline.push({id, depth});
+    const next = new Set(trail);
+    next.add(id);
+    for (const child of children.get(id) || []) walk(child, depth + 1, next);
+  }
+  for (const row of rows) {
+    if (row.parentLink !== "known") walk(row.id, 0, new Set());
+  }
+  return {outline, unlinked: rows.filter((row) => !seen.has(row.id)).map((row) => row.id)};
+}
+export function agentRosterView(agents, options = {}) {
+  const preview = options.preview === true;
+  const replay = options.replay === true;
+  const missionLoaded = options.missionLoaded === true;
+  const note = preview ? ROSTER_NOTE_PREVIEW : (replay ? ROSTER_NOTE_REPLAY : ROSTER_NOTE_LIVE);
+  const blank = (message) => ({empty: true, count: 0, message, note, rows: [], outline: [], unlinked: []});
+  if (preview) return blank(ROSTER_PREVIEW);
+  if (!missionLoaded) return blank(ROSTER_NO_MISSION);
+  const rows = rosterRows(agents);
+  if (!rows.length) return blank(replay ? ROSTER_REPLAY_EMPTY : ROSTER_EMPTY);
+  const linked = linkRoster(rows);
+  return {empty: false, count: rows.length, message: "", note, rows, outline: linked.outline, unlinked: linked.unlinked};
 }
 export function recordEvent(log, e) {
   if (!Array.isArray(log) || !e || e.id == null || e.id === "") return false;
