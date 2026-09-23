@@ -1,5 +1,9 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const AGENT_ONLINE_UNAVAILABLE = "unavailable";
+const KNOWN_AGENT_STATUSES = new Set([
+  "created", "running", "paused", "completed", "failed", "stopped", "blocked",
+]);
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -96,6 +100,41 @@ export function formatUsd(value) {
 }
 export function tokenTotal(usage) {
   return (usage?.input || 0) + (usage?.output || 0) + (usage?.reasoning || 0);
+}
+function rosterEntries(source) {
+  if (Array.isArray(source)) return source;
+  if (source && typeof source === "object" && Array.isArray(source.agents)) return source.agents;
+  return null;
+}
+// Online/active is AgentStatus "running" only: the shell already paints that
+// status as the live working state. A bare agent_count is a different total
+// and is not an online count. Unknown statuses fail the whole count closed.
+export function agentOnlineCountView({mission = null, preview = false, roster = undefined} = {}) {
+  if (preview === true || !mission) {
+    return {hidden: true, label: "", known: false, count: null};
+  }
+  const entries = rosterEntries(roster);
+  if (!entries) {
+    return {hidden: false, label: AGENT_ONLINE_UNAVAILABLE, known: false, count: null};
+  }
+  const seen = new Set();
+  let count = 0;
+  for (const agent of entries) {
+    if (!agent || typeof agent !== "object" || Array.isArray(agent)) {
+      return {hidden: false, label: AGENT_ONLINE_UNAVAILABLE, known: false, count: null};
+    }
+    const id = agent.id;
+    if (typeof id !== "string" || !id || seen.has(id)) {
+      return {hidden: false, label: AGENT_ONLINE_UNAVAILABLE, known: false, count: null};
+    }
+    seen.add(id);
+    const status = agent.status;
+    if (typeof status !== "string" || !KNOWN_AGENT_STATUSES.has(status)) {
+      return {hidden: false, label: AGENT_ONLINE_UNAVAILABLE, known: false, count: null};
+    }
+    if (status === "running") count += 1;
+  }
+  return {hidden: false, label: String(count), known: true, count};
 }
 export function costHudView(usage = {}) {
   const input = usage.input || 0;
