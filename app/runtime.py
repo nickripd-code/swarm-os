@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
+from .budget import BudgetUpdateError, apply_limit_patch, limit_patch_values, same_timestamp
 from .events import EventType, event_type_for_mission, event_type_for_task
 from .org import OrganizationDesigner, is_org_action
 from .leases import IdempotencyError, IdempotencyGuard, LeaseConflict, LeaseError, WorkerLeases
@@ -18,7 +19,7 @@ from .mission_jobs import (
     parse_mission_task_item,
 )
 from .models import (
-    AgentSpec, AgentStatus, FailureClass, Mission, MissionEvent,
+    AgentSpec, AgentStatus, FailureClass, Mission, MissionBudgetPatch, MissionEvent,
     MissionStatus, PaymentIntent, PendingQuestion, Task, TaskStatus, utcnow,
 )
 from .policy import PolicyError, PolicyGate, PolicyRequest, interpret_approval
@@ -87,6 +88,7 @@ class SwarmRuntime:
         self.agent_jobs: dict[tuple[UUID, UUID], asyncio.Task] = {}
         self.started_at: dict[UUID, datetime] = {}
         self.runs: dict[UUID, asyncio.Task] = {}
+        self._live_missions: dict[UUID, Mission] = {}
         self.wallet = WalletAdapter()
         self.controller = controller or build_controller()
         self.lock = asyncio.Lock()
@@ -387,6 +389,7 @@ class SwarmRuntime:
 
     async def spawn(self, mission: Mission, role: str, purpose: str, parent: AgentSpec | None = None,
                     capabilities: list[str] | None = None) -> AgentSpec:
+        self._adopt_stored_limits(mission)
         self.check_stopped(mission.id)
         current = self.agents[mission.id]
         depth = parent.depth + 1 if parent else 0
@@ -480,9 +483,16 @@ class SwarmRuntime:
         return mission
 
     def remaining_runtime(self, mission: Mission) -> float:
+        self._adopt_stored_limits(mission)
         started = self.started_at.get(mission.id, mission.updated_at)
         elapsed = max((utcnow() - started).total_seconds() - mission.paused_seconds, 0)
         return mission.limits.max_runtime_seconds - elapsed
+
+    def _adopt_stored_limits(self, mission: Mission) -> None:
+        """Copy durable caps onto the working mission so the next check sees operator edits."""
+        saved = self.store.get_mission(mission.id)
+        if saved is not None:
+            mission.limits = saved.limits
 
     def available_tools(self, mission: Mission | None = None) -> list[str]:
         _ = mission
@@ -508,6 +518,7 @@ class SwarmRuntime:
 
     def consume_tool_call(self, mission: Mission) -> int:
         """Charge one tool-call against the mission budget. Fail closed when exhausted."""
+        self._adopt_stored_limits(mission)
         used = self.tool_calls_used(mission.id)
         self.policy.check_tool_budget(mission, used)
         used += 1
@@ -542,6 +553,7 @@ class SwarmRuntime:
     async def invoke_tool(self, mission: Mission, name: str, arguments: dict[str, Any] | None = None,
                           actor_id: UUID | None = None, *, idempotency_key: str | None = None) -> dict[str, Any]:
         """Charge max_tool_calls, then execute a real ToolProvider. Never invent success."""
+        self._adopt_stored_limits(mission)
         key = self._tool_idempotency_key(mission, name, arguments, idempotency_key)
         replay = self._replay_side_effect(mission.id, key)
         if replay is not None:
@@ -806,6 +818,7 @@ class SwarmRuntime:
         return {**payload, "resume": resume}
 
     async def _assign_unassigned_tasks(self, mission: Mission) -> list[Task]:
+        self._adopt_stored_limits(mission)
         assigned = {task.agent_id for task in self.tasks[mission.id]
                     if task.status not in {TaskStatus.STOPPED, TaskStatus.FAILED}}
         created: list[Task] = []
@@ -834,6 +847,7 @@ class SwarmRuntime:
 
     async def model_call(self, mission: Mission, actor: AgentSpec, kind: str, call):
         self.check_agent(mission.id, actor.id)
+        self._adopt_stored_limits(mission)
         self.resources.authorize_start(mission)
         model = getattr(self.controller, "model", "demo")
         await self.emit(mission.id, EventType.LLM_STARTED, {"kind": kind, "model": model,
@@ -892,6 +906,7 @@ class SwarmRuntime:
                 listed = lookup(metadata.get("provider"), metadata.get("model"))
                 if listed is not None:
                     listed_input, listed_output = listed
+        self._adopt_stored_limits(mission)
         outcome = self.resources.consume(mission, usage, listed_input, listed_output)
         extra = {
             "kind": kind,
@@ -921,6 +936,7 @@ class SwarmRuntime:
         paused = False
         held_mission_lease = False
         previous_status = mission.status
+        self._live_missions[mission.id] = mission
         try:
             try:
                 await self.claim_work(mission, "mission", str(mission.id))
@@ -1109,6 +1125,7 @@ class SwarmRuntime:
             mission.status = MissionStatus.FAILED
             mission.result = failure_payload("Unexpected runtime error", FailureClass.UNKNOWN_FAILURE)
         finally:
+            self._live_missions.pop(mission.id, None)
             if not held_mission_lease:
                 return
             try:
@@ -1214,6 +1231,7 @@ class SwarmRuntime:
         return [note.public_dict() for note in notes]
 
     def _state(self, mission: Mission, agent_id: UUID | None = None) -> dict[str, Any]:
+        self._adopt_stored_limits(mission)
         used = self.tool_calls_used(mission.id)
         return {"goal": mission.goal, "status": mission.status,
                 "agents": [a.model_dump(mode="json") for a in self.agents[mission.id]],
@@ -1248,6 +1266,7 @@ class SwarmRuntime:
 
     async def _worker_result(self, mission: Mission, agent: AgentSpec) -> dict[str, Any]:
         """Run WORK_FORMAT until the worker completes, blocks, asks a human, or a tool request fails closed."""
+        self._adopt_stored_limits(mission)
         max_rounds = max(mission.limits.max_tool_calls + 1, 1)
         for _ in range(max_rounds):
             self.check_agent(mission.id, agent.id)
@@ -1589,6 +1608,72 @@ class SwarmRuntime:
             await asyncio.gather(*jobs, return_exceptions=True)
         return ids
 
+    async def update_budget(self, mission_id: UUID, patch: MissionBudgetPatch) -> dict[str, Any]:
+        """Raise or lower allowlisted caps. Does not spend, settle, or approve live payment."""
+        set_values, delta_values = limit_patch_values(patch)
+        mission: Mission | None = None
+        changes: dict[str, dict] = {}
+        for _ in range(3):
+            loaded = self.store.load_mission_for_update(mission_id)
+            if loaded is None:
+                raise BudgetUpdateError("not_found", "Mission not found", 404)
+            mission, original = loaded
+            if (
+                patch.expected_updated_at is not None
+                and not same_timestamp(mission.updated_at, patch.expected_updated_at)
+            ):
+                raise BudgetUpdateError(
+                    "conflict",
+                    "Mission changed; resubmit with the current updated_at",
+                    409,
+                )
+            if mission.status in TERMINAL:
+                raise BudgetUpdateError(
+                    "terminal",
+                    "Mission is no longer accepting budget changes",
+                    409,
+                )
+            new_limits, changes = apply_limit_patch(
+                mission.limits,
+                set_values,
+                delta_values,
+                token_hard_cap=self.resources.settings.hard_cap,
+                effective_token_budget=self.resources.budget_for(mission),
+            )
+            mission.limits = new_limits
+            mission.updated_at = utcnow()
+            if self.store.cas_mission_payload(mission_id, original, mission):
+                break
+        else:
+            raise BudgetUpdateError(
+                "conflict",
+                "Mission changed while the budget was being updated",
+                409,
+            )
+        assert mission is not None
+        live = self._live_missions.get(mission_id)
+        if live is not None:
+            live.limits = mission.limits.model_copy(deep=True)
+        payload = self._budget_event_payload(mission, changes)
+        await self.emit(mission_id, EventType.BUDGET_UPDATED, payload)
+        return {**payload, "status": str(mission.status), "updated_at": mission.updated_at}
+
+    def _budget_event_payload(self, mission: Mission, changes: dict[str, dict]) -> dict[str, Any]:
+        """Human cap change. known stays false so the HUD does not treat this as token-derived spend."""
+        payload: dict[str, Any] = {
+            "source": "human",
+            "kind": "limits",
+            "known": False,
+            "currency": "USD",
+            "changes": changes,
+            "limits": mission.limits.model_dump(mode="json"),
+            "token_spent": mission.token_spent,
+        }
+        if "max_token_cost" in changes or mission.limits.max_token_cost is not None:
+            payload["token_budget"] = self.resources.budget_for(mission)
+            payload["remaining"] = self.resources.remaining(mission)
+        return payload
+
     async def create_payment(self, mission: Mission, recipient: str, amount: float, reason: str,
                              *, idempotency_key: str | None = None) -> PaymentIntent:
         key = self._require_idempotency_key(idempotency_key)
@@ -1599,6 +1684,7 @@ class SwarmRuntime:
             return PaymentIntent.model_validate(replay["intent"])
         if mission.id in self.stopped:
             raise PolicyError("Mission was stopped")
+        self._adopt_stored_limits(mission)
         if amount > mission.limits.max_payment_amount or mission.spent + amount > mission.budget:
             raise PolicyError("Payment exceeds mission budget or payment cap", FailureClass.RESOURCE_EXHAUSTED)
         if mission.live_payments:

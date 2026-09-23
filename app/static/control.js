@@ -241,7 +241,12 @@ function describe(e){
     case "user.answered":return "<b>Answer received</b> · "+esc(p.question||p.question_id||"question");
     case "llm.started":return "<b>"+esc(name)+"</b> is "+(p.kind==="decision"?"deciding the next move":p.kind==="verification"?"verifying the claimed result":"working");
     case "llm.completed":return "<b>"+esc(name)+"</b> · "+((p.input_tokens||0)+(p.output_tokens||0)+(p.reasoning_tokens||0)).toLocaleString()+" tokens";
-    case "budget.updated":return p.known===true&&typeof p.token_spent==="number"
+    case "budget.updated":
+      if(p.source==="human"&&p.kind==="limits"){
+        const names=p.changes&&typeof p.changes==="object"?Object.keys(p.changes).join(", "):"limits";
+        return "<b>Limits</b> · "+esc(names);
+      }
+      return p.known===true&&typeof p.token_spent==="number"
       ?"<b>Spend</b> · est. "+esc(formatUsd(p.token_spent)||String(p.token_spent))+(typeof p.token_budget==="number"?" / "+esc(formatUsd(p.token_budget)||String(p.token_budget)):"")
       :"<b>Spend</b> · estimate unavailable";
     case "budget.warning":return typeof p.token_spent==="number"&&typeof p.token_budget==="number"
@@ -517,6 +522,10 @@ function commandSuccessMessage(resolved,result){
   if(resolved.action==="kill"){
     if(!result||typeof result.status!=="string"||!result.agent_id)return null;
     return "Agent "+result.status;
+  }
+  if(resolved.action==="budget"){
+    if(!result||!result.limits||result.known===true)return null;
+    return "Budget updated";
   }
   return null;
 }

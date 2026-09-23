@@ -74,6 +74,27 @@ def test_answer_requires_open_question_and_text(cases):
     assert cases["resolveAnswerPreview"]["ok"] is False
 
 
+def test_budget_command_maps_to_limit_patch(cases):
+    assert cases["budgetSet"]["action"] == "budget"
+    assert cases["budgetSet"]["mode"] == "set"
+    assert cases["budgetSet"]["field"] == "max_token_cost"
+    assert cases["budgetSet"]["value"] == 4.5
+    assert cases["budgetDelta"]["mode"] == "delta"
+    assert cases["budgetDelta"]["value"] == -2
+    assert cases["budgetBadField"]["ok"] is False
+    assert cases["budgetBadMode"]["ok"] is False
+    assert cases["budgetShort"]["ok"] is False
+    assert cases["budgetFraction"]["ok"] is False
+    resolved = cases["resolveBudget"]
+    assert resolved["ok"] is True
+    assert resolved["method"] == "POST"
+    assert resolved["path"] == f"/api/missions/{MISSION}/budget"
+    assert resolved["body"] == {"set": {"max_token_cost": 4.5}}
+    assert cases["resolveBudgetDelta"]["body"] == {"delta": {"max_tool_calls": -2}}
+    assert cases["resolveBudgetPreview"]["ok"] is False
+    assert cases["resolveBudgetNoMission"]["ok"] is False
+
+
 def test_kill_is_fail_closed_unless_route_present(cases):
     assert cases["killExtra"]["ok"] is False
     assert cases["killPresent"] is True
@@ -131,6 +152,7 @@ def test_static_command_bar_is_served_and_maps_live_routes(tmp_path, monkeypatch
         assert "post" in paths["/api/stop-all"]
         assert "post" in paths["/api/missions/{mission_id}/stop"]
         assert "post" in paths["/api/missions/{mission_id}/answers/{question_id}"]
+        assert "post" in paths["/api/missions/{mission_id}/budget"]
         kill_path = "/api/missions/{mission_id}/agents/{agent_id}/kill"
         assert "post" in paths[kill_path]
         stopped = client.post("/api/stop-all")

@@ -135,9 +135,26 @@ class Store:
                 db.add(MissionRow(id=str(mission.id), payload=payload, updated_at=mission.updated_at))
 
     def get_mission(self, mission_id: UUID) -> Mission | None:
+        loaded = self.load_mission_for_update(mission_id)
+        return loaded[0] if loaded else None
+
+    def load_mission_for_update(self, mission_id: UUID) -> tuple[Mission, str] | None:
+        """Return the mission and the exact stored payload for compare-and-swap."""
         with self.sessions() as db:
             row = db.get(MissionRow, str(mission_id))
-            return Mission.model_validate_json(row.payload) if row else None
+            if row is None:
+                return None
+            return Mission.model_validate_json(row.payload), row.payload
+
+    def cas_mission_payload(self, mission_id: UUID, original: str, mission: Mission) -> bool:
+        """Persist mission only when the stored payload is still `original`."""
+        with self.sessions.begin() as db:
+            changed = db.execute(
+                update(MissionRow)
+                .where(MissionRow.id == str(mission_id), MissionRow.payload == original)
+                .values(payload=mission.model_dump_json(), updated_at=mission.updated_at)
+            )
+            return getattr(changed, "rowcount", 0) == 1
 
     def list_missions(self) -> list[Mission]:
         with self.sessions() as db:
