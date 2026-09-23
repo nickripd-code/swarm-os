@@ -404,3 +404,111 @@ export function replayView(log, index, options = {}) {
         : "Recorded events only · not a simulation"),
   };
 }
+
+export const LAST_APPROVAL_AT_UNAVAILABLE = "LAST APPROVAL unavailable";
+export const LAST_APPROVAL_AT_NONE = "LAST APPROVAL none";
+// Same approval classification as the pending-approval chip: payload.kind === "approval".
+// These are the catalog events the runtime records for that path (finish, live payment, org change).
+// Plain questions, in-flight mission.waiting, and user.answer_consumed (no kind) are not approvals.
+const APPROVAL_AT_EVENTS = new Set([
+  "mission.question", "mission.waiting", "user.answered",
+]);
+const APPROVAL_AT_STAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})$/;
+
+function hiddenLastApproval() {
+  return {hidden: true, label: "", known: false, at: null, title: ""};
+}
+function unavailableLastApproval() {
+  return {hidden: false, label: LAST_APPROVAL_AT_UNAVAILABLE, known: false, at: null, title: ""};
+}
+function noneLastApproval() {
+  return {hidden: false, label: LAST_APPROVAL_AT_NONE, known: true, at: null, title: ""};
+}
+
+function isApprovalEvent(event) {
+  if (!event || typeof event !== "object" || Array.isArray(event)) return false;
+  if (!APPROVAL_AT_EVENTS.has(event.event_type)) return false;
+  const payload = event.payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  return payload.kind === "approval";
+}
+
+/** UTC clock from a recorded event stamp. Epoch and naive times are rejected. */
+function parseApprovalAt(raw) {
+  if (typeof raw !== "string" || raw === "" || raw !== raw.trim()) return null;
+  const match = APPROVAL_AT_STAMP.exec(raw);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const fraction = match[7] ? Number(match[7].padEnd(3, "0").slice(0, 3)) : 0;
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return null;
+  let offsetMinutes = 0;
+  if (match[8] !== "Z") {
+    const sign = match[8][0] === "-" ? -1 : 1;
+    const offsetHour = Number(match[8].slice(1, 3));
+    const offsetMinute = Number(match[8].slice(4, 6));
+    if (offsetHour > 23 || offsetMinute > 59) return null;
+    offsetMinutes = sign * (offsetHour * 60 + offsetMinute);
+  }
+  const utc = Date.UTC(year, month - 1, day, hour, minute, second, fraction) - offsetMinutes * 60000;
+  if (!Number.isFinite(utc) || utc <= 0) return null;
+  const wall = new Date(utc + offsetMinutes * 60000);
+  if (
+    wall.getUTCFullYear() !== year ||
+    wall.getUTCMonth() !== month - 1 ||
+    wall.getUTCDate() !== day ||
+    wall.getUTCHours() !== hour ||
+    wall.getUTCMinutes() !== minute ||
+    wall.getUTCSeconds() !== second
+  ) return null;
+  const shown = new Date(utc);
+  const hh = String(shown.getUTCHours()).padStart(2, "0");
+  const mm = String(shown.getUTCMinutes()).padStart(2, "0");
+  const ss = String(shown.getUTCSeconds()).padStart(2, "0");
+  return {label: hh + ":" + mm + ":" + ss + "Z", stamp: raw, at: utc};
+}
+
+/** Prefix of a loaded event log. A missing feed stays null — never an invented []. */
+export function recordedApprovalAtFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+
+/**
+ * Read-only UTC time of the newest recorded approval event on the loaded shell log.
+ * Approval events are mission.question, mission.waiting, and user.answered whose
+ * payload.kind is "approval" — the same classification the pending-approval chip uses.
+ * Hidden with no mission or in preview. A missing feed is LAST APPROVAL unavailable.
+ * A loaded feed with no approval event yet (including a cursor before any event) is LAST APPROVAL none.
+ * The newest valid event time wins. The log-order last approval event must itself have a valid stamp.
+ */
+export function lastApprovalAtView(feed, options = {}) {
+  if (options.visible !== true) return hiddenLastApproval();
+  if (!Array.isArray(feed)) return unavailableLastApproval();
+  let lastParsed = null;
+  let sawApproval = false;
+  let best = null;
+  for (const event of feed) {
+    if (!isApprovalEvent(event)) continue;
+    sawApproval = true;
+    const parsed = parseApprovalAt(event.created_at);
+    lastParsed = parsed;
+    if (parsed && (!best || parsed.at >= best.at)) best = parsed;
+  }
+  if (!sawApproval) return noneLastApproval();
+  if (!lastParsed || !best) return unavailableLastApproval();
+  return {
+    hidden: false,
+    label: "LAST APPROVAL " + best.label,
+    known: true,
+    at: best.stamp,
+    title: best.stamp,
+  };
+}
