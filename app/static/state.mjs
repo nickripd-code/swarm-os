@@ -1,5 +1,6 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const PRIVACY_UNAVAILABLE = "privacy unavailable";
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -96,6 +97,14 @@ export function formatUsd(value) {
 }
 export function tokenTotal(usage) {
   return (usage?.input || 0) + (usage?.output || 0) + (usage?.reasoning || 0);
+}
+export function missionPrivacy(mission) {
+  const unavailable = {known: false, mode: null, label: PRIVACY_UNAVAILABLE};
+  if (!mission || typeof mission !== "object" || Array.isArray(mission)) return unavailable;
+  if (!Object.prototype.hasOwnProperty.call(mission, "privacy")) return unavailable;
+  if (mission.privacy === "local_only") return {known: true, mode: "local_only", label: "LOCAL ONLY"};
+  if (mission.privacy === "cloud_allowed") return {known: true, mode: "cloud_allowed", label: "CLOUD ALLOWED"};
+  return unavailable;
 }
 export function costHudView(usage = {}) {
   const input = usage.input || 0;
@@ -349,7 +358,7 @@ export function isReplayLive(index, length) {
 }
 export function missionSnapshot(mission) {
   if (!mission) return null;
-  return {
+  const snap = {
     id: mission.id,
     goal: mission.goal,
     created_at: mission.created_at,
@@ -359,6 +368,9 @@ export function missionSnapshot(mission) {
     result: null,
     pending_question: null,
   };
+  const privacy = missionPrivacy(mission);
+  if (privacy.known) snap.privacy = privacy.mode;
+  return snap;
 }
 export function projectEvents(mission, log, throughIndex) {
   const events = Array.isArray(log) ? log : [];
