@@ -225,9 +225,11 @@ export function avgToolLatencyView(feed, options = {}) {
       open.push(event);
       continue;
     }
-    if (event.event_type !== "tool.completed" && event.event_type !== "tool.failed") continue;
+    const completedOutcome = event.event_type === "tool.completed";
+    const failedOutcome = event.event_type === "tool.failed";
+    if (!completedOutcome && !failedOutcome) continue;
     const started = takeMatchingToolStart(open, event);
-    if (event.event_type !== "tool.completed") continue;
+    if (!completedOutcome) continue;
     completed += 1;
     const explicit = explicitToolDuration(toolOutcomePayload(event));
     if (explicit.status === "invalid") {
