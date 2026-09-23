@@ -21,6 +21,7 @@ from .models import FailureClass, utcnow
 META_NAME = ".swarm-workspace.json"
 MAX_PATH_BYTES = 256
 MAX_CONTENT_BYTES = 1_048_576
+MAX_HAND_FILES = 32
 DEFAULT_ROOT_NAME = "swarm-workspaces"
 
 
@@ -77,6 +78,13 @@ class WorkspaceProvider(ABC):
     @abstractmethod
     async def read_file(self, workspace_id: UUID, relative: str) -> str:
         raise NotImplementedError
+
+    async def hand_files(self, source_id: UUID, dest_id: UUID, relatives: list[str]) -> list[str]:
+        """Copy explicit files between workspaces. Default providers fail closed."""
+        raise WorkspaceError(
+            "Workspace handoff is not supported by this provider",
+            FailureClass.TOOL_MISSING,
+        )
 
     async def health(self) -> WorkspaceHealth:
         return WorkspaceHealth(
@@ -245,6 +253,42 @@ class LocalFilesystemWorkspaceProvider(WorkspaceProvider):
             return target.read_text(encoding="utf-8")
         except OSError as exc:
             raise WorkspaceError("Workspace file could not be read", FailureClass.TOOL_FAILURE) from exc
+
+    async def hand_files(self, source_id: UUID, dest_id: UUID, relatives: list[str]) -> list[str]:
+        """Copy explicit regular files to another workspace in the same mission.
+
+        The source is left in place. Symlinks, metadata, cross-mission copies,
+        and a hand into the same workspace fail closed. Organization replace
+        does not call this.
+        """
+        if source_id == dest_id:
+            raise WorkspaceError("A workspace cannot hand files to itself", FailureClass.POLICY_REFUSAL)
+        source = await self.get(source_id)
+        dest = await self.get(dest_id)
+        if source.mission_id != dest.mission_id:
+            raise WorkspaceError(
+                "Code mission hand refuses a different mission",
+                FailureClass.POLICY_REFUSAL,
+            )
+        if not isinstance(relatives, list) or not relatives:
+            raise WorkspaceError("Code mission hand requires explicit file paths", FailureClass.TOOL_FAILURE)
+        if len(relatives) > MAX_HAND_FILES:
+            raise WorkspaceError("Too many files in one handoff", FailureClass.TOOL_FAILURE)
+        staged: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for raw in relatives:
+            rel = normalize_relpath(raw)
+            if rel in seen:
+                raise WorkspaceError("Duplicate path in handoff", FailureClass.TOOL_FAILURE)
+            if Path(rel).name == META_NAME:
+                raise WorkspaceError("Workspace metadata is reserved", FailureClass.POLICY_REFUSAL)
+            seen.add(rel)
+            staged.append((rel, await self.read_file(source_id, rel)))
+        copied: list[str] = []
+        for rel, content in staged:
+            await self.write_file(dest_id, rel, content)
+            copied.append(rel)
+        return copied
 
     async def health(self) -> WorkspaceHealth:
         try:

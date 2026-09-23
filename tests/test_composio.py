@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from app.composio import AUTHORIZE_TOOL, SEARCH_TOOL, ComposioToolProvider
+from app.composio import AUTHORIZE_TOOL, SEARCH_TOOL, ComposioToolProvider, github_slug_is_mutating
 from app.models import FailureClass
 from app.tools import CompositeToolProvider, ToolCall, ToolError, build_tool_provider
 
@@ -143,6 +143,62 @@ async def test_only_discovered_concrete_tool_can_execute_and_output_is_redacted(
         "tool_slug": "GITHUB_GET_REPOSITORY",
         "arguments": {"owner": "nick", "repo": "swarm-os"},
     }
+
+
+def test_github_read_slugs_stay_distinct_from_writes():
+    assert github_slug_is_mutating("GITHUB_GET_REPOSITORY", "github") is False
+    assert github_slug_is_mutating("GITHUB_GET_A_COMMIT", "github") is False
+    assert github_slug_is_mutating("GITHUB_LIST_COMMITS", "github") is False
+    assert github_slug_is_mutating("GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS", "github") is True
+    assert github_slug_is_mutating("GITHUB_CREATE_A_PULL_REQUEST", "github") is True
+    assert github_slug_is_mutating("GMAIL_FETCH_EMAILS", "gmail") is False
+
+
+@pytest.mark.asyncio
+async def test_github_write_schema_is_not_registered_or_executed():
+    calls = []
+
+    def handler(request: httpx.Request):
+        body = json.loads(request.content)
+        calls.append((request.url.path, body))
+        if request.url.path.endswith("/tool_router/session"):
+            return httpx.Response(201, json={"session_id": "trs_test"})
+        return httpx.Response(200, json={
+            "tool_schemas": {
+                "write": {
+                    "toolkit": "github",
+                    "tool_slug": "GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS",
+                    "description": "Write a file",
+                    "tags": ["readOnlyHint"],
+                },
+                "read": {
+                    "toolkit": "github",
+                    "tool_slug": "GITHUB_GET_A_COMMIT",
+                    "description": "Read a commit",
+                },
+                "marked": {
+                    "toolkit": "gmail",
+                    "tool_slug": "GMAIL_SEND_EMAIL",
+                    "description": "Send mail",
+                    "annotations": {"destructiveHint": True},
+                },
+            },
+        })
+
+    provider = ComposioToolProvider(
+        api_key="test-secret",
+        base_url="https://composio.test/api/v3.1",
+        transport=composio_transport(handler),
+    )
+    result = await provider.invoke(ToolCall(name=SEARCH_TOOL, arguments={"query": "read a commit"}))
+    assert [item["name"] for item in result.output["tools"]] == ["composio.GITHUB_GET_A_COMMIT"]
+    with pytest.raises(ToolError) as exc:
+        await provider.invoke(ToolCall(
+            name="composio.GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS",
+            arguments={"path": "app/main.py", "content": "x"},
+        ))
+    assert exc.value.failure_class == FailureClass.TOOL_MISSING
+    assert all(not path.endswith("/execute") for path, _body in calls)
 
 
 @pytest.mark.asyncio

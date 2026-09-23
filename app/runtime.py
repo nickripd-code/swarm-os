@@ -137,6 +137,15 @@ class SwarmRuntime:
         except WorkspaceError as exc:
             raise PolicyError(str(exc), exc.failure_class) from exc
 
+    async def hand_workspace_files(
+        self, source_id: UUID, dest_id: UUID, relatives: list[str],
+    ) -> list[str]:
+        """Same-mission sandbox copy. Does not run from the decide loop."""
+        try:
+            return await self._require_workspaces().hand_files(source_id, dest_id, relatives)
+        except WorkspaceError as exc:
+            raise PolicyError(str(exc), exc.failure_class) from exc
+
     async def emit(self, mission_id: UUID, event_type: EventType | str, payload: dict[str, Any], actor_id: UUID | None = None):
         event = self.store.append(MissionEvent(mission_id=mission_id, event_type=event_type, actor_id=actor_id, payload=payload))
         if self.sink:

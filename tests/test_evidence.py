@@ -185,6 +185,42 @@ async def test_file_traversal_and_protected_paths_fail_closed(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_github_host_is_not_an_implicit_evidence_allowlist(tmp_path):
+    result = await _runner(tmp_path).run(
+        [{"kind": "http", "url": "https://api.github.com/repos/nickripd-code/swarm-os"}],
+    )
+    assert result["ok"] is False
+    assert "not allowlisted" in result["rationale"]
+
+
+@pytest.mark.asyncio
+async def test_symlink_file_evidence_fails_closed_without_reading_the_target(tmp_path):
+    secret = tmp_path / ".env"
+    secret.write_text("OPENAI_API_KEY=hidden", encoding="utf-8")
+    outside = tmp_path.parent / "outside-secret.txt"
+    outside.write_text("outside", encoding="utf-8")
+    alias = tmp_path / "notes"
+    alias.mkdir()
+    (alias / "leak").symlink_to(secret)
+    (tmp_path / "escape").symlink_to(outside)
+    tests = FakeTests()
+    runner = _runner(tmp_path, run_tests=tests)
+    leaked = await runner.run([{"kind": "file", "path": "notes/leak", "contains": "OPENAI_API_KEY"}])
+    escaped = await runner.run([{"kind": "file", "path": "escape"}])
+    pytest_link = tmp_path / "tests"
+    pytest_link.mkdir()
+    (pytest_link / "test_link.py").symlink_to(secret)
+    linked_test = await runner.run([{"kind": "pytest", "paths": ["tests/test_link.py"]}])
+    assert leaked["ok"] is False
+    assert escaped["ok"] is False
+    assert linked_test["ok"] is False
+    assert "OPENAI_API_KEY" not in leaked["rationale"]
+    assert "hidden" not in leaked["rationale"]
+    assert outside.read_text(encoding="utf-8") == "outside"
+    assert tests.calls == []
+
+
+@pytest.mark.asyncio
 async def test_unknown_kind_fails_closed(tmp_path):
     result = await _runner(tmp_path).run([{"kind": "shell", "command": "rm -rf /"}])
     assert result["ok"] is False

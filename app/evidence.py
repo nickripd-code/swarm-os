@@ -344,12 +344,7 @@ class EvidenceRunner:
         rels: list[str] = []
         for raw in raw_paths:
             rel = normalize_relpath(str(raw))
-            if rel is None or path_is_protected(rel):
-                return _fail("pytest", "pytest path is outside the evidence root")
-            resolved = (self._root / rel).resolve()
-            try:
-                resolved.relative_to(self._root)
-            except ValueError:
+            if rel is None or self._contained_rel(rel) is None:
                 return _fail("pytest", "pytest path is outside the evidence root")
             rels.append(rel)
         command = [*self._test_command, "-q", *rels]
@@ -412,15 +407,32 @@ class EvidenceRunner:
             return _fail("http", "HTTP evidence body did not contain the expected snippet")
         return _ok("http", f"GET {public_url(url.strip())} → {status}")
 
+    def _contained_rel(self, rel: str) -> str | None:
+        """Reject traversal, symlinks, and aliases onto protected paths."""
+        if path_is_protected(rel):
+            return None
+        current = self._root
+        for part in rel.split("/"):
+            current = current / part
+            try:
+                if current.is_symlink():
+                    return None
+                current.resolve().relative_to(self._root)
+            except (OSError, ValueError):
+                return None
+        try:
+            resolved_rel = current.resolve().relative_to(self._root).as_posix()
+        except (OSError, ValueError):
+            return None
+        if path_is_protected(resolved_rel):
+            return None
+        return rel
+
     async def _run_file(self, step: dict[str, Any]) -> dict[str, Any]:
         rel = normalize_relpath(str(step.get("path") or ""))
-        if rel is None or path_is_protected(rel):
+        if rel is None or self._contained_rel(rel) is None:
             return _fail("file", "file evidence path is not allowed")
         resolved = (self._root / rel).resolve()
-        try:
-            resolved.relative_to(self._root)
-        except ValueError:
-            return _fail("file", "file evidence path is outside the evidence root")
         if not resolved.is_file():
             return _fail("file", "file evidence artifact is missing")
         try:
