@@ -128,6 +128,57 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+export const APPROVAL_QUESTION_COUNT_UNAVAILABLE = "unavailable";
+const APPROVAL_QUESTION_EVENT = "mission.question";
+const APPROVAL_QUESTION_KIND = "approval";
+/** Prefix of a loaded event log. A missing feed stays null — never an invented []. */
+export function recordedApprovalQuestionFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+function approvalQuestionUnavailable() {
+  return {
+    hidden: false,
+    known: false,
+    count: null,
+    label: "APPROVAL QUESTIONS " + APPROVAL_QUESTION_COUNT_UNAVAILABLE,
+  };
+}
+/**
+ * Read-only count of approval-kind mission.question events on the loaded feed.
+ * Hidden with no mission or in preview. A missing feed, a non-string event type,
+ * or an unreadable kind is APPROVAL QUESTIONS unavailable, not 0. An explicit
+ * empty list (including a cursor before any event) is 0. Only payload.kind
+ * === "approval" counts. A missing or other kind is not an approval question.
+ * Waiting, answers, and unrelated events are ignored. The label is a count
+ * only — never spend or question text.
+ */
+export function approvalQuestionCountView(feed, options = {}) {
+  const visible = options.visible === true;
+  if (!visible) return {hidden: true, known: false, count: null, label: ""};
+  if (!Array.isArray(feed)) return approvalQuestionUnavailable();
+  let count = 0;
+  for (const event of feed) {
+    if (!event || typeof event !== "object" || Array.isArray(event)) continue;
+    const type = event.event_type;
+    if (typeof type !== "string") {
+      if (type != null) return approvalQuestionUnavailable();
+      continue;
+    }
+    if (type !== APPROVAL_QUESTION_EVENT) continue;
+    const payload = event.payload;
+    if (payload == null) continue;
+    if (typeof payload !== "object" || Array.isArray(payload)) return approvalQuestionUnavailable();
+    if (!Object.prototype.hasOwnProperty.call(payload, "kind") || payload.kind == null) continue;
+    const kind = payload.kind;
+    if (typeof kind !== "string") return approvalQuestionUnavailable();
+    if (kind === APPROVAL_QUESTION_KIND) count += 1;
+  }
+  return {hidden: false, known: true, count, label: "APPROVAL QUESTIONS " + count};
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
