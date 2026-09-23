@@ -1,5 +1,9 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const NO_VERIFICATION = "No verification recorded";
+export const ROLE_UNAVAILABLE = "role unavailable";
+export const SUMMARY_UNAVAILABLE = "summary unavailable";
+const VERIFICATION_SUMMARY_CAP = 160;
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -77,7 +81,8 @@ export function resolveCommand(parsed, context = {}) {
 }
 export function newState(mission = null) {
   return {mission, agents: new Map(), tasks: new Map(), seen: new Set(), events: [],
-    usage: {input: 0, output: 0, reasoning: 0, cost: null, budget: null, known: false}, decisions: 0, preview: false};
+    usage: {input: 0, output: 0, reasoning: 0, cost: null, budget: null, known: false},
+    verification: null, decisions: 0, preview: false};
 }
 function finiteNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -128,6 +133,56 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+function recordedSummary(value) {
+  if (typeof value !== "string") return "";
+  const text = value.replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (text.length <= VERIFICATION_SUMMARY_CAP) return text;
+  return text.slice(0, VERIFICATION_SUMMARY_CAP - 1) + "…";
+}
+function recordedRole(state, actorId) {
+  if (!actorId || !state?.agents) return "";
+  const agent = state.agents.get(actorId);
+  const role = agent && typeof agent.role === "string" ? agent.role.trim() : "";
+  if (!role || role.length > 64 || /[\r\n]/.test(role)) return "";
+  return role;
+}
+function recordedVerdict(event) {
+  const verdict = event?.payload && event.payload.verdict;
+  if (event?.event_type === "verification.passed" && verdict === "pass") return "pass";
+  if (event?.event_type === "verification.failed" && verdict === "fail") return "fail";
+  if (event?.event_type === "verification.failed" && verdict === "inconclusive") return "inconclusive";
+  return null;
+}
+export function lastVerificationView(state = {}) {
+  const empty = {
+    recorded: false,
+    outcome: null,
+    outcomeLabel: NO_VERIFICATION,
+    role: "",
+    roleLabel: ROLE_UNAVAILABLE,
+    summary: "",
+    summaryLabel: SUMMARY_UNAVAILABLE,
+  };
+  if (!state.mission || state.preview) return empty;
+  const recorded = state.verification;
+  if (!recorded || (recorded.outcome !== "pass" && recorded.outcome !== "fail" && recorded.outcome !== "inconclusive")) {
+    return empty;
+  }
+  const role = typeof recorded.role === "string" && recorded.role.length <= 64 && !/[\r\n]/.test(recorded.role)
+    ? recorded.role
+    : "";
+  const summary = typeof recorded.summary === "string" ? recorded.summary : "";
+  return {
+    recorded: true,
+    outcome: recorded.outcome,
+    outcomeLabel: recorded.outcome === "pass" ? "PASS" : recorded.outcome === "fail" ? "FAIL" : "INCONCLUSIVE",
+    role,
+    roleLabel: role ? role.replaceAll("_", " ") : ROLE_UNAVAILABLE,
+    summary,
+    summaryLabel: summary || SUMMARY_UNAVAILABLE,
+  };
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
@@ -175,6 +230,19 @@ export function applyEvent(state, e) {
       state.usage.cost = spent;
       state.usage.known = true;
     }
+  }
+  if (e.event_type === "verification.started"
+      || e.event_type === "verification.passed"
+      || e.event_type === "verification.failed") {
+    const outcome = recordedVerdict(e);
+    state.verification = outcome
+      ? {
+        outcome,
+        actorId: e.actor_id || null,
+        role: recordedRole(state, e.actor_id),
+        summary: recordedSummary(p.rationale),
+      }
+      : null;
   }
   if (e.event_type === "controller.decision") state.decisions++;
   if (e.event_type === "mission.started" && state.mission) {

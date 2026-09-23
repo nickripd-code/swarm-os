@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,lastVerificationView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -64,6 +64,18 @@ function renderHud(){
       : cost.budgetLabel;
   }
   if($("costHud"))$("costHud").dataset.known=cost.known?"true":"false";
+  const verification=lastVerificationView(state);
+  const strip=$("verifyStrip");
+  if(strip){
+    strip.dataset.recorded=verification.recorded?"true":"false";
+    strip.dataset.outcome=verification.outcome||"";
+  }
+  if($("verifyOutcome")){
+    $("verifyOutcome").textContent=verification.outcomeLabel;
+    $("verifyOutcome").className="hud-chip status "+(verification.outcome||"idle");
+  }
+  if($("verifyRole"))$("verifyRole").textContent=verification.roleLabel;
+  if($("verifySummary"))$("verifySummary").textContent=verification.summaryLabel;
   if($("hudElapsed")){
     const view=replayView(eventLog,replayCursor,{preview:state.preview,mission:sourceMission||mission});
     if(!replayLive&&!state.preview&&view.elapsedMs!=null){
