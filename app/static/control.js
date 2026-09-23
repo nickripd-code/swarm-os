@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,missionPauseState,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -77,6 +77,18 @@ function renderHud(){
     $("replayChip").hidden=state.preview||!mission;
     $("replayChip").textContent=state.preview?"PREVIEW":(replayLive?"LIVE":"REPLAY");
     $("replayChip").className="hud-chip mode "+(state.preview?"preview":replayLive?"replay-live":"replay");
+  }
+  if($("missionPauseState")){
+    const el=$("missionPauseState");
+    if(!mission||state.preview){
+      el.hidden=true;
+    }else{
+      const view=missionPauseState(mission);
+      el.hidden=false;
+      el.dataset.known=view.known?"true":"false";
+      el.textContent=view.label;
+      el.className="hud-chip status "+(view.state||"unavailable");
+    }
   }
   const running=!!mission&&!terminal.has(status)&&replayLive&&!state.preview;
   if(running&&!hudTick)hudTick=setInterval(renderHud,1000);

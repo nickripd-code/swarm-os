@@ -1,5 +1,6 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const PAUSE_STATE_UNAVAILABLE = "pause unavailable";
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -96,6 +97,14 @@ export function formatUsd(value) {
 }
 export function tokenTotal(usage) {
   return (usage?.input || 0) + (usage?.output || 0) + (usage?.reasoning || 0);
+}
+export function missionPauseState(mission) {
+  const unavailable = {known: false, state: null, label: PAUSE_STATE_UNAVAILABLE};
+  if (!mission || typeof mission !== "object" || Array.isArray(mission)) return unavailable;
+  if (!Object.prototype.hasOwnProperty.call(mission, "status")) return unavailable;
+  if (mission.status === "paused") return {known: true, state: "paused", label: "PAUSED"};
+  if (mission.status === "running") return {known: true, state: "running", label: "RUNNING"};
+  return unavailable;
 }
 export function costHudView(usage = {}) {
   const input = usage.input || 0;
