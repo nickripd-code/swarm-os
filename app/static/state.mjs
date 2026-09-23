@@ -1,5 +1,6 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const ACTIVE_MISSIONS_UNAVAILABLE = "unavailable";
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -214,6 +215,23 @@ export function applyEvent(state, e) {
   state.events.unshift(e);
   if (state.events.length > 120) state.events.length = 120;
   return true;
+}
+export function activeMissionChipView(health) {
+  const unavailable = {
+    known: false,
+    count: null,
+    label: ACTIVE_MISSIONS_UNAVAILABLE,
+    aria: "Active missions unavailable",
+  };
+  if (!health || typeof health !== "object" || Array.isArray(health)) return unavailable;
+  const value = health.active_missions;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) return unavailable;
+  return {
+    known: true,
+    count: value,
+    label: value + " live",
+    aria: value + " active " + (value === 1 ? "mission" : "missions"),
+  };
 }
 export function missionMode(state) {
   if (state.preview) return "preview";
