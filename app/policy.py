@@ -78,6 +78,7 @@ class PolicyRequest:
     mode: str = "openai"
     parent_ok: bool = True
     org_op: str | None = None
+    org_agent_id: str | None = None
 
 
 def parse_approval_answer(text: str) -> ApprovalVerdict | None:
@@ -88,6 +89,21 @@ def parse_approval_answer(text: str) -> ApprovalVerdict | None:
     if token in DENY_TOKENS:
         return "deny"
     return None
+
+
+def approval_action_key(requirement: ApprovalRequirement, *, agent_id: str | None = None) -> str:
+    """Match key for accept_answer. Irreversible org ops include the op and target.
+
+    Finish and live payment stay a single action key. A replace approval does not
+    authorize reparent, retire, or the same op on a different agent.
+    """
+    op = (requirement.org_op or "").strip()
+    if not op:
+        return requirement.action
+    target = (agent_id or "").strip()
+    if target:
+        return f"{requirement.action}:{op}:{target}"
+    return f"{requirement.action}:{op}"
 
 
 def interpret_approval(text: str) -> None:

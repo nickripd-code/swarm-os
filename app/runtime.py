@@ -21,7 +21,7 @@ from .models import (
     AgentSpec, AgentStatus, FailureClass, Mission, MissionEvent,
     MissionStatus, PaymentIntent, PendingQuestion, Task, TaskStatus, utcnow,
 )
-from .policy import PolicyError, PolicyGate, PolicyRequest, interpret_approval
+from .policy import PolicyError, PolicyGate, PolicyRequest, approval_action_key, interpret_approval
 from .resources import ResourceScheduler, listed_prices_from_meta, usage_from_meta
 from .store import AnswerStateError, Store
 from .memory import MemoryError, MemoryProvider, StoreMemoryProvider
@@ -726,13 +726,15 @@ class SwarmRuntime:
         needed = self.policy.approval_required(request)
         if needed is None:
             return
-        if self._approval_granted(mission, needed.action):
+        # Model-supplied question ids are never used; _ask_human mints the id.
+        action_key = approval_action_key(needed, agent_id=request.org_agent_id)
+        if self._approval_granted(mission, action_key):
             return
         await self._ask_human(
             mission, actor, needed.question, needed.reason,
-            kind="approval", approval_action=needed.action,
+            kind="approval", approval_action=action_key,
         )
-        record = self._matching_approval(mission, needed.action)
+        record = self._matching_approval(mission, action_key)
         if record is None:
             raise PolicyError(
                 "Cannot continue without a matching human answer",

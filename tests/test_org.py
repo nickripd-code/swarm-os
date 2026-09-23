@@ -1,13 +1,17 @@
+import asyncio
 from uuid import uuid4
 
 import pytest
 
 from app.events import EventType, UnknownEventType
 from app.llm import FallbackController, LLMProvider, OpenAIProvider
-from app.models import AgentSpec, AgentStatus, FailureClass, Mission, MissionEvent, Task, TaskStatus
+from app.models import (
+    AgentSpec, AgentStatus, FailureClass, Mission, MissionAnswer, MissionEvent, MissionStatus,
+    Task, TaskStatus,
+)
 from app.org import OrgChange, OrganizationDesigner, is_org_action
 from app.planning import VALID_ACTIONS, validate_decision
-from app.policy import PolicyError
+from app.policy import ApprovalRequirement, PolicyError, approval_action_key
 from app.providers import ProviderError
 from app.router import ModelRouter
 from app.runtime import SwarmRuntime
@@ -62,6 +66,38 @@ async def seed_tree(runtime: SwarmRuntime, mission: Mission) -> tuple[AgentSpec,
         runtime.tasks[mission.id].append(task)
         runtime.store.save_task(task)
     return root, lead, worker
+
+
+async def wait_until_org_question(store: Store, mission_id, timeout: float = 8) -> Mission:
+    async with asyncio.timeout(timeout):
+        while True:
+            saved = store.get_mission(mission_id)
+            if saved and saved.status == MissionStatus.WAITING and saved.pending_question:
+                return saved
+            if saved and saved.status in {
+                MissionStatus.FAILED, MissionStatus.COMPLETED, MissionStatus.STOPPED, MissionStatus.BLOCKED,
+            }:
+                raise AssertionError(
+                    f"mission ended {saved.status} before a pending question: {saved.result}"
+                )
+            await asyncio.sleep(0.01)
+
+
+def grant_org_approval(mission: Mission, op: str, agent_id: str) -> None:
+    """Pre-seed a matching approve so direct apply tests exercise mutation, not the park."""
+    needed = ApprovalRequirement(
+        action="org_change",
+        question=f"Approve organization change '{op}'?",
+        reason=f"Organization {op} requires human approval",
+        org_op=op,
+    )
+    mission.answers.append(MissionAnswer(
+        question_id=f"grant-{op}-{agent_id}",
+        question=needed.question,
+        answer="approve",
+        kind="approval",
+        approval_action=approval_action_key(needed, agent_id=agent_id),
+    ))
 
 
 def test_org_actions_are_valid_decisions():
@@ -125,6 +161,7 @@ async def test_apply_reparent_persists_and_projects(tmp_path):
     mission = Mission(goal=COMPLEX_GOAL)
     store.save_mission(mission)
     root, lead, worker = await seed_tree(runtime, mission)
+    grant_org_approval(mission, "reparent", str(worker.id))
     designer = OrganizationDesigner()
     await designer.apply(runtime, mission, root, designer.propose({
         "action": "reparent", "agent_id": str(worker.id), "parent_id": str(root.id),
@@ -148,6 +185,7 @@ async def test_apply_retire_and_replace(tmp_path):
     mission = Mission(goal=COMPLEX_GOAL, limits={"max_agents": 6, "max_depth": 4})
     store.save_mission(mission)
     root, lead, worker = await seed_tree(runtime, mission)
+    grant_org_approval(mission, "retire", str(worker.id))
     designer = OrganizationDesigner()
     await designer.apply(runtime, mission, root, designer.propose({
         "action": "retire", "agent_id": str(worker.id),
@@ -158,6 +196,7 @@ async def test_apply_retire_and_replace(tmp_path):
     created = await runtime._assign_unassigned_tasks(mission)
     assert created == []
 
+    grant_org_approval(mission, "replace", str(lead.id))
     replacement = await designer.apply(runtime, mission, root, designer.propose({
         "action": "replace",
         "agent_id": str(lead.id),
@@ -243,10 +282,16 @@ async def test_runtime_applies_controller_reparent(tmp_path):
     runtime = SwarmRuntime(store, controller=FallbackController())
     root, lead, worker = await seed_tree(runtime, mission)
     runtime.controller = OrgScriptController([
-        {"action": "reparent", "agent_id": str(worker.id), "parent_id": str(root.id)},
+        {"action": "reparent", "agent_id": str(worker.id), "parent_id": str(root.id),
+         "question_id": "spoofed-from-model"},
         {"action": "finish", "summary": "Research lead remains; worker now reports to the controller."},
     ])
-    await runtime.run(mission)
+    job = asyncio.create_task(runtime.run(mission))
+    waiting = await wait_until_org_question(store, mission.id)
+    assert waiting.pending_question.question_id != "spoofed-from-model"
+    assert waiting.pending_question.approval_action == f"org_change:reparent:{worker.id}"
+    await runtime.submit_answer(mission.id, waiting.pending_question.question_id, "approve")
+    await asyncio.wait_for(job, 2)
     saved = store.get_mission(mission.id)
     assert saved.status == "completed"
     agents = {agent.id: agent for agent in store.load_agents(mission.id)}
@@ -348,6 +393,7 @@ async def test_judged_replace_is_applied_from_high_stakes_decide(tmp_path):
     assert decision["action"] == "replace"
     assert decision["_meta"]["planning"]["judge"]["action"] == "replace"
     change = runtime.org.propose(decision, runtime.agents[mission.id])
+    grant_org_approval(mission, "replace", str(lead.id))
     replacement = await runtime.org.apply(runtime, mission, root, change)
     agents = {agent.id: agent for agent in store.load_agents(mission.id)}
     assert agents[lead.id].status == AgentStatus.STOPPED
