@@ -404,3 +404,105 @@ export function replayView(log, index, options = {}) {
         : "Recorded events only · not a simulation"),
   };
 }
+
+export const LAST_MODEL_LATENCY_UNAVAILABLE = "unavailable";
+const LLM_MODEL_EVENTS = new Set([
+  "llm.started", "llm.completed", "llm.failed", "llm.retry", "llm.failover",
+]);
+const LLM_FINISHED_EVENTS = new Set(["llm.completed", "llm.failed"]);
+const MODEL_LATENCY_FIELDS = ["latency_ms", "duration_ms", "elapsed_ms"];
+
+function hiddenModelLatency() {
+  return {hidden: true, label: "", known: false, ms: null};
+}
+function unavailableModelLatency() {
+  return {hidden: false, label: LAST_MODEL_LATENCY_UNAVAILABLE, known: false, ms: null};
+}
+function eventPayload(event) {
+  const payload = event?.payload;
+  return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+}
+function eventTimeMs(event) {
+  const raw = event?.created_at;
+  if (typeof raw === "number") return raw > 0 && Number.isFinite(raw) ? raw : null;
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const parsed = Date.parse(raw.trim());
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+/** Same buckets as Mission Control elapsed (`#hudElapsed`): hours, minutes, then seconds. */
+export function formatModelLatency(ms) {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) return null;
+  if (ms < 1000) {
+    const rounded = Math.round(ms);
+    if (rounded <= 0) return null;
+    if (rounded >= 1000) return formatModelLatency(rounded);
+    return rounded + "ms";
+  }
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  if (hours) return hours + "h " + (minutes % 60) + "m";
+  if (minutes) return minutes + "m " + (seconds % 60) + "s";
+  return seconds + "s";
+}
+function knownModelLatency(ms) {
+  const label = formatModelLatency(ms);
+  if (!label) return unavailableModelLatency();
+  return {hidden: false, label, known: true, ms};
+}
+function explicitModelLatency(payload) {
+  for (const key of MODEL_LATENCY_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(payload, key)) continue;
+    const ms = finiteNumber(payload[key]);
+    if (ms === null || ms <= 0) return {status: "invalid"};
+    return {status: "ok", ms};
+  }
+  return {status: "absent"};
+}
+function matchingModelStart(events, finishedIndex, finished) {
+  const actor = finished?.actor_id ?? null;
+  const kind = eventPayload(finished).kind;
+  for (let i = finishedIndex + 1; i < events.length; i++) {
+    const event = events[i];
+    if (!event || typeof event !== "object") continue;
+    const sameActor = !actor || !event.actor_id || event.actor_id === actor;
+    if (!sameActor) continue;
+    if (LLM_FINISHED_EVENTS.has(event.event_type)) return null;
+    if (event.event_type !== "llm.started") continue;
+    const startKind = eventPayload(event).kind;
+    if (kind && startKind && startKind !== kind) continue;
+    return event;
+  }
+  return null;
+}
+
+/**
+ * Read-only duration of the newest model call already on the shell.
+ * Events are newest-first, matching `state.events`. An explicit positive
+ * `latency_ms` / `duration_ms` / `elapsed_ms` wins. Otherwise the span is the
+ * recorded `created_at` delta from the matching `llm.started`. Zero is never a duration.
+ */
+export function lastModelLatencyView(state) {
+  if (!state || state.preview === true || !state.mission) return hiddenModelLatency();
+  const events = Array.isArray(state.events) ? state.events : [];
+  let newest = null;
+  let newestIndex = -1;
+  for (let i = 0; i < events.length; i++) {
+    const event = events[i];
+    if (event && LLM_MODEL_EVENTS.has(event.event_type)) {
+      newest = event;
+      newestIndex = i;
+      break;
+    }
+  }
+  if (!newest) return hiddenModelLatency();
+  if (!LLM_FINISHED_EVENTS.has(newest.event_type)) return unavailableModelLatency();
+  const explicit = explicitModelLatency(eventPayload(newest));
+  if (explicit.status === "invalid") return unavailableModelLatency();
+  if (explicit.status === "ok") return knownModelLatency(explicit.ms);
+  const started = matchingModelStart(events, newestIndex, newest);
+  const end = eventTimeMs(newest);
+  const start = started ? eventTimeMs(started) : null;
+  if (start === null || end === null || end <= start) return unavailableModelLatency();
+  return knownModelLatency(end - start);
+}
