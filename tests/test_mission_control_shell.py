@@ -26,7 +26,7 @@ def test_compact_shell_preserves_every_javascript_mount_point():
 
     required = {
         "missionForm", "goal", "launch", "brain", "history", "objectiveHud",
-        "missionMode", "missionStatus", "hudElapsed", "hudAgents", "hudTasks",
+        "missionMode", "missionStatus", "missionPhaseChip", "hudElapsed", "hudAgents", "hudTasks",
         "hudTokens", "hudSpend", "costHud", "replayHud", "questionPanel",
         "answerForm", "mapViewport", "world", "connections", "nodes", "emptyMap",
         "agentCount", "taskCount", "tokenCount", "inspectorContent", "activity",
@@ -34,6 +34,14 @@ def test_compact_shell_preserves_every_javascript_mount_point():
     }
     assert required <= set(parser.ids)
     assert len(parser.ids) == len(set(parser.ids))
+    assert html.index('id="objectiveHud"') < html.index('id="missionPhaseChip"') < html.index('id="hudElapsed"')
+    assert 'id="missionPhaseChip" class="hud-chip status" hidden></span>' in html
+    control = (ROOT / "app/static/control.js").read_text(encoding="utf-8")
+    state = (ROOT / "app/static/state.mjs").read_text(encoding="utf-8")
+    assert "missionPhaseChip" in control
+    assert 'label: "unavailable"' in state
+    assert "in_progress" not in state
+    assert "executing" not in state
 
 
 def test_shell_is_tree_first_and_secondary_controls_are_collapsible():
