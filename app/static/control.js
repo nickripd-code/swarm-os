@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,verificationAgeChip,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -50,6 +50,16 @@ function renderHud(){
     $("missionStatus").textContent=status.toUpperCase();
     $("missionStatus").className="hud-chip status "+status;
   }
+  let verificationAge=null;
+  if($("verificationAgeChip")){
+    verificationAge=verificationAgeChip(state,{now:Date.now()});
+    const chip=$("verificationAgeChip");
+    chip.hidden=verificationAge.hidden;
+    chip.textContent=verificationAge.hidden?"":verificationAge.label;
+    chip.className="hud-chip verify-age "+(verificationAge.known?"known":"unavailable");
+    if(verificationAge.hidden||!verificationAge.title)chip.removeAttribute("title");
+    else chip.title=verificationAge.title;
+  }
   if($("hudAgents"))$("hudAgents").textContent=state.agents.size;
   if($("hudTasks"))$("hudTasks").textContent=[...state.tasks.values()].filter(t=>t.status==="completed").length;
   const cost=costHudView(state.usage);
@@ -79,8 +89,9 @@ function renderHud(){
     $("replayChip").className="hud-chip mode "+(state.preview?"preview":replayLive?"replay-live":"replay");
   }
   const running=!!mission&&!terminal.has(status)&&replayLive&&!state.preview;
-  if(running&&!hudTick)hudTick=setInterval(renderHud,1000);
-  if(!running&&hudTick){clearInterval(hudTick);hudTick=null;}
+  const ageTicking=!!verificationAge&&verificationAge.known&&!verificationAge.hidden;
+  if((running||ageTicking)&&!hudTick)hudTick=setInterval(renderHud,1000);
+  if(!running&&!ageTicking&&hudTick){clearInterval(hudTick);hudTick=null;}
 }
 function clearAlerts(){if($("alerts"))$("alerts").replaceChildren();}
 function pushAlert(alert){

@@ -228,6 +228,108 @@ export function resultMetaText(mission) {
   if (result.failure_class) bits.push(result.failure_class);
   return bits.join(" · ");
 }
+export const VERIFICATION_AGE_UNAVAILABLE = "unavailable";
+const VERIFICATION_AGE_SKEW_MS = 120000;
+const VERIFICATION_AGE_HIDDEN = Object.freeze({
+  hidden: true, label: "", known: false, at: null, title: "",
+});
+const VERIFICATION_EVENTS = new Set([
+  "verification.started",
+  "verification.passed",
+  "verification.failed",
+  "verification.evidence.started",
+  "verification.evidence.passed",
+  "verification.evidence.failed",
+]);
+const VERIFICATION_STAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})$/;
+
+function verificationStamp(raw) {
+  if (typeof raw !== "string") return null;
+  const stamp = raw.trim();
+  const match = VERIFICATION_STAMP.exec(stamp);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const frac = match[7] || "";
+  const zone = match[8];
+  if (month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59 || second > 59) return null;
+  let offsetMin = 0;
+  if (zone !== "Z") {
+    const sign = zone[0] === "-" ? -1 : 1;
+    const zh = Number(zone.slice(1, 3));
+    const zm = Number(zone.slice(4, 6));
+    if (zh > 23 || zm > 59) return null;
+    offsetMin = sign * (zh * 60 + zm);
+  }
+  const ms = Number((frac + "000").slice(0, 3));
+  const at = Date.UTC(year, month - 1, day, hour, minute - offsetMin, second, ms);
+  if (!Number.isFinite(at) || at <= 0) return null;
+  const zoned = new Date(at + offsetMin * 60000);
+  if (
+    zoned.getUTCFullYear() !== year
+    || zoned.getUTCMonth() !== month - 1
+    || zoned.getUTCDate() !== day
+    || zoned.getUTCHours() !== hour
+    || zoned.getUTCMinutes() !== minute
+    || zoned.getUTCSeconds() !== second
+  ) return null;
+  return {stamp, at};
+}
+
+function unavailableVerificationAge() {
+  return {
+    hidden: false,
+    label: VERIFICATION_AGE_UNAVAILABLE,
+    known: false,
+    at: null,
+    title: "",
+  };
+}
+
+function relativeVerificationAge(ageMs) {
+  const seconds = Math.floor(ageMs / 1000);
+  if (seconds < 60) return seconds + "s ago";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + "m ago";
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + "h ago";
+  return Math.floor(hours / 24) + "d ago";
+}
+
+function knownVerificationAge(parsed, now) {
+  const clock = typeof now === "number" && Number.isFinite(now) && now > 0 ? now : null;
+  const label = clock === null
+    ? "Verified " + parsed.stamp
+    : "Verified " + relativeVerificationAge(Math.max(0, clock - parsed.at));
+  return {
+    hidden: false,
+    label,
+    known: true,
+    at: parsed.stamp,
+    title: parsed.stamp,
+  };
+}
+
+/** Read-only age of the newest verification or evidence event created_at already in the shell. */
+export function verificationAgeChip(state, options = {}) {
+  if (!state || state.preview === true || !state.mission) return VERIFICATION_AGE_HIDDEN;
+  const events = Array.isArray(state.events) ? state.events : [];
+  for (const event of events) {
+    if (!event || !VERIFICATION_EVENTS.has(event.event_type)) continue;
+    const parsed = verificationStamp(event.created_at);
+    const now = options.now;
+    const clock = typeof now === "number" && Number.isFinite(now) && now > 0 ? now : null;
+    if (!parsed || (clock !== null && parsed.at - clock > VERIFICATION_AGE_SKEW_MS)) {
+      return unavailableVerificationAge();
+    }
+    return knownVerificationAge(parsed, now);
+  }
+  return VERIFICATION_AGE_HIDDEN;
+}
 export function alertFromEvent(e) {
   const p = e.payload || {};
   switch (e.event_type) {
