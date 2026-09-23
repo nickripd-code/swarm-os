@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,connectionStateChipView} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -31,7 +31,16 @@ function haltPreviewLocally(){
   pushAlert({level:"warning",title:"Execution stopped",detail:"Preview halted",event_type:"mission.stopped"});
   schedule();
 }
-function connection(text,cls="") {$("connection").className="connection "+cls;$("connection").innerHTML="<i></i>"+esc(text);}
+function renderConnectionStateChip(){
+  const el=$("connectionStateChip");
+  if(!el)return;
+  const source=$("connection");
+  const view=connectionStateChipView(source?{present:true,preview:state.preview===true,connectionHidden:source.hidden===true,label:source.textContent||""}:{present:false});
+  el.hidden=!!view.hidden;
+  el.textContent=view.label;
+  el.className="hud-chip link"+(view.hidden?"":(view.known?"":" unavailable"));
+}
+function connection(text,cls="") {$("connection").className="connection "+cls;$("connection").innerHTML="<i></i>"+esc(text);renderConnectionStateChip();}
 function formatElapsed(ms){
   if(!Number.isFinite(ms)||ms<0)ms=0;
   const s=Math.floor(ms/1000), m=Math.floor(s/60), h=Math.floor(m/60);
@@ -78,6 +87,7 @@ function renderHud(){
     $("replayChip").textContent=state.preview?"PREVIEW":(replayLive?"LIVE":"REPLAY");
     $("replayChip").className="hud-chip mode "+(state.preview?"preview":replayLive?"replay-live":"replay");
   }
+  renderConnectionStateChip();
   const running=!!mission&&!terminal.has(status)&&replayLive&&!state.preview;
   if(running&&!hudTick)hudTick=setInterval(renderHud,1000);
   if(!running&&hudTick){clearInterval(hudTick);hudTick=null;}
