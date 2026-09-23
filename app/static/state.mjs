@@ -1,5 +1,6 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const LATENCY_UNAVAILABLE = "unavailable";
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -82,6 +83,21 @@ export function newState(mission = null) {
 function finiteNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
+function measuredMs(value) {
+  const n = finiteNumber(value);
+  if (n === null || n < 0) return null;
+  return n;
+}
+function formatPongAge(ms) {
+  const n = Math.round(ms);
+  if (n < 1000) return n + " ms";
+  const s = Math.floor(n / 1000);
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m " + (s % 60) + "s";
+  const h = Math.floor(m / 60);
+  return h + "h " + (m % 60) + "m";
+}
 function nonNegativeInt(value) {
   const n = finiteNumber(value);
   if (n === null || n < 0) return 0;
@@ -126,6 +142,66 @@ export function costHudView(usage = {}) {
     budgetLabel,
     remainingLabel,
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
+  };
+}
+export function applyConnectionSample(link, frame) {
+  if (!link || typeof link !== "object") return link || null;
+  if (!frame || typeof frame !== "object" || Array.isArray(frame)) return link;
+  if (frame.type !== "connection.pong") return link;
+  if (typeof frame.event_type === "string" && frame.event_type) return link;
+  const next = {
+    transport: link.transport,
+    readyState: link.readyState,
+    reconnecting: link.reconnecting === true,
+    latencyMs: measuredMs(link.latencyMs),
+    lastPongAt: measuredMs(link.lastPongAt),
+  };
+  if (Object.prototype.hasOwnProperty.call(frame, "latency_ms")) {
+    next.latencyMs = measuredMs(frame.latency_ms);
+  }
+  if (Object.prototype.hasOwnProperty.call(frame, "pong_at")) {
+    next.lastPongAt = measuredMs(frame.pong_at);
+  }
+  return next;
+}
+export function latencyChipView(link, now) {
+  const hidden = {
+    visible: false,
+    connected: false,
+    known: false,
+    label: LATENCY_UNAVAILABLE,
+    latencyMs: null,
+    pongAgeMs: null,
+    title: "Connection latency unavailable",
+  };
+  if (!link || typeof link !== "object" || link.transport !== "websocket") return hidden;
+  if (link.readyState !== 1 || link.reconnecting === true) return hidden;
+  const latencyMs = measuredMs(link.latencyMs);
+  const pongAt = measuredMs(link.lastPongAt);
+  const clock = measuredMs(now);
+  const pongAgeMs = pongAt !== null && clock !== null && clock >= pongAt ? clock - pongAt : null;
+  if (latencyMs === null && pongAgeMs === null) {
+    return {
+      visible: true,
+      connected: true,
+      known: false,
+      label: LATENCY_UNAVAILABLE,
+      latencyMs: null,
+      pongAgeMs: null,
+      title: "Connection latency unavailable",
+    };
+  }
+  const parts = [];
+  if (latencyMs !== null) parts.push(Math.round(latencyMs) + " ms");
+  if (pongAgeMs !== null) parts.push("pong " + formatPongAge(pongAgeMs));
+  return {
+    visible: true,
+    connected: true,
+    known: true,
+    label: parts.join(" · "),
+    latencyMs,
+    pongAgeMs,
+    title: latencyMs !== null ? "Measured WebSocket round trip" : "Age of the last WebSocket pong",
   };
 }
 export function applyEvent(state, e) {

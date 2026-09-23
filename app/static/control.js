@@ -1,11 +1,11 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,applyConnectionSample,latencyChipView} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
 const statusName = status => ({created:"Ready",running:"Thinking",completed:"Done",blocked:"Blocked",failed:"Failed",stopped:"Stopped",pending:"Queued",paused:"Paused",waiting:"Waiting"}[status] || status);
 const symbol = status => ({created:"·",running:"",completed:"✓",blocked:"?",failed:"!",stopped:"■"}[status] || "·");
 const colors = ["#c6b4ef","#edbd9e","#aed8cf","#e6cd90","#b5cbe3","#dfb9ca"];
-let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null, hudTick=null, notifyArmed=false, killAvailable=false;
+let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null, hudTick=null, notifyArmed=false, killAvailable=false, liveLink=null, latencyTick=null;
 let eventLog=[], replayCursor=-1, replayLive=true, replayTimer=null, sourceMission=null;
 const elements=new Map();
 const bot = color => '<span class="bot" style="--agent-color:'+color+'" aria-hidden="true"><span class="ear ear-left"></span><span class="ear ear-right"></span><span class="visor"><i></i><i></i><b class="mouth"></b></span></span>';
@@ -81,6 +81,40 @@ function renderHud(){
   const running=!!mission&&!terminal.has(status)&&replayLive&&!state.preview;
   if(running&&!hudTick)hudTick=setInterval(renderHud,1000);
   if(!running&&hudTick){clearInterval(hudTick);hudTick=null;}
+  renderLatencyChip();
+}
+function renderLatencyChip(){
+  const el=$("latencyChip");
+  if(!el)return;
+  const view=latencyChipView(liveLink,Date.now());
+  el.hidden=!view.visible;
+  el.textContent=view.label;
+  el.dataset.known=view.known?"true":"false";
+  el.dataset.connected=view.connected?"true":"false";
+  el.title=view.title;
+  const ticking=view.connected&&view.pongAgeMs!=null;
+  if(ticking&&!latencyTick)latencyTick=setInterval(renderLatencyChip,1000);
+  if(!ticking&&latencyTick){clearInterval(latencyTick);latencyTick=null;}
+}
+function publishSocket(socket,reconnecting){
+  const previous=liveLink;
+  if(!socket)liveLink=null;
+  else{
+    const stillOpen=socket.readyState===1&&reconnecting!==true;
+    liveLink={
+      transport:"websocket",
+      readyState:socket.readyState,
+      reconnecting:reconnecting===true,
+      latencyMs:stillOpen&&previous?previous.latencyMs:null,
+      lastPongAt:stillOpen&&previous?previous.lastPongAt:null,
+    };
+  }
+  renderLatencyChip();
+}
+function noteSocketFrame(frame){
+  if(!liveLink)return;
+  const next=applyConnectionSample(liveLink,frame);
+  if(next!==liveLink){liveLink=next;renderLatencyChip();}
 }
 function clearAlerts(){if($("alerts"))$("alerts").replaceChildren();}
 function pushAlert(alert){
@@ -305,6 +339,7 @@ async function request(path,options){
 }
 function disconnect(){
   generation++;clearTimeout(retry);clearTimeout(previewTimer);stopReplayPlay();if(ws){ws.onclose=null;ws.close();ws=null;}
+  publishSocket(null,false);
 }
 function reset(mission){
   stopReplayPlay();
@@ -394,11 +429,16 @@ function connect(id,gen){
   if(gen!==generation)return;
   const liveFrom=Date.now();
   ws=new WebSocket((location.protocol==="https:"?"wss:":"ws:")+"//"+location.host+"/api/missions/"+id+"/stream");
-  ws.onopen=()=>{if(gen===generation&&!terminal.has(state.mission?.status||""))connection("Live connection","live");};
+  ws.onopen=()=>{
+    if(gen!==generation)return;
+    publishSocket(ws,false);
+    if(!terminal.has(state.mission?.status||""))connection("Live connection","live");
+  };
   ws.onmessage=message=>{
     if(gen!==generation)return;
     try{
       const e=JSON.parse(message.data);
+      if(e&&e.type==="connection.pong"&&!e.event_type){noteSocketFrame(e);return;}
       if(ingestRecorded(e)){
         schedule();
         if(replayLive){
@@ -415,10 +455,15 @@ function connect(id,gen){
       }
     }catch{showNotice("An event could not be read. Reconnect to restore the mission.");}
   };
-  ws.onerror=()=>connection("Connection interrupted","disconnected");
+  ws.onerror=()=>{
+    if(gen!==generation)return;
+    publishSocket(ws,false);
+    connection("Connection interrupted","disconnected");
+  };
   ws.onclose=()=>{
     if(gen!==generation)return;
     const status=state.mission?.status||"";
+    publishSocket(ws,!terminal.has(status));
     if(terminal.has(status)){connection("Mission "+status,status==="completed"?"live":"disconnected");return;}
     connection("Reconnecting…","disconnected");
     retry=setTimeout(()=>connect(id,gen),2000);
