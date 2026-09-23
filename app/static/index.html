@@ -69,6 +69,18 @@
       </details>
     </section>
 
+    <section class="failure-panel" id="failurePanel" hidden aria-label="Failure and park reason">
+      <div class="failure-heading"><span class="eyebrow">FAILURE / PARK</span><span id="failureKind" class="hud-chip" hidden></span></div>
+      <p id="failureEmpty">No recorded failure, park, or blocked approval.</p>
+      <dl id="failureFacts" hidden>
+        <div id="failureClassRow" hidden><dt>Class</dt><dd id="failureClass"></dd></div>
+        <div id="failureReasonRow" hidden><dt>Reason</dt><dd id="failureReason"></dd></div>
+        <div id="failureApprovalRow" hidden><dt>Approval</dt><dd id="failureApproval"></dd></div>
+        <div id="failureQuestionRow" hidden><dt>Question</dt><dd id="failureQuestion"></dd></div>
+      </dl>
+      <p id="failureSource" class="failure-source" hidden></p>
+    </section>
+
     <section class="question-panel" id="questionPanel" hidden>
       <div><span class="eyebrow">AUTHORIZATION REQUIRED</span><h2>The swarm needs your answer.</h2></div><p id="questionText"></p>
       <form id="answerForm" class="answer-form"><label class="sr-only" for="answerText">Your answer</label><textarea id="answerText" name="answer" required minlength="1" maxlength="4000" rows="2" placeholder="Type an answer…"></textarea><button id="answerSend" type="submit">Send <span aria-hidden="true">↗</span></button></form>
