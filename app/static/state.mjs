@@ -404,3 +404,54 @@ export function replayView(log, index, options = {}) {
         : "Recorded events only · not a simulation"),
   };
 }
+
+export const BUDGET_UPDATE_COUNT_UNAVAILABLE = "BUDGET UPDATES unavailable";
+
+/** Same acceptance as last-spend-at: known budget.updated with a finite non-negative token_spent. */
+function isAcceptedBudgetUpdate(event) {
+  if (!event || typeof event !== "object" || Array.isArray(event) || event.event_type !== "budget.updated") return false;
+  const payload = event.payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  if (payload.known !== true) return false;
+  const spent = finiteNumber(payload.token_spent);
+  return spent !== null && spent >= 0;
+}
+
+/** Prefix of a loaded event log. A missing feed stays null — never an invented []. */
+export function recordedBudgetUpdateCountFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+
+/**
+ * Read-only count of accepted budget.updated events on the loaded feed.
+ * Hidden with an empty label when there is no mission, in preview, or the caller marks it not visible.
+ * A missing feed or an unreadable event_type is BUDGET UPDATES unavailable, never 0.
+ * An explicit empty list (including a cursor before any event) is BUDGET UPDATES 0.
+ * Rejected updates (unknown, non-numeric, or negative spend) are not counted.
+ * The label is a count only and never includes a spend amount.
+ */
+export function budgetUpdateCountView(feed, options = {}) {
+  if (options.visible !== true) {
+    return {hidden: true, known: false, count: null, label: ""};
+  }
+  if (!Array.isArray(feed)) {
+    return {hidden: false, known: false, count: null, label: BUDGET_UPDATE_COUNT_UNAVAILABLE};
+  }
+  let count = 0;
+  for (const event of feed) {
+    if (!event || typeof event !== "object" || Array.isArray(event)) continue;
+    const type = event.event_type;
+    if (typeof type !== "string") {
+      if (type != null) {
+        return {hidden: false, known: false, count: null, label: BUDGET_UPDATE_COUNT_UNAVAILABLE};
+      }
+      continue;
+    }
+    if (isAcceptedBudgetUpdate(event)) count += 1;
+  }
+  return {hidden: false, known: true, count, label: "BUDGET UPDATES " + count};
+}
