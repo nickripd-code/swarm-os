@@ -1,5 +1,8 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const LAST_TOOL_UNAVAILABLE = "unavailable";
+const TOOL_NAME_EVENTS = new Set(["tool.started", "tool.completed", "tool.failed"]);
+const TOOL_NAME = /^[A-Za-z0-9_.:-]{1,80}$/;
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -127,6 +130,29 @@ export function costHudView(usage = {}) {
     remainingLabel,
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
+}
+function recordedToolName(event) {
+  if (!event || !TOOL_NAME_EVENTS.has(event.event_type)) return null;
+  const raw = event.payload && typeof event.payload === "object" ? event.payload.tool : null;
+  const tool = typeof raw === "string" ? raw.trim() : "";
+  return TOOL_NAME.test(tool) ? tool : null;
+}
+/**
+ * Most recent tool name already stored on shell tool events.
+ * state.events is newest-first. No mission or preview stays hidden.
+ * A loaded mission with no valid recorded name is unavailable — never a guessed name.
+ */
+export function lastToolNameChip(state) {
+  const mission = state?.mission || null;
+  if (!mission || state?.preview === true) {
+    return {hidden: true, label: "", known: false, tool: null};
+  }
+  const events = Array.isArray(state.events) ? state.events : [];
+  for (const event of events) {
+    const tool = recordedToolName(event);
+    if (tool) return {hidden: false, label: tool, known: true, tool};
+  }
+  return {hidden: false, label: LAST_TOOL_UNAVAILABLE, known: false, tool: null};
 }
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
