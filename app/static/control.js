@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,missionAgeChip,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -73,14 +73,31 @@ function renderHud(){
       $("hudElapsed").textContent=Number.isFinite(start)?formatElapsed(Date.now()-start):"—";
     }
   }
+  let missionAge=null;
+  if($("missionAgeChip")){
+    const view=replayView(eventLog,replayCursor,{preview:state.preview,mission:sourceMission||mission});
+    let now=Date.now();
+    if(!replayLive&&!state.preview){
+      const at=view.createdAt?Date.parse(view.createdAt):NaN;
+      now=Number.isFinite(at)&&at>0?at:null;
+    }
+    missionAge=missionAgeChip(state,{now});
+    const chip=$("missionAgeChip");
+    chip.hidden=missionAge.hidden;
+    chip.textContent=missionAge.hidden?"":missionAge.label;
+    chip.className="hud-chip mission-age "+(missionAge.known?"known":"unavailable");
+    if(missionAge.hidden||!missionAge.title)chip.removeAttribute("title");
+    else chip.title=missionAge.title;
+  }
   if($("replayChip")){
     $("replayChip").hidden=state.preview||!mission;
     $("replayChip").textContent=state.preview?"PREVIEW":(replayLive?"LIVE":"REPLAY");
     $("replayChip").className="hud-chip mode "+(state.preview?"preview":replayLive?"replay-live":"replay");
   }
   const running=!!mission&&!terminal.has(status)&&replayLive&&!state.preview;
-  if(running&&!hudTick)hudTick=setInterval(renderHud,1000);
-  if(!running&&hudTick){clearInterval(hudTick);hudTick=null;}
+  const ageTicking=!!missionAge&&missionAge.known&&!missionAge.hidden&&replayLive&&!state.preview;
+  if((running||ageTicking)&&!hudTick)hudTick=setInterval(renderHud,1000);
+  if(!running&&!ageTicking&&hudTick){clearInterval(hudTick);hudTick=null;}
 }
 function clearAlerts(){if($("alerts"))$("alerts").replaceChildren();}
 function pushAlert(alert){

@@ -228,6 +228,104 @@ export function resultMetaText(mission) {
   if (result.failure_class) bits.push(result.failure_class);
   return bits.join(" · ");
 }
+export const MISSION_AGE_UNAVAILABLE = "unavailable";
+const MISSION_AGE_SKEW_MS = 120000;
+const MISSION_AGE_HIDDEN = Object.freeze({
+  hidden: true, label: "", known: false, at: null, title: "",
+});
+const MISSION_STAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})$/;
+
+function missionStamp(raw) {
+  if (typeof raw !== "string") return null;
+  const stamp = raw.trim();
+  const match = MISSION_STAMP.exec(stamp);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const frac = match[7] || "";
+  const zone = match[8];
+  if (month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59 || second > 59) return null;
+  let offsetMin = 0;
+  if (zone !== "Z") {
+    const sign = zone[0] === "-" ? -1 : 1;
+    const zh = Number(zone.slice(1, 3));
+    const zm = Number(zone.slice(4, 6));
+    if (zh > 23 || zm > 59) return null;
+    offsetMin = sign * (zh * 60 + zm);
+  }
+  const ms = Number((frac + "000").slice(0, 3));
+  const at = Date.UTC(year, month - 1, day, hour, minute - offsetMin, second, ms);
+  if (!Number.isFinite(at) || at <= 0) return null;
+  const zoned = new Date(at + offsetMin * 60000);
+  if (
+    zoned.getUTCFullYear() !== year
+    || zoned.getUTCMonth() !== month - 1
+    || zoned.getUTCDate() !== day
+    || zoned.getUTCHours() !== hour
+    || zoned.getUTCMinutes() !== minute
+    || zoned.getUTCSeconds() !== second
+  ) return null;
+  return {stamp, at};
+}
+
+function unavailableMissionAge() {
+  return {
+    hidden: false,
+    label: MISSION_AGE_UNAVAILABLE,
+    known: false,
+    at: null,
+    title: "",
+  };
+}
+
+function relativeMissionAge(ageMs) {
+  const seconds = Math.floor(ageMs / 1000);
+  if (seconds < 60) return seconds + "s ago";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + "m ago";
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + "h ago";
+  return Math.floor(hours / 24) + "d ago";
+}
+
+function runtimeClock(mission) {
+  const runtime = mission && mission.runtime;
+  return runtime && typeof runtime === "object" ? runtime : null;
+}
+
+function missionAgeAnchor(mission) {
+  if (mission.started_at != null) return mission.started_at;
+  const runtime = runtimeClock(mission);
+  if (runtime && runtime.started_at != null) return runtime.started_at;
+  if (mission.created_at != null) return mission.created_at;
+  if (runtime && runtime.created_at != null) return runtime.created_at;
+  return undefined;
+}
+
+/** Read-only age of the loaded mission from started_at, runtime clock, or created_at. */
+export function missionAgeChip(state, options = {}) {
+  if (!state || state.preview === true || !state.mission) return MISSION_AGE_HIDDEN;
+  const raw = missionAgeAnchor(state.mission);
+  if (raw === undefined) return unavailableMissionAge();
+  const parsed = missionStamp(raw);
+  const now = options.now;
+  const clock = typeof now === "number" && Number.isFinite(now) && now > 0 ? now : null;
+  if (!parsed || (clock !== null && parsed.at - clock > MISSION_AGE_SKEW_MS)) {
+    return unavailableMissionAge();
+  }
+  const label = clock === null ? parsed.stamp : relativeMissionAge(Math.max(0, clock - parsed.at));
+  return {
+    hidden: false,
+    label,
+    known: true,
+    at: parsed.stamp,
+    title: parsed.stamp,
+  };
+}
 export function alertFromEvent(e) {
   const p = e.payload || {};
   switch (e.event_type) {
@@ -347,12 +445,21 @@ export function isReplayLive(index, length) {
   if (!length || length < 1) return true;
   return clampReplayIndex(index, length) === length - 1;
 }
+function copiedRuntimeClock(runtime) {
+  if (!runtime || typeof runtime !== "object") return null;
+  const copy = {};
+  if (runtime.started_at != null) copy.started_at = runtime.started_at;
+  if (runtime.created_at != null) copy.created_at = runtime.created_at;
+  return Object.keys(copy).length ? copy : null;
+}
 export function missionSnapshot(mission) {
   if (!mission) return null;
   return {
     id: mission.id,
     goal: mission.goal,
     created_at: mission.created_at,
+    started_at: mission.started_at ?? null,
+    runtime: copiedRuntimeClock(mission.runtime),
     mode: mission.mode,
     budget: mission.budget,
     status: "pending",
