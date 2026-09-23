@@ -1,5 +1,6 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const CHANGE_BUDGET_UNAVAILABLE = "unavailable";
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -126,6 +127,32 @@ export function costHudView(usage = {}) {
     budgetLabel,
     remainingLabel,
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
+  };
+}
+function recordedChangeCount(value) {
+  const n = finiteNumber(value);
+  if (!Number.isSafeInteger(n) || n < 0) return null;
+  return n;
+}
+export function changeBudgetView(mission) {
+  const label = "CHANGE BUDGET " + CHANGE_BUDGET_UNAVAILABLE;
+  const unavailable = {visible: false, known: false, used: null, remaining: null, cap: null, label};
+  if (!mission || typeof mission !== "object") return unavailable;
+  const unrecorded = {...unavailable, visible: true};
+  const record = mission.change_budget;
+  if (!record || typeof record !== "object" || Array.isArray(record)) return unrecorded;
+  if (record.known === false || record.recorded === false) return unrecorded;
+  const used = recordedChangeCount(record.used);
+  const remaining = recordedChangeCount(record.remaining);
+  const cap = recordedChangeCount(record.cap);
+  if (used === null || remaining === null || cap === null || used + remaining !== cap) return unrecorded;
+  return {
+    visible: true,
+    known: true,
+    used,
+    remaining,
+    cap,
+    label: "CHANGE BUDGET " + remaining + " remaining · " + used + " used · cap " + cap,
   };
 }
 export function applyEvent(state, e) {
