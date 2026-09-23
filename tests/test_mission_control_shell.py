@@ -29,7 +29,7 @@ def test_compact_shell_preserves_every_javascript_mount_point():
         "missionMode", "missionStatus", "hudElapsed", "hudAgents", "hudTasks",
         "hudTokens", "hudSpend", "costHud", "replayHud", "questionPanel",
         "answerForm", "mapViewport", "world", "connections", "nodes", "emptyMap",
-        "agentCount", "taskCount", "tokenCount", "inspectorContent", "activity",
+        "agentCount", "taskCount", "tokenCount", "orgMapNodes", "inspectorContent", "activity",
         "commandBar", "commandForm", "resultPanel", "stopAll", "alerts",
     }
     assert required <= set(parser.ids)
