@@ -85,7 +85,7 @@ Set keys in the environment only. Never commit them, log them, or return them ov
 | `VLLM_MODEL` | Optional vLLM model id. Setting this (or `VLLM_BASE_URL`) registers the local adapter in the router catalog. |
 | `LLAMACPP_BASE_URL` | Opt-in local OpenAI-compatible llama.cpp server (default `http://127.0.0.1:8080/v1` when opted in). |
 | `LLAMACPP_MODEL` | Optional llama.cpp model id. Setting this (or `LLAMACPP_BASE_URL`) registers the local adapter in the router catalog. |
-| `SWARM_LOCAL_TOOLS` | Optional comma-separated allowlist of in-process tools (`echo`, `clock.utc`, `hash.sha256`). Empty means no local tools. |
+| `SWARM_LOCAL_TOOLS` | Optional comma-separated allowlist of in-process tools (`echo`, `clock.utc`, `hash.sha256`, `json.pretty`, `uuid.v4`, `text.bytes_len`, `text.b64decode`). Empty means no local tools. None of these shell out or use the network. |
 | `MCP_SERVER_URL` | Optional JSON-RPC MCP endpoint. Unset stays out of the catalog; unreachable calls fail closed. |
 | `MCP_API_KEY` | Optional bearer token for `MCP_SERVER_URL`. Never logged, never returned over HTTP, never placed in model context. |
 | `COMPOSIO_API_KEY` | Optional Composio Sessions action gateway. Enables read-only tool search, OAuth link creation, and only concrete read-only tools returned by that scoped session. Keep it in the server environment only. |
