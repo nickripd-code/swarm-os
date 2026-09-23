@@ -49,7 +49,7 @@ cases.completesOnly = llmFailoverRateView([
 ], {visible: true});
 cases.half = llmFailoverRateView([failover("fo"), completed("a")], {visible: true});
 cases.allFailed = llmFailoverRateView([failed("f1"), failed("f2")], {visible: true});
-cases.third = llmFailoverRateView([failover("fo"), completed("a"), failed("b")], {visible: true});
+cases.third = llmFailoverRateView([failover("fo"), completed("a"), failed("b"), completed("c")], {visible: true});
 cases.retriesIgnored = llmFailoverRateView([
   event("s", "llm.started"),
   event("r1", "llm.retry"),

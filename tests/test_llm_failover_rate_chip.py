@@ -107,7 +107,8 @@ def test_unreadable_rate_stays_unavailable(cases):
     assert tiny["known"] is False
     assert tiny["failovers"] == 1
     assert tiny["completed"] == 1000000
-    assert tiny["attempts"] == 1000001
+    assert tiny["failed"] == 0
+    assert tiny["attempts"] == 1000000
     assert tiny["rate"] is None
     assert tiny["label"] == "LLM FAILOVER RATE " + UNAVAILABLE
     assert tiny["label"] != "LLM FAILOVER RATE 0%"
