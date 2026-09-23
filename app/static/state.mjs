@@ -128,6 +128,19 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+export function tokenSpendChip(mission, usage = {}, options = {}) {
+  const hidden = {visible: false, known: false, spent: null, label: ""};
+  if (options.preview === true || !mission || typeof mission !== "object") return hidden;
+  const source = usage && typeof usage === "object" && !Array.isArray(usage) ? usage : {};
+  const view = costHudView(source);
+  const spent = finiteNumber(source.cost);
+  // Dollars only when the cost HUD already accepted a known budget.updated spend.
+  // Mission wallet fields, token counts, and a default zero are not spend.
+  if (!view.known || spent === null) {
+    return {visible: true, known: false, spent: null, label: ESTIMATE_UNAVAILABLE};
+  }
+  return {visible: true, known: true, spent, label: view.spendLabel + " spent"};
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
