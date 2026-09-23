@@ -219,6 +219,19 @@ export function missionMode(state) {
   if (state.preview) return "preview";
   return state.mission?.mode || state.mission?.result?.mode || (state.mission ? "pending" : "standby");
 }
+const MISSION_ID_PREFIX = 8;
+export function missionIdChip(mission, options = {}) {
+  if (options.preview === true || !mission || typeof mission !== "object") {
+    return {visible: false, id: null, label: ""};
+  }
+  const id = mission.id;
+  if (typeof id !== "string" || id.length === 0 || id !== id.trim() || id === "preview") {
+    return {visible: false, id: null, label: ""};
+  }
+  if (/[\u0000-\u001f\u007f]/.test(id)) return {visible: false, id: null, label: ""};
+  const label = id.length <= MISSION_ID_PREFIX ? id : id.slice(0, MISSION_ID_PREFIX) + "…";
+  return {visible: true, id, label};
+}
 export function resultMetaText(mission) {
   const result = mission?.result;
   if (!result) return "";
