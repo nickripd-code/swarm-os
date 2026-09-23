@@ -404,3 +404,25 @@ export function replayView(log, index, options = {}) {
         : "Recorded events only · not a simulation"),
   };
 }
+export const SHELL_MODE_UNAVAILABLE = "unavailable";
+export function shellModeView(options = {}) {
+  const preview = options.preview === true;
+  const mission = options.mission;
+  const missionId = mission && typeof mission === "object" ? mission.id : null;
+  const hasMission = typeof missionId === "string" && missionId.length > 0;
+  const logKnown = Array.isArray(options.log);
+  if (preview) {
+    return {known: true, mode: "preview", label: "PREVIEW", hidden: false};
+  }
+  if (!hasMission || !logKnown) {
+    return {known: false, mode: null, label: SHELL_MODE_UNAVAILABLE, hidden: false};
+  }
+  const view = replayView(options.log, options.index, {preview: false, mission});
+  if (view.live === true && view.label === "LIVE") {
+    return {known: true, mode: "live", label: "LIVE", hidden: false};
+  }
+  if (view.live === false && view.label === "REPLAY") {
+    return {known: true, mode: "replay", label: "REPLAY", hidden: false};
+  }
+  return {known: false, mode: null, label: SHELL_MODE_UNAVAILABLE, hidden: false};
+}
