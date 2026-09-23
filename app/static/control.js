@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,approvalAgeChip,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -73,14 +73,31 @@ function renderHud(){
       $("hudElapsed").textContent=Number.isFinite(start)?formatElapsed(Date.now()-start):"—";
     }
   }
+  let approvalAge=null;
+  if($("approvalAgeChip")){
+    const view=replayView(eventLog,replayCursor,{preview:state.preview,mission:sourceMission||mission});
+    let now=Date.now();
+    if(!replayLive&&!state.preview){
+      const at=view.createdAt?Date.parse(view.createdAt):NaN;
+      now=Number.isFinite(at)&&at>0?at:null;
+    }
+    approvalAge=approvalAgeChip(state,{now});
+    const chip=$("approvalAgeChip");
+    chip.hidden=approvalAge.hidden;
+    chip.textContent=approvalAge.hidden?"":approvalAge.label;
+    chip.className="hud-chip approval-age "+(approvalAge.known?"known":"unavailable");
+    if(approvalAge.hidden||!approvalAge.title)chip.removeAttribute("title");
+    else chip.title=approvalAge.title;
+  }
   if($("replayChip")){
     $("replayChip").hidden=state.preview||!mission;
     $("replayChip").textContent=state.preview?"PREVIEW":(replayLive?"LIVE":"REPLAY");
     $("replayChip").className="hud-chip mode "+(state.preview?"preview":replayLive?"replay-live":"replay");
   }
   const running=!!mission&&!terminal.has(status)&&replayLive&&!state.preview;
-  if(running&&!hudTick)hudTick=setInterval(renderHud,1000);
-  if(!running&&hudTick){clearInterval(hudTick);hudTick=null;}
+  const ageTicking=!!approvalAge&&approvalAge.known&&!!approvalAge.at&&!approvalAge.hidden&&replayLive&&!state.preview;
+  if((running||ageTicking)&&!hudTick)hudTick=setInterval(renderHud,1000);
+  if(!running&&!ageTicking&&hudTick){clearInterval(hudTick);hudTick=null;}
 }
 function clearAlerts(){if($("alerts"))$("alerts").replaceChildren();}
 function pushAlert(alert){

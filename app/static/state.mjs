@@ -215,6 +215,132 @@ export function applyEvent(state, e) {
   if (state.events.length > 120) state.events.length = 120;
   return true;
 }
+export const APPROVAL_AGE_UNAVAILABLE = "unavailable";
+export const APPROVAL_AGE_NONE = "none";
+const APPROVAL_AGE_SKEW_MS = 120000;
+const APPROVAL_AGE_HIDDEN = Object.freeze({
+  hidden: true, label: "", known: false, at: null, title: "",
+});
+const APPROVAL_STAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})$/;
+
+function approvalStamp(raw) {
+  if (typeof raw !== "string") return null;
+  const stamp = raw.trim();
+  const match = APPROVAL_STAMP.exec(stamp);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const frac = match[7] || "";
+  const zone = match[8];
+  if (month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59 || second > 59) return null;
+  let offsetMin = 0;
+  if (zone !== "Z") {
+    const sign = zone[0] === "-" ? -1 : 1;
+    const zh = Number(zone.slice(1, 3));
+    const zm = Number(zone.slice(4, 6));
+    if (zh > 23 || zm > 59) return null;
+    offsetMin = sign * (zh * 60 + zm);
+  }
+  const ms = Number((frac + "000").slice(0, 3));
+  const at = Date.UTC(year, month - 1, day, hour, minute - offsetMin, second, ms);
+  if (!Number.isFinite(at) || at <= 0) return null;
+  const zoned = new Date(at + offsetMin * 60000);
+  if (
+    zoned.getUTCFullYear() !== year
+    || zoned.getUTCMonth() !== month - 1
+    || zoned.getUTCDate() !== day
+    || zoned.getUTCHours() !== hour
+    || zoned.getUTCMinutes() !== minute
+    || zoned.getUTCSeconds() !== second
+  ) return null;
+  return {stamp, at};
+}
+
+function unavailableApprovalAge() {
+  return {
+    hidden: false,
+    label: APPROVAL_AGE_UNAVAILABLE,
+    known: false,
+    at: null,
+    title: "",
+  };
+}
+
+function noneApprovalAge() {
+  return {
+    hidden: false,
+    label: APPROVAL_AGE_NONE,
+    known: true,
+    at: null,
+    title: "",
+  };
+}
+
+function relativeApprovalAge(ageMs) {
+  const seconds = Math.floor(ageMs / 1000);
+  if (seconds < 60) return seconds + "s ago";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + "m ago";
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + "h ago";
+  return Math.floor(hours / 24) + "d ago";
+}
+
+function knownApprovalAge(parsed, now) {
+  const clock = typeof now === "number" && Number.isFinite(now) && now > 0 ? now : null;
+  const label = clock === null ? parsed.stamp : relativeApprovalAge(Math.max(0, clock - parsed.at));
+  return {
+    hidden: false,
+    label,
+    known: true,
+    at: parsed.stamp,
+    title: parsed.stamp,
+  };
+}
+
+/**
+ * Read-only age of the current pending approval on the loaded shell.
+ * Pending matches pending-approval-count: one `pending_question`, and only
+ * `kind: "approval"` with a non-blank `question_id` is pending. `kind: "question"`
+ * and an explicit null are nothing to age. Age comes only from the newest matching
+ * catalog `mission.question` `created_at` (the shell keeps one pending item, so
+ * that ask is both the oldest and the most recent pending approval). A missing
+ * slot or an unreadable stamp is unavailable — never mission start, payload
+ * clocks, or `mission.waiting`.
+ */
+export function approvalAgeChip(state, options = {}) {
+  if (!state || state.preview === true || !state.mission) return APPROVAL_AGE_HIDDEN;
+  const mission = state.mission;
+  if (!Object.prototype.hasOwnProperty.call(mission, "pending_question")) {
+    return unavailableApprovalAge();
+  }
+  const pending = mission.pending_question;
+  if (pending == null) return noneApprovalAge();
+  if (typeof pending !== "object" || Array.isArray(pending)) return unavailableApprovalAge();
+  if (pending.kind === "question") return noneApprovalAge();
+  if (pending.kind !== "approval") return unavailableApprovalAge();
+  const id = pending.question_id;
+  if (typeof id !== "string" || !id.trim()) return unavailableApprovalAge();
+  const events = Array.isArray(state.events) ? state.events : null;
+  if (!events) return unavailableApprovalAge();
+  for (const event of events) {
+    if (!event || event.event_type !== "mission.question") continue;
+    const payload = event.payload || {};
+    if (payload.kind !== "approval" || payload.question_id !== id) continue;
+    const parsed = approvalStamp(event.created_at);
+    const now = options.now;
+    const clock = typeof now === "number" && Number.isFinite(now) && now > 0 ? now : null;
+    if (!parsed || (clock !== null && parsed.at - clock > APPROVAL_AGE_SKEW_MS)) {
+      return unavailableApprovalAge();
+    }
+    return knownApprovalAge(parsed, now);
+  }
+  return unavailableApprovalAge();
+}
 export function missionMode(state) {
   if (state.preview) return "preview";
   return state.mission?.mode || state.mission?.result?.mode || (state.mission ? "pending" : "standby");
