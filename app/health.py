@@ -235,7 +235,7 @@ async def workspace_health_status() -> dict:
     provider = build_workspace_provider()
     health = await provider.health()
     return {
-        "configured": True,
+        "configured": health.status != "unconfigured",
         "provider": health.provider,
         "backend": health.backend,
         "status": health.status,
@@ -243,4 +243,7 @@ async def workspace_health_status() -> dict:
         "root": health.root,
         "docker": False,
         "fallback": False,
+        "remote": health.remote,
+        "ttl_seconds": health.ttl_seconds,
+        "internet": health.internet,
     }

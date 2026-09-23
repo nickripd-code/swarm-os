@@ -145,6 +145,8 @@ async def test_runtime_missing_workspace_fails_closed(tmp_path):
 
 @pytest.mark.asyncio
 async def test_health_is_truthful_and_does_not_expose_secrets(tmp_path, monkeypatch):
+    monkeypatch.delenv("SWARM_WORKSPACE_E2B", raising=False)
+    monkeypatch.delenv("E2B_API_KEY", raising=False)
     monkeypatch.setenv("SWARM_WORKSPACE_ROOT", str(tmp_path / "from-env"))
     provider = build_workspace_provider()
     health = await provider.health()
@@ -160,6 +162,8 @@ async def test_health_is_truthful_and_does_not_expose_secrets(tmp_path, monkeypa
     assert status["status"] == "healthy"
     assert status["fallback"] is False
     assert status["docker"] is False
+    assert status["remote"] is False
+    assert status["internet"] is None
     assert Path(status["root"]).resolve() == (tmp_path / "from-env").resolve()
 
 
