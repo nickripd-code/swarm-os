@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,suspendAgeChip,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -78,9 +78,20 @@ function renderHud(){
     $("replayChip").textContent=state.preview?"PREVIEW":(replayLive?"LIVE":"REPLAY");
     $("replayChip").className="hud-chip mode "+(state.preview?"preview":replayLive?"replay-live":"replay");
   }
+  let suspendAge=null;
+  if($("suspendAgeChip")){
+    suspendAge=suspendAgeChip(state,{now:Date.now()});
+    const chip=$("suspendAgeChip");
+    chip.hidden=suspendAge.hidden;
+    chip.textContent=suspendAge.hidden?"":suspendAge.label;
+    chip.className="hud-chip suspend-age "+(suspendAge.known?"known":"unavailable");
+    if(suspendAge.hidden||!suspendAge.title)chip.removeAttribute("title");
+    else chip.title=suspendAge.title;
+  }
   const running=!!mission&&!terminal.has(status)&&replayLive&&!state.preview;
-  if(running&&!hudTick)hudTick=setInterval(renderHud,1000);
-  if(!running&&hudTick){clearInterval(hudTick);hudTick=null;}
+  const ageTicking=!!suspendAge&&suspendAge.known&&!suspendAge.hidden;
+  if((running||ageTicking)&&!hudTick)hudTick=setInterval(renderHud,1000);
+  if(!running&&!ageTicking&&hudTick){clearInterval(hudTick);hudTick=null;}
 }
 function clearAlerts(){if($("alerts"))$("alerts").replaceChildren();}
 function pushAlert(alert){
