@@ -108,8 +108,8 @@ const cases = {
 
 const source = mission("pending");
 const log = [
-  event(1, "mission.started", "2026-09-23T11:00:00Z", {mode: "cloud"}),
-  failed,
+  event(10, "mission.started", "2026-09-23T11:00:00Z", {mode: "cloud"}),
+  event(11, "mission.failed", STAMP, {error: "boom", failure_class: "TIMEOUT"}),
 ];
 cases.replayBefore = view(projectEvents(source, log, 0));
 cases.replayAtFailure = view(projectEvents(source, log, 1));
