@@ -128,6 +128,25 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+export const LINK_UNAVAILABLE = "unavailable";
+const SOCKET_CONNECTING = 0;
+const SOCKET_OPEN = 1;
+export function connectionChipView(link) {
+  const unknown = {state: "unknown", label: LINK_UNAVAILABLE, connected: false, transport: null};
+  if (!link || typeof link !== "object") return unknown;
+  const transport = link.transport === "websocket" || link.transport === "sse" ? link.transport : null;
+  if (!transport) return unknown;
+  const ready = link.readyState;
+  if (typeof ready !== "number" || !Number.isInteger(ready) || ready < 0 || ready > 3) return unknown;
+  const reconnecting = link.reconnecting === true;
+  if (ready === SOCKET_OPEN && !reconnecting) {
+    return {state: "connected", label: "connected", connected: true, transport};
+  }
+  if (reconnecting || ready === SOCKET_CONNECTING) {
+    return {state: "reconnecting", label: "reconnecting", connected: false, transport};
+  }
+  return {state: "disconnected", label: "disconnected", connected: false, transport};
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);

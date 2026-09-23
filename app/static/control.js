@@ -1,11 +1,11 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,connectionChipView} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
 const statusName = status => ({created:"Ready",running:"Thinking",completed:"Done",blocked:"Blocked",failed:"Failed",stopped:"Stopped",pending:"Queued",paused:"Paused",waiting:"Waiting"}[status] || status);
 const symbol = status => ({created:"·",running:"",completed:"✓",blocked:"?",failed:"!",stopped:"■"}[status] || "·");
 const colors = ["#c6b4ef","#edbd9e","#aed8cf","#e6cd90","#b5cbe3","#dfb9ca"];
-let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null, hudTick=null, notifyArmed=false, killAvailable=false;
+let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null, hudTick=null, notifyArmed=false, killAvailable=false, liveLink=null;
 let eventLog=[], replayCursor=-1, replayLive=true, replayTimer=null, sourceMission=null;
 const elements=new Map();
 const bot = color => '<span class="bot" style="--agent-color:'+color+'" aria-hidden="true"><span class="ear ear-left"></span><span class="ear ear-right"></span><span class="visor"><i></i><i></i><b class="mouth"></b></span></span>';
@@ -32,6 +32,28 @@ function haltPreviewLocally(){
   schedule();
 }
 function connection(text,cls="") {$("connection").className="connection "+cls;$("connection").innerHTML="<i></i>"+esc(text);}
+function renderConnectionChip(){
+  const el=$("connectionChip");
+  if(!el)return;
+  const view=connectionChipView(liveLink);
+  el.textContent=view.label;
+  el.className="hud-chip link "+view.state;
+  el.dataset.state=view.state;
+  el.dataset.connected=view.connected?"true":"false";
+  el.setAttribute("aria-label","Live connection "+view.label);
+}
+function publishLink(reconnecting){
+  if(ws&&typeof ws.readyState==="number"){
+    liveLink={transport:"websocket",readyState:ws.readyState,reconnecting:reconnecting===true};
+  }else if(reconnecting===true){
+    liveLink={transport:"websocket",readyState:3,reconnecting:true};
+  }else if(liveLink){
+    liveLink={transport:"websocket",readyState:3,reconnecting:false};
+  }else{
+    liveLink=null;
+  }
+  renderConnectionChip();
+}
 function formatElapsed(ms){
   if(!Number.isFinite(ms)||ms<0)ms=0;
   const s=Math.floor(ms/1000), m=Math.floor(s/60), h=Math.floor(m/60);
@@ -78,6 +100,7 @@ function renderHud(){
     $("replayChip").textContent=state.preview?"PREVIEW":(replayLive?"LIVE":"REPLAY");
     $("replayChip").className="hud-chip mode "+(state.preview?"preview":replayLive?"replay-live":"replay");
   }
+  renderConnectionChip();
   const running=!!mission&&!terminal.has(status)&&replayLive&&!state.preview;
   if(running&&!hudTick)hudTick=setInterval(renderHud,1000);
   if(!running&&hudTick){clearInterval(hudTick);hudTick=null;}
@@ -304,7 +327,8 @@ async function request(path,options){
   return data;
 }
 function disconnect(){
-  generation++;clearTimeout(retry);clearTimeout(previewTimer);stopReplayPlay();if(ws){ws.onclose=null;ws.close();ws=null;}
+  generation++;clearTimeout(retry);retry=null;clearTimeout(previewTimer);stopReplayPlay();if(ws){ws.onclose=null;ws.close();ws=null;}
+  publishLink(false);
 }
 function reset(mission){
   stopReplayPlay();
@@ -394,7 +418,12 @@ function connect(id,gen){
   if(gen!==generation)return;
   const liveFrom=Date.now();
   ws=new WebSocket((location.protocol==="https:"?"wss:":"ws:")+"//"+location.host+"/api/missions/"+id+"/stream");
-  ws.onopen=()=>{if(gen===generation&&!terminal.has(state.mission?.status||""))connection("Live connection","live");};
+  publishLink(false);
+  ws.onopen=()=>{
+    if(gen!==generation)return;
+    publishLink(false);
+    if(!terminal.has(state.mission?.status||""))connection("Live connection","live");
+  };
   ws.onmessage=message=>{
     if(gen!==generation)return;
     try{
@@ -415,12 +444,21 @@ function connect(id,gen){
       }
     }catch{showNotice("An event could not be read. Reconnect to restore the mission.");}
   };
-  ws.onerror=()=>connection("Connection interrupted","disconnected");
+  ws.onerror=()=>{
+    if(gen!==generation)return;
+    connection("Connection interrupted","disconnected");
+    publishLink(false);
+  };
   ws.onclose=()=>{
     if(gen!==generation)return;
     const status=state.mission?.status||"";
-    if(terminal.has(status)){connection("Mission "+status,status==="completed"?"live":"disconnected");return;}
+    if(terminal.has(status)){
+      connection("Mission "+status,status==="completed"?"live":"disconnected");
+      publishLink(false);
+      return;
+    }
     connection("Reconnecting…","disconnected");
+    publishLink(true);
     retry=setTimeout(()=>connect(id,gen),2000);
   };
 }
