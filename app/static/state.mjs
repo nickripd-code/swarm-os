@@ -97,6 +97,61 @@ export function formatUsd(value) {
 export function tokenTotal(usage) {
   return (usage?.input || 0) + (usage?.output || 0) + (usage?.reasoning || 0);
 }
+export const SERVER_HEALTH_UNAVAILABLE = "unavailable";
+
+function healthVersion(health) {
+  const version = health?.version;
+  if (typeof version !== "string") return null;
+  const trimmed = version.trim();
+  if (!trimmed || trimmed.length > 64 || /[\r\n]/.test(trimmed)) return null;
+  return trimmed;
+}
+
+export function formatUptimeSeconds(seconds) {
+  const n = finiteNumber(seconds);
+  if (n === null || n < 0) return null;
+  const s = Math.floor(n);
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  const d = Math.floor(h / 24);
+  if (d) return d + "d " + (h % 24) + "h";
+  if (h) return h + "h " + (m % 60) + "m";
+  if (m) return m + "m " + (s % 60) + "s";
+  return s + "s";
+}
+
+function uptimeSecondsFromHealth(health, nowMs) {
+  if (health && Object.prototype.hasOwnProperty.call(health, "uptime")) {
+    const direct = finiteNumber(health.uptime);
+    if (direct !== null && direct >= 0) return direct;
+    return null;
+  }
+  const started = health?.started_at;
+  if (typeof started !== "string" || !started.trim()) return null;
+  const t = Date.parse(started);
+  if (!Number.isFinite(t)) return null;
+  if (typeof nowMs !== "number" || !Number.isFinite(nowMs)) return null;
+  const age = (nowMs - t) / 1000;
+  if (!Number.isFinite(age) || age < 0) return null;
+  return age;
+}
+
+export function serverHealthChip(health, nowMs = Date.now()) {
+  const empty = {known: false, label: SERVER_HEALTH_UNAVAILABLE, uptimeLabel: null, version: null,
+    title: "Server uptime unavailable"};
+  if (!health || typeof health !== "object") return empty;
+  const version = healthVersion(health);
+  const seconds = uptimeSecondsFromHealth(health, nowMs);
+  const uptimeLabel = seconds === null ? null : formatUptimeSeconds(seconds);
+  if (!uptimeLabel) return {...empty, version};
+  const versionLabel = version ? "v" + version.replace(/^v(?=\d)/i, "") : null;
+  const label = versionLabel ? "up " + uptimeLabel + " · " + versionLabel : "up " + uptimeLabel;
+  const title = version
+    ? "Server uptime " + uptimeLabel + " · version " + version + " from GET /api/health"
+    : "Server uptime " + uptimeLabel + " from GET /api/health";
+  return {known: true, label, uptimeLabel, version, title};
+}
+
 export function costHudView(usage = {}) {
   const input = usage.input || 0;
   const output = usage.output || 0;

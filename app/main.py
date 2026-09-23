@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
 
@@ -29,6 +30,9 @@ BASE = Path(__file__).parent
 
 @asynccontextmanager
 async def lifespan(app):
+    global _server_started_at
+    if _server_started_at is None:
+        _server_started_at = datetime.now(timezone.utc)
     await runtime.resume_incomplete()
     try:
         if process_pool is not None:
@@ -46,6 +50,28 @@ async def lifespan(app):
 
 app = FastAPI(title="Agent Swarm", version="0.2.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
+_server_started_at: datetime | None = None
+
+
+def _iso_utc(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat()
+
+
+def server_liveness(now: datetime | None = None) -> dict:
+    """Clock fields for GET /api/health. Unknown start is null, never a fabricated uptime."""
+    version = app.version
+    started = _server_started_at
+    if started is None:
+        return {"started_at": None, "uptime": None, "version": version}
+    current = now if now is not None else datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    elapsed = (current.astimezone(timezone.utc) - started.astimezone(timezone.utc)).total_seconds()
+    if elapsed < 0:
+        return {"started_at": _iso_utc(started), "uptime": None, "version": version}
+    return {"started_at": _iso_utc(started), "uptime": elapsed, "version": version}
+
+
 database_path = Path(os.environ.get("SWARM_DATABASE_PATH", BASE.parent / "swarm.db")).resolve()
 store = Store(str(database_path))
 clients: dict[UUID, set[WebSocket]] = {}
@@ -67,6 +93,7 @@ async def index(): return FileResponse(BASE / "static" / "index.html")
 
 @app.get("/api/health")
 async def health():
+    clock = server_liveness()
     return {"ok": True, "openai": openai_status(), "openrouter": openrouter_status(),
             "xai": xai_status(), "anthropic": anthropic_status(),
             "mistral": mistral_status(), "gemini": gemini_status(), "cohere": cohere_status(),
@@ -89,7 +116,10 @@ async def health():
                 "running": bool(process_pool and process_pool.running),
                 "workers": len(process_pool.workers) if process_pool else 0,
             },
-            "active_missions": len(runtime.runs)}
+            "active_missions": len(runtime.runs),
+            "started_at": clock["started_at"],
+            "uptime": clock["uptime"],
+            "version": clock["version"]}
 
 
 @app.get("/api/missions")
