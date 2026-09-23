@@ -1,5 +1,7 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const JOB_FAILED_COUNT_UNAVAILABLE = "unavailable";
+const JOB_FAILED_COUNT_EVENT = "job.failed";
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -127,6 +129,43 @@ export function costHudView(usage = {}) {
     remainingLabel,
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
+}
+export function recordedJobFailedCountFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+/**
+ * Read-only count of recorded job.failed events on the loaded feed.
+ * Catalog EventType.JOB_FAILED. job.enqueued, job.completed, job.retry_scheduled,
+ * lease.released, tool.completed, mission.failed, mission.completed, and
+ * task.failed are ignored. Hidden with no mission or in preview. A missing or
+ * unreadable feed is JOB FAILED unavailable, not 0. An explicit empty list
+ * (including a cursor before any event) is 0. A non-string event_type is
+ * unreadable and fails closed. The label is a count only — never a timestamp
+ * or spend.
+ */
+export function jobFailedCountView(feed, options = {}) {
+  const visible = options.visible === true;
+  if (!visible) return {hidden: true, known: false, count: null, label: ""};
+  if (!Array.isArray(feed)) {
+    return {hidden: false, known: false, count: null, label: "JOB FAILED " + JOB_FAILED_COUNT_UNAVAILABLE};
+  }
+  let count = 0;
+  for (const event of feed) {
+    if (!event || typeof event !== "object" || Array.isArray(event)) continue;
+    const type = event.event_type;
+    if (typeof type !== "string") {
+      if (type != null) {
+        return {hidden: false, known: false, count: null, label: "JOB FAILED " + JOB_FAILED_COUNT_UNAVAILABLE};
+      }
+      continue;
+    }
+    if (type === JOB_FAILED_COUNT_EVENT) count += 1;
+  }
+  return {hidden: false, known: true, count, label: "JOB FAILED " + count};
 }
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
