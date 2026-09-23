@@ -18,8 +18,8 @@ from .health import (
     cohere_status, deepseek_status, fireworks_status, gemini_status, groq_status,
     huggingface_status, llamacpp_health_status, mistral_status, ollama_health_status,
     openai_status, openrouter_status, perplexity_status, sambanova_status,
-    selfmod_health_status, together_status, vertex_status, vllm_health_status,
-    workspace_health_status, xai_status,
+    selfmod_health_status, together_status, twilio_health_status, vertex_status,
+    vllm_health_status, workspace_health_status, xai_status,
 )
 from .tools import tools_status
 from .mission_jobs import build_mission_worker_pool
@@ -83,6 +83,7 @@ async def health():
             "tools": tools_status(runtime.tools),
             "browser": await browser_health_status(),
             "selfmod": await selfmod_health_status(),
+            "twilio": await twilio_health_status(),
             "workspace": await workspace_health_status(),
             "process_workers": {
                 "enabled": process_pool is not None,

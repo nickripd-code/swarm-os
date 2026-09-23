@@ -30,6 +30,7 @@ from .llm import (
     ProviderError, RETRYABLE_FAILURE_CLASSES, retry_delay_seconds,
 )
 from .tools import ToolCall, ToolError, ToolProvider, build_tool_provider, public_tool_data
+from .twilio import SMS_SEND_TOOL, twilio_sms_configured
 from .evidence import public_evidence_runs
 from .verifier import public_verification, verification_accepted
 from .payments import PaymentError, PaymentProvider, resolve_payment_provider
@@ -539,9 +540,36 @@ class SwarmRuntime:
         if payload.get("error"):
             raise PolicyError(str(payload["error"]), FailureClass(payload["failure_class"]))
 
+    def _tool_approval_actor(self, mission: Mission, actor_id: UUID | None) -> AgentSpec:
+        agents = self.agents[mission.id]
+        if actor_id is not None:
+            for agent in agents:
+                if agent.id == actor_id:
+                    return agent
+        elif agents:
+            return agents[0]
+        return AgentSpec(
+            id=actor_id or uuid4(),
+            mission_id=mission.id,
+            role="mission_controller",
+            purpose="Human approval for an outbound tool",
+            capabilities=["coordinate"],
+        )
+
+    async def _record_tool_failure(self, mission: Mission, key: str, name: str,
+                                   exc: PolicyError, used: int, limit: int,
+                                   actor_id: UUID | None) -> None:
+        self.idempotency.record(str(mission.id), key, "tool", {
+            "error": str(exc), "failure_class": str(exc.failure_class),
+        })
+        await self.emit(mission.id, EventType.TOOL_FAILED, {
+            "tool": name, "failure_class": str(exc.failure_class),
+            "error": str(exc), "used": used, "max": limit,
+        }, actor_id)
+
     async def invoke_tool(self, mission: Mission, name: str, arguments: dict[str, Any] | None = None,
                           actor_id: UUID | None = None, *, idempotency_key: str | None = None) -> dict[str, Any]:
-        """Charge max_tool_calls, then execute a real ToolProvider. Never invent success."""
+        """Authorize, then charge max_tool_calls, then execute a real ToolProvider."""
         key = self._tool_idempotency_key(mission, name, arguments, idempotency_key)
         replay = self._replay_side_effect(mission.id, key)
         if replay is not None:
@@ -555,25 +583,27 @@ class SwarmRuntime:
             except ToolError:
                 pass
         available = self.available_tools(mission)
+        request = PolicyRequest(
+            action="tool_use",
+            mission=mission,
+            tool_calls_used=used,
+            tool=name,
+            mode=getattr(self.controller, "mode", "openai"),
+            arguments=arguments or {},
+        )
         try:
-            self.policy.authorize(PolicyRequest(
-                action="tool_use",
-                mission=mission,
-                tool_calls_used=used,
-                tool=name,
-                mode=getattr(self.controller, "mode", "openai"),
-            ))
+            self.policy.authorize(request)
         except PolicyError as exc:
-            self.idempotency.record(str(mission.id), key, "tool", {
-                "error": str(exc), "failure_class": str(exc.failure_class),
-            })
-            await self.emit(mission.id, EventType.TOOL_FAILED, {
-                "tool": name, "failure_class": str(exc.failure_class),
-                "error": str(exc), "used": used, "max": limit,
-            }, actor_id)
+            await self._record_tool_failure(mission, key, name, exc, used, limit, actor_id)
             raise
-        if self.tools is None or name not in available:
-            error = "No tool provider is connected" if not available else f"Unknown tool: {name}"
+        sms_unconfigured = name.strip().lower() == SMS_SEND_TOOL and not twilio_sms_configured()
+        if self.tools is None or name not in available or sms_unconfigured:
+            if sms_unconfigured:
+                error = "Twilio SMS is not configured"
+            elif not available:
+                error = "No tool provider is connected"
+            else:
+                error = f"Unknown tool: {name}"
             self.idempotency.record(str(mission.id), key, "tool", {
                 "error": error, "failure_class": str(FailureClass.TOOL_MISSING),
             })
@@ -582,6 +612,13 @@ class SwarmRuntime:
                 "error": error, "used": used, "max": limit,
             }, actor_id)
             raise PolicyError(error, FailureClass.TOOL_MISSING)
+        try:
+            await self._enforce_human_approval(
+                mission, self._tool_approval_actor(mission, actor_id), request,
+            )
+        except PolicyError as exc:
+            await self._record_tool_failure(mission, key, name, exc, used, limit, actor_id)
+            raise
         charged = self.consume_tool_call(mission)
         await self.emit(mission.id, EventType.TOOL_STARTED, {
             "tool": name, "used": charged, "max": limit,
@@ -689,7 +726,7 @@ class SwarmRuntime:
     async def _ask_human(self, mission: Mission, actor: AgentSpec, question: str,
                          reason: str | None = None, *,
                          kind: str = "question",
-                         approval_action: str | None = None) -> None:
+                         approval_action: str | None = None) -> str:
         """Emit a real question and park until the matching answer. Ignore model-supplied ids."""
         text = (question or "").strip()
         if not text:
@@ -706,6 +743,7 @@ class SwarmRuntime:
         )
         mission.pending_question = pending
         await self._park_for_human_answer(mission, actor, pending, asked_now=True)
+        return pending.question_id
 
     def _matching_approval(self, mission: Mission, action: str):
         for item in reversed(mission.answers):
@@ -726,13 +764,17 @@ class SwarmRuntime:
         needed = self.policy.approval_required(request)
         if needed is None:
             return
-        if self._approval_granted(mission, needed.action):
+        action_key = needed.approval_action or needed.action
+        if not needed.single_use and self._approval_granted(mission, action_key):
             return
-        await self._ask_human(
+        question_id = await self._ask_human(
             mission, actor, needed.question, needed.reason,
-            kind="approval", approval_action=needed.action,
+            kind="approval", approval_action=action_key,
         )
-        record = self._matching_approval(mission, needed.action)
+        if needed.single_use:
+            record = next((item for item in mission.answers if item.question_id == question_id), None)
+        else:
+            record = self._matching_approval(mission, action_key)
         if record is None:
             raise PolicyError(
                 "Cannot continue without a matching human answer",
