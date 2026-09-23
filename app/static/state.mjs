@@ -1,5 +1,6 @@
 export const terminal = new Set(["completed", "failed", "stopped", "blocked"]);
 export const ESTIMATE_UNAVAILABLE = "estimate unavailable";
+export const ACTIVE_LLM_UNAVAILABLE = "unavailable";
 export const KILL_ROUTE_PATTERN = /\/api\/missions\/\{[^}]+\}\/agents\/\{[^}]+\}\/kill$/;
 export function killRoutePresent(spec) {
   if (!spec || typeof spec !== "object") return false;
@@ -127,6 +128,67 @@ export function costHudView(usage = {}) {
     remainingLabel,
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
+}
+/**
+ * Prefix of a loaded mission event log. A missing or unloaded feed stays null
+ * so callers cannot treat it as an empty in-flight set.
+ */
+export function recordedActiveLlmFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+function llmCallKey(event) {
+  if (!event || typeof event !== "object") return null;
+  const payload = event.payload;
+  const actor = event.actor_id;
+  const kind = payload && typeof payload === "object" ? payload.kind : null;
+  if (typeof actor !== "string" || actor.length === 0) return null;
+  if (typeof kind !== "string" || kind.length === 0) return null;
+  return actor + "\0" + kind;
+}
+function unknownActiveLlm() {
+  return {hidden: false, known: false, count: null, label: ACTIVE_LLM_UNAVAILABLE};
+}
+const LLM_LIFECYCLE = new Set(["llm.started", "llm.completed", "llm.failed", "llm.retry", "llm.failover"]);
+/**
+ * Read-only in-flight model-call count: llm.started still unmatched by a later
+ * llm.completed or llm.failed for the same actor and kind. llm.retry and
+ * llm.failover leave the call open. Hidden with an empty label when no mission
+ * is visible. Missing feed is unavailable, never 0. An explicit empty list is
+ * a known 0. Token usage is never the count. There is no call id on these
+ * events, so overlapping starts for one actor and kind are a stack.
+ */
+export function activeLlmCountView(feed, options = {}) {
+  if (options.visible !== true) return {hidden: true, known: false, count: null, label: ""};
+  if (!Array.isArray(feed)) return unknownActiveLlm();
+  const open = new Map();
+  const seen = new Set();
+  for (const event of feed) {
+    if (!event || typeof event !== "object") continue;
+    const type = event.event_type;
+    if (!LLM_LIFECYCLE.has(type)) continue;
+    if (event.id == null || event.id === "") return unknownActiveLlm();
+    if (seen.has(event.id)) continue;
+    seen.add(event.id);
+    const key = llmCallKey(event);
+    if (!key) return unknownActiveLlm();
+    const depth = open.get(key) || 0;
+    if (type === "llm.started") {
+      open.set(key, depth + 1);
+      continue;
+    }
+    if (depth < 1) return unknownActiveLlm();
+    if (type === "llm.completed" || type === "llm.failed") {
+      if (depth === 1) open.delete(key);
+      else open.set(key, depth - 1);
+    }
+  }
+  let count = 0;
+  for (const depth of open.values()) count += depth;
+  return {hidden: false, known: true, count, label: String(count)};
 }
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
