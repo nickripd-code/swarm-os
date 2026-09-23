@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,missionStatusBadgeStrip,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -49,6 +49,21 @@ function renderHud(){
   if($("missionStatus")){
     $("missionStatus").textContent=status.toUpperCase();
     $("missionStatus").className="hud-chip status "+status;
+  }
+  const statusBadges=missionStatusBadgeStrip(mission,{preview:!!state.preview});
+  const statusStrip=$("statusBadgeStrip");
+  if(statusStrip){
+    statusStrip.hidden=!statusBadges.visible;
+    statusStrip.replaceChildren();
+    if(statusBadges.visible){
+      for(const badge of statusBadges.badges){
+        const el=document.createElement("span");
+        el.className="status-badge"+(badge.current?" current hud-chip status "+badge.status:"");
+        el.textContent=badge.label;
+        if(badge.current)el.setAttribute("aria-current","true");
+        statusStrip.appendChild(el);
+      }
+    }
   }
   if($("hudAgents"))$("hudAgents").textContent=state.agents.size;
   if($("hudTasks"))$("hudTasks").textContent=[...state.tasks.values()].filter(t=>t.status==="completed").length;

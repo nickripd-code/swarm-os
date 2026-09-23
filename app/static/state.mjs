@@ -219,6 +219,33 @@ export function missionMode(state) {
   if (state.preview) return "preview";
   return state.mission?.mode || state.mission?.result?.mode || (state.mission ? "pending" : "standby");
 }
+/** Canonical labels for MissionStatus values the API already returns. */
+export const MISSION_STATUS_LABELS = Object.freeze({
+  pending: "Pending",
+  running: "Running",
+  waiting: "Waiting",
+  paused: "Paused",
+  blocked: "Blocked",
+  completed: "Completed",
+  failed: "Failed",
+  stopped: "Stopped",
+});
+export function missionStatusBadgeStrip(mission, options = {}) {
+  const preview = options.preview === true || mission?.id === "preview";
+  const empty = {visible: false, status: null, label: null, badges: [], reason: "unavailable"};
+  if (!mission || preview) return empty;
+  const status = typeof mission.status === "string" ? mission.status : "";
+  const label = Object.prototype.hasOwnProperty.call(MISSION_STATUS_LABELS, status)
+    ? MISSION_STATUS_LABELS[status]
+    : undefined;
+  if (!label) return empty;
+  const badges = Object.entries(MISSION_STATUS_LABELS).map(([value, text]) => ({
+    status: value,
+    label: text,
+    current: value === status,
+  }));
+  return {visible: true, status, label, badges, reason: null};
+}
 export function resultMetaText(mission) {
   const result = mission?.result;
   if (!result) return "";
