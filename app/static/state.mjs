@@ -288,6 +288,50 @@ export function alertFromEvent(e) {
       return null;
   }
 }
+export const ORG_MAP_UNAVAILABLE = "org map unavailable";
+
+function orgNodeId(node) {
+  if (!node || typeof node !== "object" || Array.isArray(node)) return null;
+  if (node.id == null) return null;
+  const id = String(node.id).trim();
+  return id ? id : null;
+}
+
+function countableOrgNodes(list) {
+  if (!Array.isArray(list)) return null;
+  if (list.length === 0) return [];
+  const seen = new Set();
+  const nodes = [];
+  for (const item of list) {
+    const id = orgNodeId(item);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    nodes.push(item);
+  }
+  return nodes.length ? nodes : null;
+}
+
+/** Explicit org-map structures already on main. Missing maps are null, not []. */
+export function explicitOrgNodes(source) {
+  if (Array.isArray(source)) return countableOrgNodes(source);
+  if (!source || typeof source !== "object") return null;
+  if (Array.isArray(source.topology)) return countableOrgNodes(source.topology);
+  if (Array.isArray(source.agents)) return countableOrgNodes(source.agents);
+  return null;
+}
+
+export function orgMapNodeView(source, options = {}) {
+  const visible = options.visible === true;
+  if (!visible) return {hidden: true, known: false, count: null, label: ""};
+  const nodes = explicitOrgNodes(source);
+  if (nodes === null) {
+    return {hidden: false, known: false, count: null, label: ORG_MAP_UNAVAILABLE};
+  }
+  const count = nodes.length;
+  const label = count === 1 ? "1 node" : count + " nodes";
+  return {hidden: false, known: true, count, label};
+}
+
 export function layoutTree(agents, minimumWidth = 700) {
   const list = [...agents.values()];
   const children = new Map();
