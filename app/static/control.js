@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,runtimeClockView} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -64,6 +64,15 @@ function renderHud(){
       : cost.budgetLabel;
   }
   if($("costHud"))$("costHud").dataset.known=cost.known?"true":"false";
+  const clock=runtimeClockView(state.preview?null:mission,eventLog,Date.now());
+  const strip=$("runtimeClock");
+  if(strip){
+    strip.hidden=!clock.visible;
+    strip.dataset.times=clock.elapsedMs==null?"unavailable":"known";
+    if($("runtimeStarted"))$("runtimeStarted").textContent=clock.startedLabel;
+    if($("runtimeElapsed"))$("runtimeElapsed").textContent=clock.elapsedLabel;
+    if($("runtimeStatus"))$("runtimeStatus").textContent=clock.statusLabel;
+  }
   if($("hudElapsed")){
     const view=replayView(eventLog,replayCursor,{preview:state.preview,mission:sourceMission||mission});
     if(!replayLive&&!state.preview&&view.elapsedMs!=null){
