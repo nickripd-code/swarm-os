@@ -484,6 +484,24 @@ class SwarmRuntime:
         elapsed = max((utcnow() - started).total_seconds() - mission.paused_seconds, 0)
         return mission.limits.max_runtime_seconds - elapsed
 
+    def _tool_actor(self, mission: Mission, actor_id: UUID | None) -> AgentSpec | None:
+        agents = self.agents.get(mission.id) or []
+        if actor_id is None:
+            return agents[0] if agents else None
+        return next((agent for agent in agents if agent.id == actor_id), None)
+
+    def _grant_composio_write(self, name: str) -> None:
+        """Forward a PolicyGate approval to the Composio adapter. Never approves on its own."""
+        provider = self.tools
+        if provider is None:
+            return
+        nested = getattr(provider, "providers", None)
+        targets = list(nested) if isinstance(nested, list) else [provider]
+        for item in targets:
+            grant = getattr(item, "grant_composio_write", None)
+            if callable(grant):
+                grant(name)
+
     def available_tools(self, mission: Mission | None = None) -> list[str]:
         _ = mission
         if self.tools is None:
@@ -555,14 +573,15 @@ class SwarmRuntime:
             except ToolError:
                 pass
         available = self.available_tools(mission)
+        request = PolicyRequest(
+            action="tool_use",
+            mission=mission,
+            tool_calls_used=used,
+            tool=name,
+            mode=getattr(self.controller, "mode", "openai"),
+        )
         try:
-            self.policy.authorize(PolicyRequest(
-                action="tool_use",
-                mission=mission,
-                tool_calls_used=used,
-                tool=name,
-                mode=getattr(self.controller, "mode", "openai"),
-            ))
+            self.policy.authorize(request)
         except PolicyError as exc:
             self.idempotency.record(str(mission.id), key, "tool", {
                 "error": str(exc), "failure_class": str(exc.failure_class),
@@ -582,6 +601,33 @@ class SwarmRuntime:
                 "error": error, "used": used, "max": limit,
             }, actor_id)
             raise PolicyError(error, FailureClass.TOOL_MISSING)
+        if self.policy.approval_required(request) is not None:
+            actor = self._tool_actor(mission, actor_id)
+            if actor is None:
+                missing = PolicyError(
+                    "Human approval is required before this tool can run",
+                    FailureClass.AUTHORIZATION_REQUIRED,
+                )
+                self.idempotency.record(str(mission.id), key, "tool", {
+                    "error": str(missing), "failure_class": str(missing.failure_class),
+                })
+                await self.emit(mission.id, EventType.TOOL_FAILED, {
+                    "tool": name, "failure_class": str(missing.failure_class),
+                    "error": str(missing), "used": used, "max": limit,
+                }, actor_id)
+                raise missing
+            try:
+                await self._enforce_human_approval(mission, actor, request)
+            except PolicyError as exc:
+                self.idempotency.record(str(mission.id), key, "tool", {
+                    "error": str(exc), "failure_class": str(exc.failure_class),
+                })
+                await self.emit(mission.id, EventType.TOOL_FAILED, {
+                    "tool": name, "failure_class": str(exc.failure_class),
+                    "error": str(exc), "used": used, "max": limit,
+                }, actor_id)
+                raise
+            self._grant_composio_write(name)
         charged = self.consume_tool_call(mission)
         await self.emit(mission.id, EventType.TOOL_STARTED, {
             "tool": name, "used": charged, "max": limit,
@@ -726,13 +772,14 @@ class SwarmRuntime:
         needed = self.policy.approval_required(request)
         if needed is None:
             return
-        if self._approval_granted(mission, needed.action):
+        scope = needed.scope or needed.action
+        if self._approval_granted(mission, scope):
             return
         await self._ask_human(
             mission, actor, needed.question, needed.reason,
-            kind="approval", approval_action=needed.action,
+            kind="approval", approval_action=scope,
         )
-        record = self._matching_approval(mission, needed.action)
+        record = self._matching_approval(mission, scope)
         if record is None:
             raise PolicyError(
                 "Cannot continue without a matching human answer",

@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from .models import FailureClass
+from .policy import composio_slug_is_mutating, parse_composio_write_allowlist
 from .tools import (
     ToolCall,
     ToolError,
@@ -31,11 +32,13 @@ AUTHORIZE_TOOL = "composio.authorize"
 
 
 class ComposioToolProvider(ToolProvider):
-    """Read-only Composio session adapter with concrete policy-visible tool names.
+    """Read-only-first Composio session adapter with concrete policy-visible tool names.
 
     The provider deliberately does not expose Composio's universal execute meta tool.
-    A concrete app tool must first be returned by the session's read-only search, then
-    the runtime invokes that exact registered name through its normal PolicyGate.
+    A concrete app tool must first be returned by search, then the runtime invokes that
+    exact registered name through PolicyGate. Mutating slugs register only when
+    `COMPOSIO_WRITE_ALLOWLIST` names that toolkit and action. Those writes still do not
+    execute until the runtime records an explicit human approval for that tool.
     """
 
     provider_id = "composio"
@@ -47,6 +50,7 @@ class ComposioToolProvider(ToolProvider):
         user_id: str | None = None,
         base_url: str | None = None,
         toolkits: list[str] | None = None,
+        write_allowlist: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self._api_key = api_key if api_key is not None else os.getenv("COMPOSIO_API_KEY", "")
@@ -56,10 +60,18 @@ class ComposioToolProvider(ToolProvider):
         ).rstrip("/")
         env_toolkits = [item.strip() for item in os.getenv("COMPOSIO_TOOLKITS", "").split(",") if item.strip()]
         self.toolkits = toolkits if toolkits is not None else env_toolkits
+        raw_allowlist = (
+            write_allowlist
+            if write_allowlist is not None
+            else os.getenv("COMPOSIO_WRITE_ALLOWLIST", "")
+        )
+        self._write_grants = parse_composio_write_allowlist(raw_allowlist)
         self.transport = transport
         self._session_id: str | None = None
         self._slug_by_name: dict[str, str] = {}
         self._specs: dict[str, ToolSpec] = {}
+        self._write_names: set[str] = set()
+        self._approved_writes: set[str] = set()
         if self.configured():
             self._specs = {spec.name: spec for spec in self._meta_specs()}
 
@@ -85,6 +97,11 @@ class ComposioToolProvider(ToolProvider):
             slug = self._slug_by_name.get(call.name)
             if slug is None:
                 raise ToolError("Composio tool was not discovered for this session", FailureClass.TOOL_MISSING)
+            if call.name in self._write_names and call.name not in self._approved_writes:
+                raise ToolError(
+                    "Composio write requires human approval",
+                    FailureClass.AUTHORIZATION_REQUIRED,
+                )
             output = await self._execute(slug, arguments)
         return ToolResult(
             name=call.name,
@@ -94,6 +111,11 @@ class ComposioToolProvider(ToolProvider):
             provider=self.provider_id,
         )
 
+    def grant_composio_write(self, name: str) -> None:
+        """Record a human approval already checked by PolicyGate. Does not approve by itself."""
+        if name in self._write_names:
+            self._approved_writes.add(name)
+
     async def health(self) -> ToolHealth:
         if not self.configured():
             return ToolHealth(
@@ -101,10 +123,17 @@ class ComposioToolProvider(ToolProvider):
                 status="unconfigured",
                 detail="COMPOSIO_API_KEY is not configured",
             )
+        if self._write_grants:
+            detail = (
+                "Configured; read-only session plus explicit write allowlist; "
+                "writes stay blocked until human approval"
+            )
+        else:
+            detail = "Configured; read-only session initializes on first use"
         return ToolHealth(
             provider=self.provider_id,
             status="healthy",
-            detail="Configured; read-only session initializes on first use",
+            detail=detail,
             tools=[spec.name for spec in self.list_tools()],
         )
 
@@ -197,21 +226,37 @@ class ComposioToolProvider(ToolProvider):
             public_name = self._public_name(slug)
             if public_name not in self._slug_by_name and len(self._slug_by_name) >= MAX_DISCOVERED_TOOLS:
                 continue
+            toolkit = str(schema.get("toolkit") or "")
+            mutating = self._schema_is_mutating(schema, slug=slug, toolkit=toolkit)
+            granted = (toolkit.strip().lower(), slug.upper()) in self._write_grants
+            if mutating and not granted:
+                continue
             input_schema = schema.get("input_schema")
             output_schema = schema.get("output_schema")
-            toolkit = str(schema.get("toolkit") or "")
+            if mutating:
+                permissions = ["composio", "network", "write"]
+                risk_class = "external_write"
+                description = str(schema.get("description") or f"Composio write tool {slug}")
+            else:
+                permissions = ["composio", "network", "read"]
+                risk_class = "external_read_only"
+                description = str(schema.get("description") or f"Read-only Composio tool {slug}")
+            if toolkit:
+                permissions.append(f"toolkit:{toolkit}")
             spec = ToolSpec(
                 name=public_name,
-                description=str(schema.get("description") or f"Read-only Composio tool {slug}"),
+                description=description,
                 provider=self.provider_id,
-                permissions=["composio", "network", "read"] + ([f"toolkit:{toolkit}"] if toolkit else []),
-                risk_class="external_read_only",
+                permissions=permissions,
+                risk_class=risk_class,
                 input_schema=input_schema if isinstance(input_schema, dict) else {},
                 output_schema=output_schema if isinstance(output_schema, dict) else {},
                 environment=["COMPOSIO_API_KEY"],
             )
             self._specs[public_name] = spec
             self._slug_by_name[public_name] = slug
+            if mutating:
+                self._write_names.add(public_name)
             discovered.append({"name": public_name, "toolkit": toolkit, "description": spec.description})
 
         results = payload.get("results")
@@ -293,6 +338,28 @@ class ComposioToolProvider(ToolProvider):
     @staticmethod
     def _public_name(slug: str) -> str:
         return f"composio.{slug}"
+
+    @staticmethod
+    def _schema_is_mutating(schema: dict[str, Any], *, slug: str, toolkit: str) -> bool:
+        """Refuse writes and destructiveHint even when the payload claims readOnlyHint."""
+        if composio_slug_is_mutating(slug, toolkit=toolkit):
+            return True
+        annotations = schema.get("annotations") if isinstance(schema.get("annotations"), dict) else {}
+        tags = schema.get("tags")
+        tag_names: set[str] = set()
+        if isinstance(tags, list):
+            tag_names = {str(item) for item in tags}
+        elif isinstance(tags, dict):
+            enabled = tags.get("enabled") or tags.get("enable") or []
+            if isinstance(enabled, list):
+                tag_names = {str(item) for item in enabled}
+        if annotations.get("destructiveHint") is True or schema.get("destructiveHint") is True:
+            return True
+        if "destructiveHint" in tag_names:
+            return True
+        if annotations.get("readOnlyHint") is False or schema.get("readOnlyHint") is False:
+            return True
+        return False
 
     @staticmethod
     def _connection_requirements(payload: dict[str, Any]) -> list[dict[str, Any]]:
