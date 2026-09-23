@@ -128,6 +128,54 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+export const TOOL_FAIL_RATE_UNAVAILABLE = "unavailable";
+/** Prefix of a loaded event log. A missing feed stays null — never an invented []. */
+export function recordedToolFailRateFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+function formatToolFailRatePercent(percent) {
+  if (percent === 0) return "0%";
+  if (!Number.isFinite(percent) || percent < 0) return null;
+  const rounded = Math.round(percent * 100) / 100;
+  // A positive ratio must not display as a fake zero.
+  if (rounded === 0) return null;
+  return (Number.isInteger(rounded) ? String(rounded) : String(rounded)) + "%";
+}
+/**
+ * Read-only tool.failed / tool.completed from the loaded shell feed.
+ * Hidden with no mission or in preview. A missing feed is unavailable, not 0%.
+ * No counted tool outcomes yet is 0%. Fails with zero completes is undefined.
+ */
+export function toolFailRateView(feed, options = {}) {
+  const visible = options.visible === true;
+  if (!visible) return {hidden: true, known: false, fails: null, completes: null, rate: null, label: ""};
+  if (!Array.isArray(feed)) {
+    return {hidden: false, known: false, fails: null, completes: null, rate: null, label: "FAIL RATE " + TOOL_FAIL_RATE_UNAVAILABLE};
+  }
+  let fails = 0;
+  let completes = 0;
+  for (const event of feed) {
+    if (!event || typeof event !== "object") continue;
+    if (event.event_type === "tool.failed") fails += 1;
+    else if (event.event_type === "tool.completed") completes += 1;
+  }
+  if (completes === 0) {
+    if (fails === 0) {
+      return {hidden: false, known: true, fails: 0, completes: 0, rate: 0, label: "FAIL RATE 0%"};
+    }
+    return {hidden: false, known: false, fails, completes: 0, rate: null, label: "FAIL RATE " + TOOL_FAIL_RATE_UNAVAILABLE};
+  }
+  const rate = fails / completes;
+  const percent = formatToolFailRatePercent(rate * 100);
+  if (percent === null) {
+    return {hidden: false, known: false, fails, completes, rate: null, label: "FAIL RATE " + TOOL_FAIL_RATE_UNAVAILABLE};
+  }
+  return {hidden: false, known: true, fails, completes, rate, label: "FAIL RATE " + percent};
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
