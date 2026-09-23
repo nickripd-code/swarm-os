@@ -28,7 +28,7 @@ const cases = {
   oneDay: view({created_at: STAMP}, Date.parse("2026-09-24T08:00:00Z")),
   micros: view({created_at: "2026-09-23T08:00:00.250000Z"}, Date.parse("2026-09-23T08:00:59.900Z")),
   skewOk: view({created_at: STAMP}, Date.parse(STAMP) - 120000),
-  noClock: view({created_at: STAMP}, undefined),
+  noClock: missionAgeChip({preview: false, mission: mission({created_at: STAMP})}, {}),
   badNow: missionAgeChip({preview: false, mission: mission({created_at: STAMP})}, {now: Number.NaN}),
   zeroNow: missionAgeChip({preview: false, mission: mission({created_at: STAMP})}, {now: 0}),
   bad: {
