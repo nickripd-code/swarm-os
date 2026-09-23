@@ -12,7 +12,37 @@ py -m venv .venv
 .\.venv\Scripts\python -m uvicorn app.main:app --reload
 ```
 
-Open http://127.0.0.1:8000. The mission controller talks to models through the provider-independent contract in `app/providers.py`. Controller and workers request capabilities (reasoning, coding, tools, context, cost, privacy); `ModelRouter` selects from registered providers. There is no demo substitute: if no provider is configured or every configured provider fails, the mission fails closed.
+Open http://127.0.0.1:8000.
+
+### Docker
+
+Shortest path to Mission Control. The image installs the base package from `pyproject.toml` and runs `uvicorn app.main:app` on port **8000**. It contains no API keys. Creating a mission with no configured provider returns **503**.
+
+```bash
+docker compose up --build
+```
+
+Open http://127.0.0.1:8000. SQLite lives on the `swarm-data` volume at `/data/swarm.db`.
+
+Without optional tools or a provider key, that container serves Mission Control, `/api/health` (providers reported unconfigured), and the mission list. Launch stays 503. Payments stay simulated; live settlement stays unconfigured. Local tools, Playwright (`SWARM_BROWSER` and the `browser` extra, which this image does not install), self-mod, MCP, and Composio stay off.
+
+To run a real mission, copy `.env.example` to `.env`, set one provider key such as `OPENAI_API_KEY`, and start again. Compose loads `.env` when the file exists and still starts when it does not. Do not commit `.env`.
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Same image without Compose:
+
+```bash
+docker build -t swarm-os:local .
+docker run --rm -p 8000:8000 -v swarm-data:/data swarm-os:local
+```
+
+If host port 8000 is taken, publish another one (`8001:8000`). vLLM's default URL is also port 8000; set `VLLM_BASE_URL` before opting that adapter in. This container runs the app process. It is not a `WorkspaceProvider` sandbox and it does not give agents a host shell.
+
+The mission controller talks to models through the provider-independent contract in `app/providers.py`. Controller and workers request capabilities (reasoning, coding, tools, context, cost, privacy); `ModelRouter` selects from registered providers. There is no demo substitute: if no provider is configured or every configured provider fails, the mission fails closed.
 
 ## Model providers
 
