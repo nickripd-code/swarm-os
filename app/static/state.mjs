@@ -128,6 +128,38 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+export const QUESTIONS_UNAVAILABLE = "unavailable";
+function plainRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function recordedToken(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+function questionsUnavailable() {
+  return {hidden: false, known: false, count: null, label: "QUESTIONS " + QUESTIONS_UNAVAILABLE};
+}
+/**
+ * Count the loaded mission's pending operator question.
+ * `pending_question` is one object or null (API default None).
+ * null and a missing key are absent-as-none and count as 0.
+ * A readable question_id plus prompt counts as 1.
+ * Any other present value is unreadable and stays unavailable.
+ * Hidden with no mission and in preview. Reads only this field.
+ */
+export function pendingQuestionCountView(mission, options = {}) {
+  if (!mission || options.preview === true) {
+    return {hidden: true, known: false, count: null, label: ""};
+  }
+  const field = mission.pending_question;
+  if (field == null) {
+    return {hidden: false, known: true, count: 0, label: "QUESTIONS 0"};
+  }
+  if (!plainRecord(field)) return questionsUnavailable();
+  const questionId = recordedToken(field.question_id);
+  const question = recordedToken(field.question);
+  if (!questionId || !question) return questionsUnavailable();
+  return {hidden: false, known: true, count: 1, label: "QUESTIONS 1"};
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
