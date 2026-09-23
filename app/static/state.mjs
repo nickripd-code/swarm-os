@@ -136,7 +136,7 @@ export function spendRemainingChip(mission, usage = {}, options = {}) {
   const spent = finiteNumber(source.cost);
   const budget = finiteNumber(source.budget);
   // Remaining is budget minus spent only when the cost HUD already marked both known.
-  // Mission payment budget/spent and a default token_spent of 0 are not dollars.
+  // Payment totals on the mission and a default zero token total are not dollars.
   if (!view.known || spent === null || budget === null || view.remainingLabel == null) {
     return {visible: true, known: false, remaining: null, spent: null, budget: null, label: ESTIMATE_UNAVAILABLE};
   }
