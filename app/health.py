@@ -230,6 +230,37 @@ async def selfmod_health_status() -> dict:
     }
 
 
+def mission_limits_status() -> dict:
+    """Create-mission caps Mission Control may show before launch.
+
+    Count caps are ``MissionLimits`` defaults — the body ``POST /api/missions``
+    applies when the client sends only a goal. The token-cost figure is the
+    cap ``ResourceScheduler.budget_for`` will enforce (env default, then hard
+    cap). It is never chosen by the UI.
+    """
+    from .models import Mission, MissionLimits
+    from .resources import ResourceScheduler, round_cost
+
+    limits = MissionLimits()
+    scheduler = ResourceScheduler()
+    listed = limits.max_token_cost
+    cap = scheduler.budget_for(Mission(goal="limits readout", limits=limits))
+    known = isinstance(cap, (int, float)) and cap >= 0
+    return {
+        "available": True,
+        "phase": "create_defaults",
+        "max_agents": limits.max_agents,
+        "max_depth": limits.max_depth,
+        "max_tool_calls": limits.max_tool_calls,
+        "max_runtime_seconds": limits.max_runtime_seconds,
+        "max_token_cost": listed,
+        "token_cost_cap": round_cost(cap) if known else None,
+        "token_cost_known": bool(known),
+        "token_cost_source": "listed" if listed is not None else "server_default",
+        "token_cost_hard_cap": round_cost(scheduler.settings.hard_cap),
+    }
+
+
 async def workspace_health_status() -> dict:
     from .workspace import build_workspace_provider
     provider = build_workspace_provider()

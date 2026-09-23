@@ -128,6 +128,82 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+
+function nonNegativeNumber(value) {
+  const n = finiteNumber(value);
+  if (n === null || n < 0) return null;
+  return n;
+}
+
+function formatRuntimeCap(seconds) {
+  const n = nonNegativeNumber(seconds);
+  if (n === null || n < 1) return null;
+  const whole = Math.trunc(n);
+  if (whole % 3600 === 0) return (whole / 3600) + "h";
+  if (whole % 60 === 0) return (whole / 60) + "m";
+  return whole + "s";
+}
+
+export function limitsReadoutView({health, mission, preview} = {}) {
+  const healthLimits = health && health.available !== false && typeof health === "object" ? health : null;
+  const missionLimits = !preview && mission && mission.limits && typeof mission.limits === "object"
+    ? mission.limits : null;
+  const source = missionLimits || healthLimits;
+  if (!source) {
+    return {
+      available: false,
+      phase: "unavailable",
+      note: "Caps unavailable",
+      tokenKnown: false,
+      tokenSource: "unavailable",
+      chips: [{kind: "unavailable", label: "caps unavailable"}],
+    };
+  }
+  const phase = missionLimits ? "mission" : "prelaunch";
+  const chips = [];
+  const agents = nonNegativeNumber(source.max_agents);
+  const depth = nonNegativeNumber(source.max_depth);
+  const tools = nonNegativeNumber(source.max_tool_calls);
+  const runtime = formatRuntimeCap(source.max_runtime_seconds);
+  if (agents !== null && agents >= 1) chips.push({kind: "agents", label: Math.trunc(agents) + " agents"});
+  if (depth !== null) chips.push({kind: "depth", label: "depth " + Math.trunc(depth)});
+  if (tools !== null && tools >= 1) chips.push({kind: "tools", label: Math.trunc(tools) + " tool calls"});
+  if (runtime) chips.push({kind: "runtime", label: runtime + " runtime"});
+
+  let tokenKnown = false;
+  let tokenValue = null;
+  let tokenSource = "unavailable";
+  const listed = nonNegativeNumber(missionLimits ? missionLimits.max_token_cost : healthLimits && healthLimits.max_token_cost);
+  const hard = nonNegativeNumber(healthLimits && healthLimits.token_cost_hard_cap);
+  if (listed !== null) {
+    tokenValue = hard !== null ? Math.min(listed, hard) : listed;
+    tokenKnown = true;
+    tokenSource = hard !== null && listed > hard ? "hard_cap" : "listed";
+  } else if (healthLimits && healthLimits.token_cost_known === true) {
+    const cap = nonNegativeNumber(healthLimits.token_cost_cap);
+    if (cap !== null) {
+      tokenValue = hard !== null ? Math.min(cap, hard) : cap;
+      tokenKnown = true;
+      tokenSource = "server_default";
+    }
+  }
+  const usd = tokenKnown ? formatUsd(tokenValue) : null;
+  if (usd) chips.push({kind: "token", label: usd + " token cap", source: tokenSource});
+  else chips.push({kind: "token", label: "token cap unavailable", source: "unavailable"});
+
+  let note = phase === "mission"
+    ? "Configured mission caps · read only"
+    : "Caps that apply on launch · read only";
+  if (tokenSource === "server_default") {
+    note = phase === "mission"
+      ? "Mission caps · token cap is the server default · read only"
+      : "Caps that apply on launch · token cap is the server default · read only";
+  } else if (tokenSource === "hard_cap") {
+    note = "Token cap is the server hard cap · read only";
+  }
+  return {available: true, phase, note, tokenKnown, tokenSource, chips};
+}
+
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
