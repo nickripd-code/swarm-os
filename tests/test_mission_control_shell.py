@@ -71,7 +71,8 @@ def test_pause_resume_controls_fail_closed_and_stay_touch_sized():
     assert "pauseConfirmed" in state
     assert 'result.status === "paused"' in state
     assert 'result.status === "resume_requested"' in state
-    assert "/pause" in control and "/resume" in control
+    assert '"/pause"' in state and '"/resume"' in state
+    assert "holdMission" in control and "resolved.path" in control
     assert "resume_requested" in control
     hold = control.split("async function holdMission")[1].split("function commandSuccessMessage")[0]
     assert "resumeConfirmed" in hold and "pauseConfirmed" in hold
