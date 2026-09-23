@@ -182,6 +182,8 @@ The Linux CI suite was green on the `main` baseline before this slice. On this W
 
 - **Tests (this branch):** Composio/tool/policy contracts → **49 passed**; strict OpenAI schema/evidence/runtime contracts → **50 passed**; direct live `gpt-6-astra` Responses request with the repaired schema → **HTTP 200 / completed**. Ruff, `compileall`, and `git diff --check` are clean. Full Windows Python 3.14 run → **883 passed, 5 failed**; all five failures are in untouched baseline files (four locale/UTF-8 UI reads/assertions under CP1252, one Windows symlink privilege error). Linux GitHub CI remains authoritative for the unsuppressed full pytest run. Previous Mission Control validation remains: focused static/server contracts **10 passed**, direct Node harnesses **3/3 passed**, desktop Chromium **6 agents spawned/clickable/no page errors**, mobile Chromium **STOP ALL visible and Preview stops/no page errors**.
 
+- **Tests (question-count chip):** `pytest tests/test_question_count_chip.py tests/test_mission_control_shell.py` → **11 passed** in 0.65s. Ruff on the new Python test is clean. `node --check` on `app/static/control.js` and the harness is clean. `git diff --check` is clean. No live model spend.
+
 **Capability connection order (maximum useful surface per integration):**
 
 1. **Composio Sessions through the existing `ToolProvider` seam — IMPLEMENTED READ-ONLY SEED** — one scoped action gateway with bounded discovery and OAuth links. Next Composio slice is explicit per-toolkit/per-action write grants plus approval for mutating actions; keep OAuth tokens outside prompts.
