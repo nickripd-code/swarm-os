@@ -128,6 +128,72 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+export const PENDING_LLM_UNAVAILABLE = "unavailable";
+/**
+ * Prefix of a loaded mission event log. A missing or unloaded feed stays null
+ * so callers cannot treat it as an empty pending set.
+ */
+export function recordedPendingLlmFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+function pendingLlmKey(event) {
+  if (!event || typeof event !== "object") return null;
+  const payload = event.payload;
+  const actor = event.actor_id;
+  const kind = payload && typeof payload === "object" ? payload.kind : null;
+  if (typeof actor !== "string" || actor.length === 0) return null;
+  if (typeof kind !== "string" || kind.length === 0) return null;
+  return actor + "\0" + kind;
+}
+function unknownPendingLlm() {
+  return {hidden: false, known: false, count: null, label: PENDING_LLM_UNAVAILABLE};
+}
+const PENDING_LLM_LIFECYCLE = new Set(["llm.started", "llm.completed", "llm.failed", "llm.retry", "llm.failover"]);
+/**
+ * Read-only pending / in-flight model-call count. Catalog events are
+ * llm.started, closed by a later llm.completed or llm.failed for the same
+ * actor and kind. There is no model.* call event and no call id, so the match
+ * key is actor_id + payload.kind (the fields every lifecycle emit carries).
+ * Overlapping starts for one actor and kind are a stack of unmatched starts.
+ * llm.retry and llm.failover leave the call open. A close, retry, or failover
+ * with no open start, or a lifecycle event missing actor or kind, cannot be
+ * paired and is unavailable. Hidden with an empty label when no mission is
+ * visible. Missing feed is unavailable, never 0. An explicit empty list is a
+ * known 0. Token usage and spend are never the count.
+ */
+export function pendingLlmCountView(feed, options = {}) {
+  if (options.visible !== true) return {hidden: true, known: false, count: null, label: ""};
+  if (!Array.isArray(feed)) return unknownPendingLlm();
+  const open = new Map();
+  const seen = new Set();
+  for (const event of feed) {
+    if (!event || typeof event !== "object") continue;
+    const type = event.event_type;
+    if (!PENDING_LLM_LIFECYCLE.has(type)) continue;
+    if (event.id == null || event.id === "") return unknownPendingLlm();
+    if (seen.has(event.id)) continue;
+    seen.add(event.id);
+    const key = pendingLlmKey(event);
+    if (!key) return unknownPendingLlm();
+    const depth = open.get(key) || 0;
+    if (type === "llm.started") {
+      open.set(key, depth + 1);
+      continue;
+    }
+    if (depth < 1) return unknownPendingLlm();
+    if (type === "llm.completed" || type === "llm.failed") {
+      if (depth === 1) open.delete(key);
+      else open.set(key, depth - 1);
+    }
+  }
+  let count = 0;
+  for (const depth of open.values()) count += depth;
+  return {hidden: false, known: true, count, label: String(count)};
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
