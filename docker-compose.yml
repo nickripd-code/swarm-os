@@ -1,0 +1,23 @@
+# One command, no secrets required:
+#   docker compose up --build
+# Open http://127.0.0.1:8000
+# Mission create returns 503 until a provider key is set in .env (from .env.example).
+# .env is optional; Compose skips it when missing.
+
+services:
+  mission-control:
+    build: .
+    image: swarm-os:local
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      SWARM_DATABASE_PATH: /data/swarm.db
+      SWARM_WORKSPACE_ROOT: /data/workspaces
+    volumes:
+      - swarm-data:/data
+
+volumes:
+  swarm-data:
