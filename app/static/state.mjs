@@ -128,6 +128,145 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+export const AVG_VERIFICATION_LATENCY_UNAVAILABLE = "unavailable";
+const AVG_VERIFICATION_LATENCY_LABEL = "AVG VERIFICATION LATENCY ";
+const VERIFICATION_LATENCY_FIELDS = ["latency_ms", "duration_ms", "elapsed_ms"];
+/** Prefix of a loaded event log. A missing feed stays null — never an invented []. */
+export function recordedAvgVerificationLatencyFeed(log, cursor, loaded) {
+  if (loaded !== true || !Array.isArray(log)) return null;
+  if (log.length === 0) return [];
+  const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
+  if (index < 0) return [];
+  return log.slice(0, Math.min(log.length, index + 1));
+}
+function verificationOutcomePayload(event) {
+  const payload = event?.payload;
+  return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+}
+function verificationEventTimeMs(event) {
+  const raw = event?.created_at;
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const parsed = Date.parse(raw.trim());
+  return Number.isFinite(parsed) ? parsed : null;
+}
+/** Same buckets as Mission Control elapsed (`#hudElapsed`). A positive mean must not display as 0ms. */
+export function formatAvgVerificationLatency(ms) {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return null;
+  if (ms === 0) return "0ms";
+  if (ms < 1000) {
+    const rounded = Math.round(ms);
+    if (rounded <= 0) return null;
+    if (rounded >= 1000) return formatAvgVerificationLatency(rounded);
+    return rounded + "ms";
+  }
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  if (hours) return hours + "h " + (minutes % 60) + "m";
+  if (minutes) return minutes + "m " + (seconds % 60) + "s";
+  return seconds + "s";
+}
+function explicitVerificationDuration(payload) {
+  for (const key of VERIFICATION_LATENCY_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(payload, key)) continue;
+    const ms = finiteNumber(payload[key]);
+    if (ms === null || ms < 0) return {status: "invalid"};
+    return {status: "ok", ms};
+  }
+  return {status: "absent"};
+}
+function sameVerificationAttempt(start, finished) {
+  const actor = finished?.actor_id ?? null;
+  return !actor || !start?.actor_id || start.actor_id === actor;
+}
+function takeMatchingVerificationStart(open, finished) {
+  for (let i = open.length - 1; i >= 0; i--) {
+    if (sameVerificationAttempt(open[i], finished)) return open.splice(i, 1)[0];
+  }
+  return null;
+}
+/**
+ * Read-only mean duration of completed verification.passed and verification.failed
+ * outcomes on the loaded shell feed. Distinct from newest-only last-verification
+ * time and from in-flight verification age. An explicit non-negative latency_ms /
+ * duration_ms / elapsed_ms wins. Otherwise the span is the recorded created_at
+ * delta from the matching verification.started. Evidence, tool, and model events
+ * are ignored. Hidden with no mission, in preview, or when no completed
+ * verification outcome is visible yet. A missing feed, or any completed outcome
+ * without an honest duration, is unavailable — never a partial mean and never
+ * an invented 0ms.
+ */
+export function avgVerificationLatencyView(feed, options = {}) {
+  const visible = options.visible === true;
+  const empty = {hidden: true, known: false, count: null, meanMs: null, label: ""};
+  if (!visible) return empty;
+  if (!Array.isArray(feed)) {
+    return {
+      hidden: false,
+      known: false,
+      count: null,
+      meanMs: null,
+      label: AVG_VERIFICATION_LATENCY_LABEL + AVG_VERIFICATION_LATENCY_UNAVAILABLE,
+    };
+  }
+  const open = [];
+  const durations = [];
+  let completed = 0;
+  let unreadable = false;
+  for (const event of feed) {
+    if (!event || typeof event !== "object") continue;
+    if (event.event_type === "verification.started") {
+      open.push(event);
+      continue;
+    }
+    const passed = event.event_type === "verification.passed";
+    const failed = event.event_type === "verification.failed";
+    if (!passed && !failed) continue;
+    const started = takeMatchingVerificationStart(open, event);
+    completed += 1;
+    const explicit = explicitVerificationDuration(verificationOutcomePayload(event));
+    if (explicit.status === "invalid") {
+      unreadable = true;
+      continue;
+    }
+    if (explicit.status === "ok") {
+      durations.push(explicit.ms);
+      continue;
+    }
+    const end = verificationEventTimeMs(event);
+    const start = started ? verificationEventTimeMs(started) : null;
+    if (start === null || end === null || end < start) {
+      unreadable = true;
+      continue;
+    }
+    durations.push(end - start);
+  }
+  if (completed === 0) {
+    return {hidden: true, known: false, count: 0, meanMs: null, label: ""};
+  }
+  if (unreadable || durations.length !== completed) {
+    return {
+      hidden: false,
+      known: false,
+      count: completed,
+      meanMs: null,
+      label: AVG_VERIFICATION_LATENCY_LABEL + AVG_VERIFICATION_LATENCY_UNAVAILABLE,
+    };
+  }
+  const meanMs = durations.reduce((sum, ms) => sum + ms, 0) / completed;
+  const formatted = formatAvgVerificationLatency(meanMs);
+  if (formatted === null) {
+    return {
+      hidden: false,
+      known: false,
+      count: completed,
+      meanMs: null,
+      label: AVG_VERIFICATION_LATENCY_LABEL + AVG_VERIFICATION_LATENCY_UNAVAILABLE,
+    };
+  }
+  return {hidden: false, known: true, count: completed, meanMs, label: AVG_VERIFICATION_LATENCY_LABEL + formatted};
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
