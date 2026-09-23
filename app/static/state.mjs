@@ -405,23 +405,23 @@ export function replayView(log, index, options = {}) {
   };
 }
 
-export const LAST_TASK_START_UNAVAILABLE = "LAST TASK START unavailable";
-const TASK_STARTED_AT_EVENTS = new Set([
-  "task.started",
+export const LAST_TASK_STOP_UNAVAILABLE = "LAST TASK STOP unavailable";
+const TASK_STOPPED_AT_EVENTS = new Set([
+  "task.stopped",
 ]);
-const TASK_STARTED_AT_STAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})$/;
+const TASK_STOPPED_AT_STAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})$/;
 
-function hiddenLastTaskStarted() {
+function hiddenLastTaskStopped() {
   return {hidden: true, label: "", known: false, at: null, title: ""};
 }
-function unavailableLastTaskStarted() {
-  return {hidden: false, label: LAST_TASK_START_UNAVAILABLE, known: false, at: null, title: ""};
+function unavailableLastTaskStopped() {
+  return {hidden: false, label: LAST_TASK_STOP_UNAVAILABLE, known: false, at: null, title: ""};
 }
 
 /** UTC clock from a recorded event stamp. Epoch and naive times are rejected. */
-function parseTaskStartedAt(raw) {
+function parseTaskStoppedAt(raw) {
   if (typeof raw !== "string" || raw === "" || raw !== raw.trim()) return null;
-  const match = TASK_STARTED_AT_STAMP.exec(raw);
+  const match = TASK_STOPPED_AT_STAMP.exec(raw);
   if (!match) return null;
   const year = Number(match[1]);
   const month = Number(match[2]);
@@ -458,7 +458,7 @@ function parseTaskStartedAt(raw) {
 }
 
 /** Prefix of a loaded event log. A missing feed stays null — never an invented []. */
-export function recordedTaskStartedAtFeed(log, cursor, loaded) {
+export function recordedTaskStoppedAtFeed(log, cursor, loaded) {
   if (loaded !== true || !Array.isArray(log)) return null;
   if (log.length === 0) return [];
   const index = typeof cursor === "number" && Number.isFinite(cursor) ? Math.trunc(cursor) : -1;
@@ -467,34 +467,35 @@ export function recordedTaskStartedAtFeed(log, cursor, loaded) {
 }
 
 /**
- * Read-only UTC time of the newest recorded task.started on the loaded
- * shell log. The runtime emits that catalog type when a specialist task
- * begins. llm.started, tool.started, verification.started, mission.started,
- * and other task states are not starts. Hidden with no mission, in preview,
- * or when no task.started is visible yet. A missing feed, or a visible start
- * whose own stamp is unreadable, is LAST TASK START unavailable. The newest
- * valid event time wins. The log-order last task.started must itself have a
- * valid stamp. Never invents spend.
+ * Read-only UTC time of the newest recorded task.stopped on the loaded
+ * shell log. The runtime emits that catalog type when a specialist task is
+ * stopped (kill or interrupted attempt). mission.stopped is a different
+ * event and does not set this clock. task.started and other task states
+ * are ignored. Hidden with no mission, in preview, or when no task.stopped
+ * is visible yet. A missing feed, or a visible stop whose own stamp is
+ * unreadable, is LAST TASK STOP unavailable. The newest valid event time
+ * wins. The log-order last task.stopped must itself have a valid stamp.
+ * Never invents spend.
  */
-export function lastTaskStartedAtView(feed, options = {}) {
-  if (options.visible !== true) return hiddenLastTaskStarted();
-  if (!Array.isArray(feed)) return unavailableLastTaskStarted();
+export function lastTaskStoppedAtView(feed, options = {}) {
+  if (options.visible !== true) return hiddenLastTaskStopped();
+  if (!Array.isArray(feed)) return unavailableLastTaskStopped();
   let lastParsed = null;
-  let sawStarted = false;
+  let sawStopped = false;
   let best = null;
   for (const event of feed) {
     if (!event || typeof event !== "object" || Array.isArray(event)) continue;
-    if (!TASK_STARTED_AT_EVENTS.has(event.event_type)) continue;
-    sawStarted = true;
-    const parsed = parseTaskStartedAt(event.created_at);
+    if (!TASK_STOPPED_AT_EVENTS.has(event.event_type)) continue;
+    sawStopped = true;
+    const parsed = parseTaskStoppedAt(event.created_at);
     lastParsed = parsed;
     if (parsed && (!best || parsed.at >= best.at)) best = parsed;
   }
-  if (!sawStarted) return hiddenLastTaskStarted();
-  if (!lastParsed || !best) return unavailableLastTaskStarted();
+  if (!sawStopped) return hiddenLastTaskStopped();
+  if (!lastParsed || !best) return unavailableLastTaskStopped();
   return {
     hidden: false,
-    label: "LAST TASK START " + best.label,
+    label: "LAST TASK STOP " + best.label,
     known: true,
     at: best.stamp,
     title: best.stamp,
