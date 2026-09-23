@@ -90,6 +90,42 @@ def test_kill_is_fail_closed_unless_route_present(cases):
     assert cases["resolveKillPreview"]["ok"] is False
 
 
+def test_pause_and_resume_map_to_existing_routes(cases):
+    assert cases["pause"] == {"ok": True, "action": "pause"}
+    assert cases["pauseCase"]["action"] == "pause"
+    assert cases["unknown"]["ok"] is False
+    assert cases["unknown"]["error"].startswith("Unknown command:")
+    assert cases["resume"] == {"ok": True, "action": "resume"}
+    assert cases["resumeExtra"]["ok"] is False
+    resolved = cases["resolvePause"]
+    assert resolved["ok"] is True
+    assert resolved["method"] == "POST"
+    assert resolved["path"] == f"/api/missions/{MISSION}/pause"
+    assert cases["resolvePauseWaiting"]["path"] == resolved["path"]
+    assert cases["resolvePausePaused"]["ok"] is False
+    assert cases["resolvePausePreview"]["ok"] is False
+    assert cases["resolvePauseStopped"]["ok"] is False
+    assert cases["resolvePausePending"]["ok"] is False
+    resumed = cases["resolveResume"]
+    assert resumed["ok"] is True
+    assert resumed["method"] == "POST"
+    assert resumed["path"] == f"/api/missions/{MISSION}/resume"
+    assert cases["resolveResumeRunning"]["ok"] is False
+    assert cases["resolveResumePreview"]["ok"] is False
+    assert cases["visibilityRunning"] == {"pause": True, "resume": False}
+    assert cases["visibilityWaiting"] == {"pause": True, "resume": False}
+    assert cases["visibilityPaused"] == {"pause": False, "resume": True}
+    assert cases["visibilityPreview"] == {"pause": False, "resume": False}
+    assert cases["visibilityReplay"] == {"pause": False, "resume": False}
+    assert cases["visibilityStopped"] == {"pause": False, "resume": False}
+    assert cases["visibilityPending"] == {"pause": False, "resume": False}
+    assert cases["pauseConfirmed"] is True
+    assert cases["pauseUnconfirmed"] is False
+    assert cases["resumeConfirmed"] is True
+    assert cases["resumeUnconfirmed"] is False
+    assert cases["resumePausedUnconfirmed"] is False
+
+
 def test_static_command_bar_is_vanilla_and_unanimated():
     html = (ROOT / "app/static/index.html").read_text()
     css = (ROOT / "app/static/control.css").read_text()
@@ -133,6 +169,14 @@ def test_static_command_bar_is_served_and_maps_live_routes(tmp_path, monkeypatch
         assert "post" in paths["/api/missions/{mission_id}/answers/{question_id}"]
         kill_path = "/api/missions/{mission_id}/agents/{agent_id}/kill"
         assert "post" in paths[kill_path]
+        assert "post" in paths["/api/missions/{mission_id}/pause"]
+        assert "post" in paths["/api/missions/{mission_id}/resume"]
+        assert 'id="missionPause"' in page.text
+        assert 'id="missionResume"' in page.text
+        missing = client.post(f"/api/missions/{MISSION}/pause")
+        assert missing.status_code == 404
+        missing_resume = client.post(f"/api/missions/{MISSION}/resume")
+        assert missing_resume.status_code == 404
         stopped = client.post("/api/stop-all")
         assert stopped.status_code == 200
         body = stopped.json()

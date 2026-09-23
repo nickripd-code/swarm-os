@@ -1,5 +1,6 @@
 import {
   parseCommand, resolveCommand, killRoutePresent, KILL_ROUTE_PATTERN,
+  missionHoldVisibility, pauseConfirmed, resumeConfirmed,
 } from "../app/static/state.mjs";
 
 const missionId = "11111111-1111-4111-8111-111111111111";
@@ -43,6 +44,36 @@ cases.resolveAnswer = resolveCommand(cases.answerText, live);
 cases.resolveAnswerNoQuestion = resolveCommand(cases.answerText, noQuestion);
 cases.resolveAnswerPreview = resolveCommand(cases.answerText, preview);
 cases.resolveUnknown = resolveCommand(cases.unknown, live);
+
+cases.pause = parseCommand("pause");
+cases.pauseCase = parseCommand("PAUSE");
+cases.resume = parseCommand("resume");
+cases.resumeExtra = parseCommand("resume now");
+const running = {...live, missionStatus: "running"};
+const waiting = {...live, missionStatus: "waiting"};
+const paused = {...live, missionStatus: "paused"};
+const stopped = {...live, missionStatus: "stopped"};
+cases.resolvePause = resolveCommand(cases.pause, running);
+cases.resolvePauseWaiting = resolveCommand(cases.pause, waiting);
+cases.resolvePausePaused = resolveCommand(cases.pause, paused);
+cases.resolvePausePreview = resolveCommand(cases.pause, {...preview, missionStatus: "running"});
+cases.resolvePauseStopped = resolveCommand(cases.pause, stopped);
+cases.resolvePausePending = resolveCommand(cases.pause, {...live, missionStatus: "pending"});
+cases.resolveResume = resolveCommand(cases.resume, paused);
+cases.resolveResumeRunning = resolveCommand(cases.resume, running);
+cases.resolveResumePreview = resolveCommand(cases.resume, {...preview, missionStatus: "paused"});
+cases.visibilityRunning = missionHoldVisibility({missionId, preview: false, replayLive: true, status: "running"});
+cases.visibilityWaiting = missionHoldVisibility({missionId, preview: false, replayLive: true, status: "waiting"});
+cases.visibilityPaused = missionHoldVisibility({missionId, preview: false, replayLive: true, status: "paused"});
+cases.visibilityPreview = missionHoldVisibility({missionId, preview: true, replayLive: true, status: "running"});
+cases.visibilityReplay = missionHoldVisibility({missionId, preview: false, replayLive: false, status: "paused"});
+cases.visibilityStopped = missionHoldVisibility({missionId, preview: false, replayLive: true, status: "stopped"});
+cases.visibilityPending = missionHoldVisibility({missionId, preview: false, replayLive: true, status: "pending"});
+cases.pauseConfirmed = pauseConfirmed({status: "paused"});
+cases.pauseUnconfirmed = pauseConfirmed({status: "running"});
+cases.resumeConfirmed = resumeConfirmed({status: "resume_requested"});
+cases.resumeUnconfirmed = resumeConfirmed({status: "running"});
+cases.resumePausedUnconfirmed = resumeConfirmed({status: "paused"});
 
 cases.killPresent = killRoutePresent({
   paths: {"/api/missions/{mission_id}/agents/{agent_id}/kill": {post: {}}},

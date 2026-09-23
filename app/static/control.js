@@ -1,4 +1,4 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,missionHoldVisibility,pauseConfirmed,resumeConfirmed} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
@@ -127,6 +127,7 @@ function schedule(){if(!frame)frame=requestAnimationFrame(()=>{frame=0;render();
 function render(){
   const mission=state.mission, status=mission?.status||"idle";
   renderHud();
+  renderMissionControls();
   $("modeLabel").textContent=state.preview?"PREVIEW":(!replayLive?"REPLAY":status.toUpperCase());
   $("modeLabel").className="mode-tag "+(state.preview?"preview":(!replayLive?"replay":status));
   $("agentCount").textContent=state.agents.size;
@@ -252,6 +253,9 @@ function describe(e){
     case "verification.failed":return "<b>Verifier</b> rejected the claim"+(p.failure_class?" · "+esc(p.failure_class):"")+(p.rationale?" · "+esc(p.rationale):"");
     case "task.completed":return "<b>"+esc(name)+"</b> delivered a result";
     case "task.blocked":return "<b>"+esc(name)+"</b> needs a missing capability";
+    case "mission.paused":return "<b>Mission paused</b>";
+    case "mission.resume_requested":return "<b>Resume requested</b>";
+    case "mission.resumed":return "<b>Mission resumed</b>";
     case "mission.started":return "The mission is underway";
     case "mission.completed":return "<b>Mission complete.</b> Result ready below";
     case "mission.stopped":return "<b>Execution stopped</b>";
@@ -494,10 +498,57 @@ function commandContext(){
   return {
     missionId:state.preview?null:state.mission?.id||null,
     preview:!!state.preview,
+    missionStatus:state.preview?"":state.mission?.status||"",
     pendingQuestionId:pendingQuestion()?.question_id||null,
     selectedAgentId:selected||null,
     killAvailable,
   };
+}
+function renderMissionControls(){
+  const box=$("missionControls"), pauseBtn=$("missionPause"), resumeBtn=$("missionResume");
+  if(!box||!pauseBtn||!resumeBtn)return;
+  const view=missionHoldVisibility({
+    missionId:state.preview?null:state.mission?.id||null,
+    preview:!!state.preview,
+    replayLive,
+    status:state.mission?.status||"",
+  });
+  pauseBtn.hidden=!view.pause;
+  resumeBtn.hidden=!view.resume;
+  box.hidden=!(view.pause||view.resume);
+  if(!pauseBtn.dataset.busy)pauseBtn.disabled=!view.pause;
+  if(!resumeBtn.dataset.busy)resumeBtn.disabled=!view.resume;
+}
+async function holdMission(action){
+  const btn=action==="resume"?$("missionResume"):$("missionPause");
+  const resolved=resolveCommand(parseCommand(action),commandContext());
+  if(!resolved.ok){showNotice(resolved.error);return;}
+  if(btn){btn.disabled=true;btn.dataset.busy="1";}
+  try{
+    const result=await request(resolved.path,{method:resolved.method||"POST"});
+    const confirmed=action==="resume"?resumeConfirmed(result):pauseConfirmed(result);
+    if(!confirmed){
+      showNotice(action==="resume"?"Resume did not confirm the request":"Pause did not confirm paused");
+      return;
+    }
+    if(state.mission&&!state.preview){
+      const mode=state.mission.mode;
+      const id=state.mission.id;
+      const m=await request("/api/missions/"+id);
+      if(state.mission&&state.mission.id===id&&!state.preview){
+        state.mission=m;
+        if(mode)state.mission.mode=mode;
+      }
+      if(action==="pause"&&state.mission?.status!=="paused"){
+        showNotice("Pause did not confirm paused");
+        return;
+      }
+    }
+    $("announcement").textContent=action==="resume"?"Resume requested":"Mission paused";
+    showNotice("");
+    refreshHistory();
+  }catch(error){showNotice(error.message);}
+  finally{if(btn)delete btn.dataset.busy;schedule();}
 }
 function commandSuccessMessage(resolved,result){
   if(resolved.action==="stop"){
@@ -518,6 +569,14 @@ function commandSuccessMessage(resolved,result){
     if(!result||typeof result.status!=="string"||!result.agent_id)return null;
     return "Agent "+result.status;
   }
+  if(resolved.action==="pause"){
+    if(!pauseConfirmed(result))return null;
+    return "Mission paused";
+  }
+  if(resolved.action==="resume"){
+    if(!resumeConfirmed(result))return null;
+    return "Resume requested";
+  }
   return null;
 }
 async function runCommand(raw){
@@ -537,13 +596,17 @@ async function runCommand(raw){
     const result=await request(resolved.path,options);
     const message=commandSuccessMessage(resolved,result);
     if(!message){setCommandStatus("Command did not confirm success","error");return;}
-    if(resolved.action==="stop"||resolved.action==="stop-all"){
-      $("announcement").textContent=message;
+    if(resolved.action==="stop"||resolved.action==="stop-all"||resolved.action==="pause"||resolved.action==="resume"){
       if(state.mission&&!state.preview){
         const mode=state.mission.mode;
         const m=await request("/api/missions/"+state.mission.id);
         state.mission=m;if(mode)state.mission.mode=mode;
+        if(resolved.action==="pause"&&m.status!=="paused"){
+          setCommandStatus("Pause did not confirm paused","error");
+          return;
+        }
       }
+      $("announcement").textContent=message;
       if(resolved.action==="stop-all")connection("All execution stopped");
     }
     if(resolved.action==="answer"){
@@ -624,6 +687,8 @@ function preview(){
   next();
 }
 $("preview").onclick=preview;$("emptyPreview").onclick=preview;
+if($("missionPause"))$("missionPause").onclick=()=>{holdMission("pause");};
+if($("missionResume"))$("missionResume").onclick=()=>{holdMission("resume");};
 if($("replayPrev"))$("replayPrev").onclick=()=>{if(state.preview)return;showReplayAt(stepReplay(replayCursor,eventLog.length,-1));};
 if($("replayNext"))$("replayNext").onclick=()=>{if(state.preview)return;showReplayAt(stepReplay(replayCursor,eventLog.length,1));};
 if($("replayLiveBtn"))$("replayLiveBtn").onclick=()=>{if(state.preview)return;showReplayAt(eventLog.length-1);};
