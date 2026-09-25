@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
@@ -97,6 +97,23 @@ class NoRouteError(ProviderError):
         if details:
             message = f"{message} ({details})"
         super().__init__(message, failure_class)
+
+
+class OutcomeMemory(Protocol):
+    """Durable success/failure rows. Empty load is unknown, not success."""
+
+    def append_provider_outcome(
+        self,
+        provider_id: str,
+        success: bool,
+        *,
+        model_id: str | None = None,
+        window: int = HISTORY_WINDOW,
+    ) -> None:
+        ...
+
+    def load_provider_outcomes(self, *, window: int = HISTORY_WINDOW) -> dict[str, list[tuple[str | None, bool]]]:
+        ...
 
 
 class ProviderHistory:
@@ -307,14 +324,39 @@ def registered_providers(provider: ModelProvider) -> list[ModelProvider]:
 class ModelRouter:
     """Select a model from registered ModelProviders by capability, then fall back on outage."""
 
-    def __init__(self, providers: list[ModelProvider]):
+    def __init__(self, providers: list[ModelProvider], *, store: OutcomeMemory | None = None):
         if not providers:
             raise ValueError("ModelRouter requires at least one ModelProvider")
         self.providers = list(providers)
         self.last_decision: RouteDecision | None = None
+        self._store: OutcomeMemory | None = None
         self._history: dict[str, ProviderHistory] = {}
         self._last_catalog: list[tuple[ModelProvider, ModelDescriptor, str]] = []
         self._last_rejections: list[RouteRejection] = []
+        if store is not None:
+            self.attach_outcome_store(store)
+
+    def attach_outcome_store(self, store: OutcomeMemory) -> None:
+        """Load durable outcomes. Does not invent history when the store is empty."""
+        self._store = store
+        self._reload_history()
+
+    def _reload_history(self) -> None:
+        if self._store is None:
+            return
+        loaded = self._store.load_provider_outcomes(window=HISTORY_WINDOW)
+        history: dict[str, ProviderHistory] = {}
+        for provider_id, outcomes in loaded.items():
+            if not isinstance(provider_id, str) or not provider_id:
+                continue
+            bucket = ProviderHistory()
+            for _model_id, success in outcomes:
+                if type(success) is not bool:
+                    continue
+                bucket.record(success)
+            if bucket.samples:
+                history[provider_id] = bucket
+        self._history = history
 
     @classmethod
     def wrap(cls, provider: ModelProvider) -> "ModelRouter":
@@ -326,9 +368,17 @@ class ModelRouter:
     def history_for(self, provider_id: str) -> ProviderHistory:
         return self._history.setdefault(provider_id, ProviderHistory())
 
-    def record_outcome(self, provider_id: str, success: bool) -> None:
+    def record_outcome(self, provider_id: str, success: bool, *, model_id: str | None = None) -> None:
         """Remember a real complete() result. Does not invent success or skip the chain."""
         self.history_for(provider_id).record(success)
+        if self._store is None or not isinstance(provider_id, str) or not provider_id.strip():
+            return
+        model = model_id.strip() if isinstance(model_id, str) and model_id.strip() else None
+        if model is not None and len(model) > 200:
+            model = None
+        self._store.append_provider_outcome(
+            provider_id.strip(), bool(success), model_id=model, window=HISTORY_WINDOW,
+        )
 
     def _provider(self, provider_id: str) -> ModelProvider | None:
         for provider in self.providers:
@@ -407,6 +457,7 @@ class ModelRouter:
         request: CapabilityRequest,
         model_request: ModelRequest | None = None,
     ) -> RouteDecision:
+        self._reload_history()
         if not self.configured():
             raise ProviderError("No model provider is configured", FailureClass.AUTHORIZATION_REQUIRED)
         ranked: list[RouteCandidate] = []
@@ -485,13 +536,13 @@ class ModelRouter:
                 )
                 response = await provider.complete(targeted)
             except ProviderError as exc:
-                self.record_outcome(candidate.provider_id, False)
+                self.record_outcome(candidate.provider_id, False, model_id=candidate.model)
                 if exc.failure_class not in FAILOVER_FAILURE_CLASSES:
                     raise
                 last_error = exc
                 failover_reason = str(exc.failure_class)
                 continue
-            self.record_outcome(candidate.provider_id, True)
+            self.record_outcome(candidate.provider_id, True, model_id=candidate.model)
             if candidate.provider_id != primary.provider_id or candidate.model != primary.model:
                 return response.model_copy(update={
                     "failover_from": primary.provider_id,
@@ -527,7 +578,7 @@ class ModelRouter:
         try:
             response = await provider.complete(targeted)
         except ProviderError:
-            self.record_outcome(candidate.provider_id, False)
+            self.record_outcome(candidate.provider_id, False, model_id=candidate.model)
             raise
-        self.record_outcome(candidate.provider_id, True)
+        self.record_outcome(candidate.provider_id, True, model_id=candidate.model)
         return response

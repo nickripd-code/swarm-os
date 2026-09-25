@@ -57,7 +57,7 @@ def test_fresh_database_reaches_current_schema(tmp_path):
     assert {"missions", "mission_events", "agents", "tasks", "schema_migrations",
             "worker_leases", "idempotency_keys", "work_items", "memory_notes"} <= names
     assert _version(store.engine) == CURRENT_SCHEMA_VERSION
-    assert CURRENT_SCHEMA_VERSION == 4
+    assert CURRENT_SCHEMA_VERSION == 5
     mission = Mission(goal="fresh schema", status=MissionStatus.COMPLETED)
     store.save_mission(mission)
     store.append(MissionEvent(mission_id=mission.id, event_type="mission.completed",
@@ -312,6 +312,31 @@ def test_v3_database_upgrades_to_memory_notes_without_losing_rows(tmp_path):
     loaded = store.get_mission(mission.id)
     assert loaded is not None
     assert loaded.goal == "keep through v4"
+
+
+def test_v4_database_upgrades_to_provider_outcomes_without_losing_rows(tmp_path):
+    path = tmp_path / "v4.db"
+    engine = _engine(path)
+    assert apply_migrations(engine, MIGRATIONS[:4]) == 4
+    mission = Mission(goal="keep through v5", status=MissionStatus.COMPLETED)
+    with engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO missions (id, payload, updated_at) VALUES (:id, :payload, :updated_at)"),
+            {"id": str(mission.id), "payload": mission.model_dump_json(),
+             "updated_at": datetime.now(timezone.utc)},
+        )
+        names = {row[0] for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))}
+    assert "provider_outcomes" not in names
+    assert "memory_notes" in names
+
+    store = Store(str(path))
+    assert _version(store.engine) == CURRENT_SCHEMA_VERSION
+    names = set(inspect(store.engine).get_table_names())
+    assert "provider_outcomes" in names
+    loaded = store.get_mission(mission.id)
+    assert loaded is not None
+    assert loaded.goal == "keep through v5"
+    assert store.load_provider_outcomes() == {}
 
 
 def test_newer_database_fails_closed(tmp_path):

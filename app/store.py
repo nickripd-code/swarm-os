@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
 
-from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, create_engine, select, update
+from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, create_engine, delete, select, update
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from .events import (
@@ -115,6 +115,17 @@ class MemoryNoteRow(Base):
     mission_id: Mapped[str] = mapped_column(String(36), index=True)
     agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     body: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ProviderOutcomeRow(Base):
+    """One real ModelRouter complete() outcome. success is 0 or 1, never implied."""
+
+    __tablename__ = "provider_outcomes"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    provider_id: Mapped[str] = mapped_column(String(64), index=True)
+    model_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    success: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -307,6 +318,68 @@ class Store:
             db.flush()
             event.id = row.id
         return event
+
+    def append_provider_outcome(
+        self,
+        provider_id: str,
+        success: bool,
+        *,
+        model_id: str | None = None,
+        window: int = 8,
+    ) -> None:
+        """Append one real outcome and keep the newest `window` rows for that provider."""
+        if not isinstance(provider_id, str) or not provider_id.strip() or len(provider_id) > 64:
+            raise ValueError("provider outcome requires a provider id")
+        if type(success) is not bool:
+            raise ValueError("provider outcome success must be boolean")
+        if not isinstance(window, int) or window < 1:
+            raise ValueError("provider outcome window must be positive")
+        cleaned_model: str | None = None
+        if model_id is not None:
+            if not isinstance(model_id, str):
+                raise ValueError("provider outcome model id must be text")
+            cleaned_model = model_id.strip() or None
+            if cleaned_model is not None and len(cleaned_model) > 200:
+                raise ValueError("provider outcome model id is too long")
+        provider_id = provider_id.strip()
+        with self.sessions.begin() as db:
+            db.add(ProviderOutcomeRow(
+                provider_id=provider_id,
+                model_id=cleaned_model,
+                success=1 if success else 0,
+                created_at=utcnow(),
+            ))
+            db.flush()
+            stale_ids = db.scalars(
+                select(ProviderOutcomeRow.id)
+                .where(ProviderOutcomeRow.provider_id == provider_id)
+                .order_by(ProviderOutcomeRow.id.desc())
+                .offset(window)
+            ).all()
+            if stale_ids:
+                db.execute(delete(ProviderOutcomeRow).where(ProviderOutcomeRow.id.in_(list(stale_ids))))
+
+    def load_provider_outcomes(self, *, window: int = 8) -> dict[str, list[tuple[str | None, bool]]]:
+        """Newest bounded outcomes per provider, oldest first. Invalid rows are omitted."""
+        if not isinstance(window, int) or window < 1:
+            raise ValueError("provider outcome window must be positive")
+        with self.sessions() as db:
+            rows = db.execute(
+                select(
+                    ProviderOutcomeRow.provider_id,
+                    ProviderOutcomeRow.model_id,
+                    ProviderOutcomeRow.success,
+                ).order_by(ProviderOutcomeRow.id.asc())
+            ).all()
+        grouped: dict[str, list[tuple[str | None, bool]]] = {}
+        for provider_id, model_id, success in rows:
+            if not isinstance(provider_id, str) or not provider_id:
+                continue
+            if success not in (0, 1):
+                continue
+            model = model_id if isinstance(model_id, str) and model_id else None
+            grouped.setdefault(provider_id, []).append((model, success == 1))
+        return {provider_id: items[-window:] for provider_id, items in grouped.items()}
 
     def events(self, mission_id: UUID) -> list[MissionEvent]:
         with self.sessions() as db:
