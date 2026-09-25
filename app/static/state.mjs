@@ -128,6 +128,151 @@ export function costHudView(usage = {}) {
     note: known ? "Conservative estimate · not an invoice" : ESTIMATE_UNAVAILABLE,
   };
 }
+export const BURN_WINDOW_MS = 60000;
+export const BURN_UNAVAILABLE = "unavailable";
+export function burnSampleFromEvent(event, atMs) {
+  const at = finiteNumber(atMs);
+  if (at === null || !event || typeof event !== "object") return null;
+  const payload = event.payload || {};
+  if (event.event_type === "llm.completed") {
+    return {
+      at,
+      tokens: nonNegativeInt(payload.input_tokens) + nonNegativeInt(payload.output_tokens) + nonNegativeInt(payload.reasoning_tokens),
+      spendIncrement: null,
+      spendCumulative: null,
+    };
+  }
+  if (event.event_type !== "budget.updated" || payload.known !== true) return null;
+  const spent = finiteNumber(payload.token_spent);
+  if (spent === null || spent < 0) return null;
+  const incremental = finiteNumber(payload.estimated_cost);
+  return {
+    at,
+    tokens: 0,
+    spendIncrement: incremental !== null && incremental >= 0 ? incremental : null,
+    spendCumulative: spent,
+  };
+}
+export function liveBurnAt(event, nowMs, windowMs = BURN_WINDOW_MS) {
+  const now = finiteNumber(nowMs);
+  const span = finiteNumber(windowMs);
+  const window = span !== null && span > 0 ? span : BURN_WINDOW_MS;
+  if (now === null) return null;
+  const raw = event && event.created_at != null ? Date.parse(event.created_at) : NaN;
+  if (!Number.isFinite(raw)) return now;
+  if (raw > now + 5000) return null;
+  const at = Math.min(raw, now);
+  if (now - at >= window) return null;
+  return at;
+}
+export function pruneBurnSamples(samples, nowMs, windowMs = BURN_WINDOW_MS) {
+  const now = finiteNumber(nowMs);
+  if (now === null || !Array.isArray(samples)) return [];
+  const span = finiteNumber(windowMs);
+  const window = span !== null && span > 0 ? span : BURN_WINDOW_MS;
+  const cutoff = now - window;
+  let anchor = null;
+  const kept = [];
+  for (const sample of samples) {
+    const at = sample ? finiteNumber(sample.at) : null;
+    if (at === null) continue;
+    if (at <= cutoff) anchor = sample;
+    else if (at <= now) kept.push(sample);
+  }
+  samples.length = 0;
+  if (anchor) samples.push(anchor);
+  for (const sample of kept) samples.push(sample);
+  return samples;
+}
+export function pushBurnSample(samples, sample, nowMs, windowMs = BURN_WINDOW_MS) {
+  if (!Array.isArray(samples) || !sample) return Array.isArray(samples) ? samples : [];
+  samples.push(sample);
+  return pruneBurnSamples(samples, nowMs, windowMs);
+}
+function formatTokensPerMin(value) {
+  if (!Number.isFinite(value) || value < 0) return null;
+  return Math.round(value).toLocaleString() + " tokens/min";
+}
+export function burnRateView(samples, options = {}) {
+  const preview = options.preview === true;
+  const replay = options.replay === true;
+  const span = finiteNumber(options.windowMs);
+  const windowMs = span !== null && span > 0 ? span : BURN_WINDOW_MS;
+  const unavailable = (note, state) => ({
+    state,
+    windowMs,
+    tokensAvailable: false,
+    usdKnown: false,
+    tokensPerMin: null,
+    usdPerMin: null,
+    tokensLabel: BURN_UNAVAILABLE,
+    usdLabel: ESTIMATE_UNAVAILABLE,
+    note,
+  });
+  if (preview) return unavailable("Preview · burn unavailable", "preview");
+  if (replay) return unavailable("Replay · burn unavailable", "replay");
+  const now = finiteNumber(options.nowMs);
+  if (now === null) return unavailable("No live samples", "unavailable");
+  const list = Array.isArray(samples) ? samples : [];
+  const cutoff = now - windowMs;
+  const inWindow = list.filter((sample) => {
+    const at = sample ? finiteNumber(sample.at) : null;
+    return at !== null && at > cutoff && at <= now;
+  });
+  if (!inWindow.length) return unavailable("No live samples", "unavailable");
+  const tokens = inWindow.reduce((sum, sample) => sum + nonNegativeInt(sample.tokens), 0);
+  const tokensPerMin = tokens * (60000 / windowMs);
+  const tokensLabel = formatTokensPerMin(tokensPerMin) || BURN_UNAVAILABLE;
+  const spendSamples = list
+    .filter((sample) => sample && finiteNumber(sample.at) !== null && sample.at <= now)
+    .map((sample) => {
+      const cumulative = finiteNumber(sample.spendCumulative);
+      const increment = finiteNumber(sample.spendIncrement);
+      return {
+        at: sample.at,
+        cumulative: cumulative !== null && cumulative >= 0 ? cumulative : null,
+        increment: increment !== null && increment >= 0 ? increment : null,
+      };
+    })
+    .filter((sample) => sample.increment !== null || sample.cumulative !== null)
+    .sort((a, b) => a.at - b.at);
+  let usd = 0;
+  let usdKnown = false;
+  let previous = null;
+  for (const sample of spendSamples) {
+    const inside = sample.at > cutoff;
+    if (inside && sample.increment !== null) {
+      usd += sample.increment;
+      usdKnown = true;
+    } else if (
+      inside && sample.increment === null && sample.cumulative !== null
+      && previous && previous.cumulative !== null && previous.at > cutoff
+    ) {
+      const delta = sample.cumulative - previous.cumulative;
+      if (delta >= 0) {
+        usd += delta;
+        usdKnown = true;
+      }
+    }
+    if (sample.cumulative !== null) previous = sample;
+  }
+  const usdPerMin = usdKnown ? Math.round((usd * (60000 / windowMs)) * 1e6) / 1e6 : null;
+  const usdFormatted = usdPerMin === null ? null : formatUsd(usdPerMin);
+  const seconds = Math.round(windowMs / 1000);
+  return {
+    state: "live",
+    windowMs,
+    tokensAvailable: true,
+    usdKnown: usdFormatted !== null,
+    tokensPerMin,
+    usdPerMin: usdFormatted === null ? null : usdPerMin,
+    tokensLabel,
+    usdLabel: usdFormatted ? usdFormatted + "/min" : ESTIMATE_UNAVAILABLE,
+    note: usdFormatted
+      ? "Trailing " + seconds + "s · not an invoice"
+      : "Tokens from recorded usage · USD estimate unavailable",
+  };
+}
 export function applyEvent(state, e) {
   if (state.seen.has(e.id)) return false;
   state.seen.add(e.id);
