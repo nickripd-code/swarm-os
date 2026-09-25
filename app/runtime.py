@@ -386,7 +386,9 @@ class SwarmRuntime:
         )
 
     async def spawn(self, mission: Mission, role: str, purpose: str, parent: AgentSpec | None = None,
-                    capabilities: list[str] | None = None) -> AgentSpec:
+                    capabilities: list[str] | None = None, *, preferred_model: str | None = None,
+                    max_token_cost: float | None = None, tool_allowlist: list[str] | None = None,
+                    ttl_seconds: int | None = None) -> AgentSpec:
         self.check_stopped(mission.id)
         current = self.agents[mission.id]
         depth = parent.depth + 1 if parent else 0
@@ -401,7 +403,9 @@ class SwarmRuntime:
             parent_ok=not parent or parent.mission_id == mission.id,
         ))
         agent = AgentSpec(mission_id=mission.id, parent_id=parent.id if parent else None,
-                          role=role, purpose=purpose, capabilities=capabilities or [], depth=depth)
+                          role=role, purpose=purpose, capabilities=capabilities or [], depth=depth,
+                          preferred_model=preferred_model, max_token_cost=max_token_cost,
+                          tool_allowlist=tool_allowlist, ttl_seconds=ttl_seconds)
         current.append(agent)
         self.store.save_agent(agent)
         await self.emit(mission.id, EventType.AGENT_SPAWNED, agent.model_dump(mode="json"), agent.id)
