@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def utcnow() -> datetime:
@@ -118,7 +119,24 @@ class Mission(BaseModel):
     paused_seconds: float = Field(default=0, ge=0)
 
 
+# Optional AgentSpec hints live in the existing agents.payload JSON column.
+# None means unspecified. Do not treat these as routing, tool, or TTL enforcement.
+MAX_AGENT_TOKEN_COST = 1_000_000.0
+MAX_AGENT_TTL_SECONDS = 30 * 24 * 60 * 60
+MAX_AGENT_TOOL_ALLOWLIST = 64
+MAX_AGENT_MODEL_ID_LENGTH = 200
+MAX_AGENT_TOOL_NAME_LENGTH = 128
+
+
 class AgentSpec(BaseModel):
+    """Durable agent row. Optional north-star hints are stored, not enforced.
+
+    `preferred_model`, `max_token_cost`, `tool_allowlist`, and `ttl_seconds`
+    round-trip through `agents.payload` and agent spawn/update event dumps.
+    Omitted fields stay None so existing spawn paths keep the same behavior.
+    `tool_allowlist` of None or [] means unspecified, not deny-all.
+    """
+
     id: UUID = Field(default_factory=uuid4)
     mission_id: UUID
     parent_id: UUID | None = None
@@ -129,6 +147,59 @@ class AgentSpec(BaseModel):
     status: AgentStatus = AgentStatus.CREATED
     output: dict[str, Any] | None = None
     created_at: datetime = Field(default_factory=utcnow)
+    preferred_model: str | None = Field(default=None, min_length=1, max_length=MAX_AGENT_MODEL_ID_LENGTH)
+    max_token_cost: float | None = Field(default=None, ge=0, le=MAX_AGENT_TOKEN_COST)
+    tool_allowlist: list[str] | None = Field(default=None, max_length=MAX_AGENT_TOOL_ALLOWLIST)
+    ttl_seconds: int | None = Field(default=None, gt=0, le=MAX_AGENT_TTL_SECONDS)
+
+    @field_validator("preferred_model", mode="before")
+    @classmethod
+    def _preferred_model(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("preferred_model must be a string model id when set")
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("preferred_model must be a non-empty model id when set")
+        return stripped
+
+    @field_validator("max_token_cost", mode="before")
+    @classmethod
+    def _max_token_cost(cls, value: object) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError("max_token_cost must be a finite non-negative number")
+        return float(value)
+
+    @field_validator("tool_allowlist", mode="before")
+    @classmethod
+    def _tool_allowlist(cls, value: object) -> list[str] | None:
+        if value is None:
+            return None
+        if isinstance(value, str) or not isinstance(value, list):
+            raise ValueError("tool_allowlist must be a list of strings when set")
+        cleaned: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("tool_allowlist entries must be strings")
+            name = item.strip()
+            if not name:
+                raise ValueError("tool_allowlist entries must be non-empty when set")
+            if len(name) > MAX_AGENT_TOOL_NAME_LENGTH:
+                raise ValueError("tool_allowlist entry is too long")
+            cleaned.append(name)
+        return cleaned
+
+    @field_validator("ttl_seconds", mode="before")
+    @classmethod
+    def _ttl_seconds(cls, value: object) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("ttl_seconds must be a positive integer when set")
+        return value
 
 
 class Task(BaseModel):
