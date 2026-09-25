@@ -27,7 +27,8 @@ def test_compact_shell_preserves_every_javascript_mount_point():
     required = {
         "missionForm", "goal", "launch", "brain", "history", "objectiveHud",
         "missionMode", "missionStatus", "hudElapsed", "hudAgents", "hudTasks",
-        "hudTokens", "hudSpend", "costHud", "replayHud", "questionPanel",
+        "hudTokens", "hudSpend", "costHud", "burnRateHud", "burnRateNote",
+        "burnRateTokens", "burnRateSpend", "replayHud", "questionPanel",
         "answerForm", "mapViewport", "world", "connections", "nodes", "emptyMap",
         "agentCount", "taskCount", "tokenCount", "inspectorContent", "activity",
         "commandBar", "commandForm", "resultPanel", "stopAll", "alerts",

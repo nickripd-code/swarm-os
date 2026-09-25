@@ -1,11 +1,11 @@
-import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive} from "./state.mjs";
+import {newState,applyEvent,layoutTree,terminal,alertFromEvent,resultMetaText,missionMode,costHudView,formatUsd,tokenTotal,parseCommand,resolveCommand,killRoutePresent,recordEvent,projectEvents,replayView,stepReplay,clampReplayIndex,isReplayLive,burnRateView,burnSampleFromEvent,liveBurnAt,pushBurnSample,pruneBurnSamples} from "./state.mjs";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const label = role => String(role||"Agent").replaceAll("_"," ");
 const statusName = status => ({created:"Ready",running:"Thinking",completed:"Done",blocked:"Blocked",failed:"Failed",stopped:"Stopped",pending:"Queued",paused:"Paused",waiting:"Waiting"}[status] || status);
 const symbol = status => ({created:"·",running:"",completed:"✓",blocked:"?",failed:"!",stopped:"■"}[status] || "·");
 const colors = ["#c6b4ef","#edbd9e","#aed8cf","#e6cd90","#b5cbe3","#dfb9ca"];
-let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null, hudTick=null, notifyArmed=false, killAvailable=false;
+let state=newState(), selected=null, ws=null, generation=0, retry=null, zoom=1, graph=null, frame=0, previewTimer=null, health=null, hudTick=null, notifyArmed=false, killAvailable=false, burnSamples=[];
 let eventLog=[], replayCursor=-1, replayLive=true, replayTimer=null, sourceMission=null;
 const elements=new Map();
 const bot = color => '<span class="bot" style="--agent-color:'+color+'" aria-hidden="true"><span class="ear ear-left"></span><span class="ear ear-right"></span><span class="visor"><i></i><i></i><b class="mouth"></b></span></span>';
@@ -64,6 +64,16 @@ function renderHud(){
       : cost.budgetLabel;
   }
   if($("costHud"))$("costHud").dataset.known=cost.known?"true":"false";
+  const nowMs=Date.now();
+  if(!state.preview&&replayLive)pruneBurnSamples(burnSamples,nowMs);
+  const burn=burnRateView(burnSamples,{nowMs,preview:!!state.preview,replay:!replayLive});
+  if($("burnRateNote"))$("burnRateNote").textContent=burn.note;
+  if($("burnRateTokens"))$("burnRateTokens").textContent=burn.tokensLabel;
+  if($("burnRateSpend"))$("burnRateSpend").textContent=burn.usdLabel;
+  if($("burnRateHud")){
+    $("burnRateHud").dataset.known=burn.usdKnown?"true":"false";
+    $("burnRateHud").dataset.state=burn.state;
+  }
   if($("hudElapsed")){
     const view=replayView(eventLog,replayCursor,{preview:state.preview,mission:sourceMission||mission});
     if(!replayLive&&!state.preview&&view.elapsedMs!=null){
@@ -79,8 +89,9 @@ function renderHud(){
     $("replayChip").className="hud-chip mode "+(state.preview?"preview":replayLive?"replay-live":"replay");
   }
   const running=!!mission&&!terminal.has(status)&&replayLive&&!state.preview;
-  if(running&&!hudTick)hudTick=setInterval(renderHud,1000);
-  if(!running&&hudTick){clearInterval(hudTick);hudTick=null;}
+  const burnFresh=!state.preview&&replayLive&&burn.tokensAvailable;
+  if((running||burnFresh)&&!hudTick)hudTick=setInterval(renderHud,1000);
+  if(!running&&!burnFresh&&hudTick){clearInterval(hudTick);hudTick=null;}
 }
 function clearAlerts(){if($("alerts"))$("alerts").replaceChildren();}
 function pushAlert(alert){
@@ -308,6 +319,7 @@ function disconnect(){
 }
 function reset(mission){
   stopReplayPlay();
+  burnSamples=[];
   eventLog=[];replayCursor=-1;replayLive=true;sourceMission=mission||null;
   state=newState(mission);selected=null;elements.clear();$("nodes").replaceChildren();$("activity").replaceChildren();
   $("resultPanel").hidden=true;if($("resultMeta")){$("resultMeta").hidden=true;$("resultMeta").textContent="";}
@@ -390,6 +402,14 @@ function renderReplayHud(){
     $("replayPlay").textContent=playing?"Pause":"Play";
   }
 }
+function noteLiveBurn(e,nowMs){
+  if(state.preview)return;
+  const at=liveBurnAt(e,nowMs);
+  if(at===null)return;
+  const sample=burnSampleFromEvent(e,at);
+  if(!sample)return;
+  pushBurnSample(burnSamples,sample,nowMs);
+}
 function connect(id,gen){
   if(gen!==generation)return;
   const liveFrom=Date.now();
@@ -400,6 +420,7 @@ function connect(id,gen){
     try{
       const e=JSON.parse(message.data);
       if(ingestRecorded(e)){
+        noteLiveBurn(e,Date.now());
         schedule();
         if(replayLive){
           considerAlert(e,liveFrom);
