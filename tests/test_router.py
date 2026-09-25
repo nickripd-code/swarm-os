@@ -746,3 +746,117 @@ async def test_complete_on_records_failure_without_failover():
     assert decision.selected.provider_id == "openrouter"
     assert router.history_for("openai").failures == 1
 
+
+@pytest.mark.asyncio
+async def test_empty_outcome_store_is_unknown_not_success(tmp_path):
+    store = Store(str(tmp_path / "empty.db"))
+    router = ModelRouter([openai_like(), openrouter_like(capabilities=EQUAL_CAPS)], store=store)
+    assert store.load_provider_outcomes() == {}
+    decision = await router.select(CapabilityRequest(reasoning="high", coding="high"))
+    assert router.history_for("openai").samples == 0
+    assert router.history_for("openai").score_delta() == 0.0
+    assert "no recent outcomes" in decision.selected.reasons
+    assert not any(reason.startswith("recent success") for item in decision.chain for reason in item.reasons)
+
+
+@pytest.mark.asyncio
+async def test_durable_outcomes_reload_on_a_fresh_router(tmp_path):
+    path = tmp_path / "outcomes.db"
+    store = Store(str(path))
+    router = ModelRouter(
+        [openai_like(price_output_per_million=20), openrouter_like(capabilities=EQUAL_CAPS, price_output_per_million=1)],
+        store=store,
+    )
+    for _ in range(3):
+        router.record_outcome("openai", True, model_id="gpt-6-astra")
+        router.record_outcome("openrouter", False, model_id="openai/gpt-4o")
+    assert store.load_provider_outcomes()["openai"] == [("gpt-6-astra", True)] * 3
+    assert store.load_provider_outcomes()["openrouter"] == [("openai/gpt-4o", False)] * 3
+
+    restarted = ModelRouter(
+        [openai_like(price_output_per_million=20), openrouter_like(capabilities=EQUAL_CAPS, price_output_per_million=1)],
+        store=Store(str(path)),
+    )
+    assert restarted.history_for("openai").successes == 3
+    assert restarted.history_for("openai").failures == 0
+    assert restarted.history_for("openrouter").failures == 3
+    decision = await restarted.select(CapabilityRequest(reasoning="high", coding="high"))
+    assert decision.selected.provider_id == "openai"
+    assert "recent success 3/3" in decision.selected.reasons
+    assert any("recent success 0/3" in reason for reason in decision.fallbacks[0].reasons)
+
+
+@pytest.mark.asyncio
+async def test_classified_failure_persists_without_changing_failover(tmp_path):
+    path = tmp_path / "fail.db"
+    openai = openai_like(error=ProviderError("invalid structured", FailureClass.INVALID_OUTPUT))
+    openrouter = openrouter_like(capabilities=EQUAL_CAPS)
+    router = ModelRouter([openai, openrouter], store=Store(str(path)))
+    with pytest.raises(ProviderError) as error:
+        await router.complete(CapabilityRequest(reasoning="high", coding="high"), REQUEST)
+    assert error.value.failure_class == FailureClass.INVALID_OUTPUT
+    assert openrouter.calls == 0
+    assert Store(str(path)).load_provider_outcomes()["openai"] == [("gpt-6-astra", False)]
+
+    restarted = ModelRouter(
+        [openai_like(), openrouter_like(capabilities=EQUAL_CAPS)],
+        store=Store(str(path)),
+    )
+    decision = await restarted.select(CapabilityRequest(reasoning="high", coding="high"))
+    openai_candidate = next(item for item in decision.chain if item.provider_id == "openai")
+    assert "recent success 0/1" in openai_candidate.reasons
+    assert restarted.history_for("openrouter").samples == 0
+
+
+def test_outcome_window_reloads_only_recent_rows(tmp_path):
+    path = tmp_path / "window.db"
+    store = Store(str(path))
+    router = ModelRouter([openai_like()], store=store)
+    for _ in range(8):
+        router.record_outcome("openai", False)
+    router.record_outcome("openai", True, model_id="gpt-6-astra")
+    loaded = store.load_provider_outcomes()["openai"]
+    assert len(loaded) == 8
+    assert loaded[-1] == ("gpt-6-astra", True)
+    assert sum(1 for _model, success in loaded if success) == 1
+
+    restarted = ModelRouter([openai_like()], store=Store(str(path)))
+    assert restarted.history_for("openai").samples == 8
+    assert restarted.history_for("openai").successes == 1
+    assert restarted.history_for("openai").failures == 7
+
+
+def test_corrupt_outcome_rows_are_not_counted_as_success(tmp_path):
+    from sqlalchemy import text
+
+    path = tmp_path / "corrupt.db"
+    store = Store(str(path))
+    with store.engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO provider_outcomes (provider_id, model_id, success, created_at) "
+            "VALUES ('openai', 'gpt-6-astra', 2, :created_at), ('', 'gpt-6-astra', 1, :created_at)"
+        ), {"created_at": "2026-09-25T00:00:00"})
+    reloaded = Store(str(path))
+    assert reloaded.load_provider_outcomes() == {}
+    router = ModelRouter([openai_like(), openrouter_like(capabilities=EQUAL_CAPS)], store=reloaded)
+    assert router.history_for("openai").samples == 0
+    assert router.history_for("openai").successes == 0
+
+
+def test_default_runtime_reloads_outcome_store_and_injected_router_stays_memory_only(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    path = tmp_path / "runtime.db"
+    store = Store(str(path))
+    runtime = SwarmRuntime(store)
+    runtime.controller.router.record_outcome("openai", False, model_id="gpt-6-astra")
+    restarted = SwarmRuntime(Store(str(path)))
+    assert restarted.controller.router.history_for("openai").failures == 1
+    assert restarted.controller.router.history_for("openai").successes == 0
+
+    injected = ModelRouter([openai_like()])
+    held = SwarmRuntime(store, controller=OpenAIProvider(model_provider=openai_like(), router=injected))
+    assert held.controller is not runtime.controller
+    assert injected._store is None
+    injected.record_outcome("openai", True)
+    assert Store(str(path)).load_provider_outcomes()["openai"] == [("gpt-6-astra", False)]
+

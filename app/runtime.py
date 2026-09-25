@@ -88,7 +88,14 @@ class SwarmRuntime:
         self.started_at: dict[UUID, datetime] = {}
         self.runs: dict[UUID, asyncio.Task] = {}
         self.wallet = WalletAdapter()
-        self.controller = controller or build_controller()
+        if controller is None:
+            self.controller = build_controller()
+            router = getattr(self.controller, "router", None)
+            attach = getattr(router, "attach_outcome_store", None)
+            if callable(attach):
+                attach(store)
+        else:
+            self.controller = controller
         self.lock = asyncio.Lock()
         self.max_retries = max_retries
         self.retry_base_seconds = retry_base_seconds

@@ -20,7 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
 SCHEMA_TABLE = "schema_migrations"
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 
 class MigrationError(RuntimeError):
@@ -168,11 +168,28 @@ def _upgrade_004_memory_notes(conn: Connection) -> None:
     conn.execute(text("CREATE INDEX IF NOT EXISTS ix_memory_notes_agent_id ON memory_notes (agent_id)"))
 
 
+def _upgrade_005_provider_outcomes(conn: Connection) -> None:
+    """Bounded ModelRouter success/failure rows. Additive; v4 databases keep their rows."""
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS provider_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_id VARCHAR(64) NOT NULL,
+            model_id VARCHAR(200),
+            success INTEGER NOT NULL,
+            created_at DATETIME NOT NULL
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_provider_outcomes_provider_id ON provider_outcomes (provider_id)"
+    ))
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial_schema", _upgrade_001_initial),
     Migration(2, "worker_leases_and_idempotency_keys", _upgrade_002_worker_leases),
     Migration(3, "work_items_queue", _upgrade_003_work_items),
     Migration(4, "memory_notes", _upgrade_004_memory_notes),
+    Migration(5, "provider_outcomes", _upgrade_005_provider_outcomes),
 )
 
 
