@@ -137,6 +137,12 @@ class SwarmRuntime:
         except WorkspaceError as exc:
             raise PolicyError(str(exc), exc.failure_class) from exc
 
+    async def destroy_workspace(self, workspace_id: UUID) -> None:
+        try:
+            await self._require_workspaces().destroy(workspace_id)
+        except WorkspaceError as exc:
+            raise PolicyError(str(exc), exc.failure_class) from exc
+
     async def emit(self, mission_id: UUID, event_type: EventType | str, payload: dict[str, Any], actor_id: UUID | None = None):
         event = self.store.append(MissionEvent(mission_id=mission_id, event_type=event_type, actor_id=actor_id, payload=payload))
         if self.sink:
