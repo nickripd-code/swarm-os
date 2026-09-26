@@ -10,7 +10,9 @@ from uuid import UUID, uuid4
 import httpx
 from pydantic import BaseModel, Field
 
+from .memory import MAX_RECALL_CHARS, MemoryError, MemoryProvider
 from .models import FailureClass, utcnow
+from .policy import OPTED_IN_MEMORY_TOOLS, selected_memory_tool_names
 
 _UNSET = object()
 
@@ -47,6 +49,9 @@ class ToolCall(BaseModel):
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     call_id: UUID = Field(default_factory=uuid4)
+    # Trusted binding from SwarmRuntime. Model arguments cannot select another mission.
+    mission_id: UUID | None = None
+    actor_id: UUID | None = None
 
 
 class ToolResult(BaseModel):
@@ -190,6 +195,128 @@ LOCAL_TOOL_CATALOG: dict[str, tuple[ToolSpec, Any]] = {
 }
 
 
+def _memory_spec(name: str, description: str, input_schema: dict[str, Any], output_schema: dict[str, Any]) -> ToolSpec:
+    return ToolSpec(
+        name=name,
+        description=description,
+        provider="local",
+        permissions=["local"],
+        risk_class="local",
+        input_schema=input_schema,
+        output_schema=output_schema,
+    )
+
+
+MEMORY_TOOL_SPECS: dict[str, ToolSpec] = {
+    "memory.remember": _memory_spec(
+        "memory.remember",
+        "Store a short note for the current mission. scope=agent stores it for the calling agent only. "
+        "Does not invent a note if the write fails.",
+        {
+            "type": "object",
+            "properties": {
+                "body": {"type": "string"},
+                "scope": {"type": "string", "enum": ["mission", "agent"]},
+            },
+            "required": ["body"],
+        },
+        {
+            "type": "object",
+            "properties": {"note": {"type": "object"}},
+            "required": ["note"],
+        },
+    ),
+    "memory.recall": _memory_spec(
+        "memory.recall",
+        "Read size-capped notes for the current mission. scope=agent also includes the calling agent's notes. "
+        "Empty storage returns an empty list.",
+        {
+            "type": "object",
+            "properties": {
+                "scope": {"type": "string", "enum": ["mission", "agent"]},
+                "max_chars": {"type": "integer"},
+            },
+        },
+        {
+            "type": "object",
+            "properties": {"notes": {"type": "array"}},
+            "required": ["notes"],
+        },
+    ),
+}
+
+
+def _optional_uuid(value: Any, label: str) -> UUID | None:
+    if value is None or value == "":
+        return None
+    try:
+        return UUID(str(value))
+    except (ValueError, TypeError, AttributeError):
+        raise ToolError(f"Memory {label} is invalid", FailureClass.INVALID_OUTPUT) from None
+
+
+def _bound_mission_id(call: ToolCall, arguments: dict[str, Any]) -> UUID:
+    if call.mission_id is None:
+        raise ToolError("Memory tools require the current mission", FailureClass.INVALID_OUTPUT)
+    requested = _optional_uuid(arguments.get("mission_id"), "mission_id")
+    if requested is not None and requested != call.mission_id:
+        raise ToolError(
+            "Memory mission scope does not match the current mission",
+            FailureClass.POLICY_REFUSAL,
+        )
+    return call.mission_id
+
+
+def _bound_agent_id(call: ToolCall, arguments: dict[str, Any]) -> UUID | None:
+    scope = arguments.get("scope", "mission")
+    if scope is None:
+        scope = "mission"
+    if not isinstance(scope, str) or scope not in {"mission", "agent"}:
+        raise ToolError("Memory scope must be mission or agent", FailureClass.INVALID_OUTPUT)
+    requested = _optional_uuid(arguments.get("agent_id"), "agent_id")
+    if scope == "mission":
+        if requested is not None:
+            raise ToolError("Mission-scoped memory cannot set agent_id", FailureClass.INVALID_OUTPUT)
+        return None
+    if call.actor_id is None:
+        raise ToolError("Agent-scoped memory requires the calling agent", FailureClass.INVALID_OUTPUT)
+    if requested is not None and requested != call.actor_id:
+        raise ToolError(
+            "Memory agent scope does not match the calling agent",
+            FailureClass.POLICY_REFUSAL,
+        )
+    return call.actor_id
+
+
+def _prepare_body(body: Any) -> str:
+    """Reuse provider caps. Drop credential-shaped keys from a JSON object body."""
+    if not isinstance(body, str):
+        raise ToolError("Memory note body must be text", FailureClass.INVALID_OUTPUT)
+    text = body.strip()
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return body
+    if not isinstance(parsed, dict):
+        return body
+    cleaned = public_tool_data(parsed)
+    if not cleaned:
+        raise ToolError("Memory note body must not be empty", FailureClass.INVALID_OUTPUT)
+    return json.dumps(cleaned, sort_keys=True)
+
+
+def _recall_cap(value: Any, provider: MemoryProvider) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ToolError("Memory recall cap must be a positive integer", FailureClass.CONTEXT_LIMIT)
+    limit = getattr(provider, "max_recall_chars", MAX_RECALL_CHARS)
+    allowed = min(MAX_RECALL_CHARS, int(limit))
+    if value <= 0 or value > allowed:
+        raise ToolError("Memory recall cap exceeds the allowed bound", FailureClass.CONTEXT_LIMIT)
+    return value
+
+
 def local_tools_from_env(raw: str | None = None) -> list[str]:
     text = raw if raw is not None else os.getenv("SWARM_LOCAL_TOOLS", "")
     names: list[str] = []
@@ -201,11 +328,19 @@ def local_tools_from_env(raw: str | None = None) -> list[str]:
 
 
 class LocalToolProvider(ToolProvider):
-    """Allowlisted in-process tools. Unknown names are not registered."""
+    """Allowlisted in-process tools. Unknown names are not registered.
+
+    memory.remember and memory.recall are local notes, not cloud tools. They register
+    when named in the allowlist, or from the environment when no allowlist is passed:
+    SWARM_MEMORY_TOOLS=1/true/yes/on enables both, otherwise SWARM_LOCAL_TOOLS may name
+    them. PolicyGate still denies them until that same opt-in is set. Writes go to the
+    injected MemoryProvider; a missing provider fails closed and does not invent a note.
+    """
 
     provider_id = "local"
 
-    def __init__(self, allowlist: list[str] | None = None):
+    def __init__(self, allowlist: list[str] | None = None, memory: MemoryProvider | None = None):
+        self._memory = memory
         requested = list(allowlist) if allowlist is not None else local_tools_from_env()
         self._handlers: dict[str, Any] = {}
         self._specs: list[ToolSpec] = []
@@ -216,15 +351,58 @@ class LocalToolProvider(ToolProvider):
             spec, handler = entry
             self._specs.append(spec)
             self._handlers[name] = handler
+        if allowlist is None:
+            memory_names = selected_memory_tool_names()
+        else:
+            memory_names = [name for name in requested if name in OPTED_IN_MEMORY_TOOLS]
+        for name in memory_names:
+            if name in self._handlers:
+                continue
+            spec = MEMORY_TOOL_SPECS.get(name)
+            if spec is None:
+                continue
+            self._specs.append(spec)
+            self._handlers[name] = name
 
     def list_tools(self) -> list[ToolSpec]:
         return list(self._specs)
+
+    def _invoke_memory(self, call: ToolCall) -> dict[str, Any]:
+        if self._memory is None:
+            raise ToolError("Memory provider is not configured", FailureClass.TOOL_MISSING)
+        arguments = public_tool_data(require_arguments(call.arguments))
+        mission_id = _bound_mission_id(call, arguments)
+        agent_id = _bound_agent_id(call, arguments)
+        try:
+            if call.name == "memory.remember":
+                note = self._memory.remember(
+                    mission_id, _prepare_body(arguments.get("body")), agent_id=agent_id,
+                )
+                return {"note": note.public_dict()}
+            if call.name == "memory.recall":
+                if "max_tokens" in arguments:
+                    raise ToolError(
+                        "Memory recall accepts max_chars only, inside the existing cap",
+                        FailureClass.CONTEXT_LIMIT,
+                    )
+                notes = self._memory.recall(
+                    mission_id,
+                    agent_id=agent_id,
+                    max_chars=_recall_cap(arguments.get("max_chars"), self._memory),
+                )
+                return {"notes": [note.public_dict() for note in notes]}
+        except MemoryError as exc:
+            raise ToolError(str(exc), exc.failure_class) from exc
+        raise ToolError(f"Unknown tool: {call.name}", FailureClass.TOOL_MISSING)
 
     async def invoke(self, call: ToolCall) -> ToolResult:
         handler = self._handlers.get(call.name)
         if handler is None:
             raise ToolError(f"Unknown tool: {call.name}", FailureClass.TOOL_MISSING)
-        output = handler(require_arguments(call.arguments))
+        if call.name in OPTED_IN_MEMORY_TOOLS:
+            output = self._invoke_memory(call)
+        else:
+            output = handler(require_arguments(call.arguments))
         return ToolResult(
             name=call.name,
             call_id=call.call_id,
@@ -235,10 +413,17 @@ class LocalToolProvider(ToolProvider):
 
     async def health(self) -> ToolHealth:
         names = [spec.name for spec in self._specs]
+        memory_names = [name for name in names if name in OPTED_IN_MEMORY_TOOLS]
+        if not names:
+            status, detail = "unconfigured", "No local tools are allowlisted"
+        elif memory_names and self._memory is None:
+            status, detail = "unavailable", "Memory tools are opted in but no MemoryProvider is configured"
+        else:
+            status, detail = "healthy", "Allowlisted local tools"
         return ToolHealth(
             provider=self.provider_id,
-            status="healthy" if names else "unconfigured",
-            detail="Allowlisted local tools" if names else "No local tools are allowlisted",
+            status=status,
+            detail=detail,
             tools=names,
         )
 
@@ -448,10 +633,15 @@ def build_tool_provider(
     browser: ToolProvider | None | object = _UNSET,
     selfmod: ToolProvider | None | object = _UNSET,
     transport=None,
+    memory: MemoryProvider | None = None,
 ) -> ToolProvider | None:
-    """Compose opted-in local, MCP, Composio, browser, and selfmod tools."""
+    """Compose opted-in local, MCP, Composio, browser, and selfmod tools.
+
+    Pass the process MemoryProvider so opted-in memory.remember / memory.recall can
+    persist scoped notes. Without it, those tools stay listed when opted in and fail closed.
+    """
     providers: list[ToolProvider] = []
-    local = local if local is not None else LocalToolProvider()
+    local = local if local is not None else LocalToolProvider(memory=memory)
     if local.list_tools():
         providers.append(local)
     mcp = mcp if mcp is not None else McpToolProvider(transport=transport)

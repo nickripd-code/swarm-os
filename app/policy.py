@@ -41,6 +41,8 @@ OPTED_IN_BROWSER_TOOLS = frozenset({
 # Operator-opted self-mod tools. Propose/diff need SWARM_SELFMOD; apply also needs WRITE.
 OPTED_IN_SELFMOD_DIFF_TOOLS = frozenset({"selfmod.propose", "selfmod.diff"})
 OPTED_IN_SELFMOD_WRITE_TOOLS = frozenset({"selfmod.apply"})
+# Local scoped notes. Not cloud/network. local_only missions may use them once opted in.
+OPTED_IN_MEMORY_TOOLS = frozenset({"memory.remember", "memory.recall"})
 TRUE_ENV = frozenset({"1", "true", "yes", "on"})
 IRREVERSIBLE_ORG_OPS = frozenset({"replace", "reparent", "retire"})
 APPROVE_TOKENS = frozenset({"approve", "approved", "yes", "allow"})
@@ -159,6 +161,35 @@ def tool_is_opted_in_composio(name: str) -> bool:
     return name.strip().lower().startswith("composio.") and bool(os.getenv("COMPOSIO_API_KEY", "").strip())
 
 
+def selected_memory_tool_names() -> list[str]:
+    """Memory tools opted in by SWARM_MEMORY_TOOLS or named in SWARM_LOCAL_TOOLS.
+
+    SWARM_MEMORY_TOOLS=1/true/yes/on enables both memory.remember and memory.recall.
+    Otherwise only the names present in SWARM_LOCAL_TOOLS are enabled. Unset means none.
+    """
+    if os.getenv("SWARM_MEMORY_TOOLS", "").strip().lower() in TRUE_ENV:
+        return ["memory.remember", "memory.recall"]
+    names: list[str] = []
+    for item in os.getenv("SWARM_LOCAL_TOOLS", "").split(","):
+        name = item.strip()
+        if name in OPTED_IN_MEMORY_TOOLS and name not in names:
+            names.append(name)
+    return names
+
+
+def memory_tools_enabled() -> bool:
+    return bool(selected_memory_tool_names())
+
+
+def tool_is_memory(name: str) -> bool:
+    return name.strip().lower() in OPTED_IN_MEMORY_TOOLS
+
+
+def tool_is_opted_in_memory(name: str) -> bool:
+    """True only for the specific memory tool names the operator opted in."""
+    return name.strip() in selected_memory_tool_names()
+
+
 class PolicyGate:
     """Authorization outside the LLM. Unknown or dangerous acts fail closed."""
 
@@ -245,6 +276,11 @@ class PolicyGate:
             raise PolicyError("Tool use omitted a tool name", FailureClass.POLICY_REFUSAL)
         if mission_privacy(request.mission) == "local_only" and tool_exfiltrates(name):
             raise PolicyError("local_only policy forbids cloud or network tools", FailureClass.POLICY_REFUSAL)
+        if tool_is_memory(name) and not tool_is_opted_in_memory(name):
+            raise PolicyError(
+                "Memory tools require SWARM_MEMORY_TOOLS or SWARM_LOCAL_TOOLS",
+                FailureClass.POLICY_REFUSAL,
+            )
         if (
             tool_is_dangerous(name)
             and not tool_is_opted_in_browser(name)
