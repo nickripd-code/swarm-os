@@ -95,7 +95,6 @@ class SwarmRuntime:
         self._tool_calls: dict[UUID, int] = {}
         self._tool_results: dict[UUID, list[dict[str, Any]]] = {}
         self._answer_waiters: dict[UUID, asyncio.Event] = {}
-        self.tools = build_tool_provider() if tools is _UNSET else tools
         self.worker_id = uuid4()
         self.leases = WorkerLeases(store)
         self.queue = WorkQueue(store, leases=self.leases)
@@ -106,6 +105,8 @@ class SwarmRuntime:
         self.org = OrganizationDesigner()
         self.workspaces = build_workspace_provider() if workspaces is _UNSET else workspaces
         self.memory = StoreMemoryProvider(store) if memory is _UNSET else memory
+        memory_provider = self.memory if isinstance(self.memory, MemoryProvider) else None
+        self.tools = build_tool_provider(memory=memory_provider) if tools is _UNSET else tools
         self.process_tasks = process_tasks
         self.durable_controls = durable_controls
         self.durable_task_id = durable_task_id
@@ -587,7 +588,12 @@ class SwarmRuntime:
             "tool": name, "used": charged, "max": limit,
         }, actor_id)
         try:
-            result = await self.tools.invoke(ToolCall(name=name, arguments=arguments or {}))
+            result = await self.tools.invoke(ToolCall(
+                name=name,
+                arguments=arguments or {},
+                mission_id=mission.id,
+                actor_id=actor_id,
+            ))
         except ToolError as exc:
             self.idempotency.record(str(mission.id), key, "tool", {
                 "error": str(exc), "failure_class": str(exc.failure_class),
