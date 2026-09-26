@@ -79,6 +79,7 @@ class MissionCreate(BaseModel):
     live_payments: bool = False
     privacy: Literal["cloud_allowed", "local_only"] = "cloud_allowed"
     limits: MissionLimits = Field(default_factory=MissionLimits)
+    success_criteria: list[str] = Field(default_factory=list)
 
 
 class PendingQuestion(BaseModel):
@@ -102,6 +103,9 @@ class MissionAnswer(BaseModel):
 class Mission(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     goal: str
+    objective_id: UUID | None = None
+    success_criteria: list[str] = Field(default_factory=list)
+    objective: dict[str, Any] | None = None
     status: MissionStatus = MissionStatus.PENDING
     budget: float = 0
     spent: float = 0

@@ -12,7 +12,13 @@ from .events import (
     EventType, coerce_event_type, is_task_event, parse_event_type, task_status_from_event,
 )
 from .migrations import apply_migrations
-from .models import AgentSpec, Mission, MissionAnswer, MissionEvent, MissionStatus, Task, utcnow
+from .models import (
+    AgentSpec, FailureClass, Mission, MissionAnswer, MissionEvent, MissionStatus, Task, utcnow,
+)
+from .objective import (
+    ObjectiveError, load_objective_id, load_success_criteria, mission_payload,
+    objective_view, prepare_objective,
+)
 
 
 class AnswerStateError(RuntimeError):
@@ -45,6 +51,8 @@ class MissionRow(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     payload: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    objective_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    success_criteria: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class AgentRow(Base):
@@ -126,23 +134,51 @@ class Store:
         self.sessions = sessionmaker(self.engine, expire_on_commit=False)
 
     def save_mission(self, mission: Mission) -> None:
+        criteria = prepare_objective(mission)
+        payload = mission_payload(mission)
+        encoded = json.dumps(criteria)
+        identity = str(mission.objective_id)
         with self.sessions.begin() as db:
             row = db.get(MissionRow, str(mission.id))
-            payload = mission.model_dump_json()
             if row:
-                row.payload, row.updated_at = payload, mission.updated_at
+                if row.objective_id and row.objective_id != identity:
+                    raise ObjectiveError(
+                        "Objective identity does not match the durable record",
+                        FailureClass.INVALID_OUTPUT,
+                    )
+                row.payload = payload
+                row.updated_at = mission.updated_at
+                row.objective_id = identity
+                row.success_criteria = encoded
             else:
-                db.add(MissionRow(id=str(mission.id), payload=payload, updated_at=mission.updated_at))
+                db.add(MissionRow(
+                    id=str(mission.id), payload=payload, updated_at=mission.updated_at,
+                    objective_id=identity, success_criteria=encoded,
+                ))
+
+    def _mission_from_row(self, row: MissionRow) -> Mission:
+        mission = Mission.model_validate_json(row.payload)
+        mission.objective_id = load_objective_id(mission.id, mission.objective_id, row.objective_id)
+        mission.success_criteria = load_success_criteria(mission.success_criteria, row.success_criteria)
+        return mission
+
+    def _attach_objective(self, mission: Mission) -> Mission:
+        mission.objective = objective_view(mission, self.load_tasks(mission.id))
+        return mission
 
     def get_mission(self, mission_id: UUID) -> Mission | None:
         with self.sessions() as db:
             row = db.get(MissionRow, str(mission_id))
-            return Mission.model_validate_json(row.payload) if row else None
+            if row is None:
+                return None
+            mission = self._mission_from_row(row)
+        return self._attach_objective(mission)
 
     def list_missions(self) -> list[Mission]:
         with self.sessions() as db:
             rows = db.scalars(select(MissionRow).order_by(MissionRow.updated_at.desc())).all()
-            return [Mission.model_validate_json(row.payload) for row in rows]
+            missions = [self._mission_from_row(row) for row in rows]
+        return [self._attach_objective(mission) for mission in missions]
 
     def accept_answer(self, mission_id: UUID, question_id: str, answer: str,
                       *, attempts: int = 3) -> tuple[Mission, MissionAnswer]:
@@ -181,7 +217,7 @@ class Store:
                 changed = db.execute(
                     update(MissionRow)
                     .where(MissionRow.id == str(mission_id), MissionRow.payload == original)
-                    .values(payload=mission.model_dump_json(), updated_at=mission.updated_at)
+                    .values(payload=mission_payload(mission), updated_at=mission.updated_at)
                 )
                 if getattr(changed, "rowcount", 0) == 1:
                     return mission, record
@@ -207,7 +243,7 @@ class Store:
                 changed = db.execute(
                     update(MissionRow)
                     .where(MissionRow.id == str(mission_id), MissionRow.payload == original)
-                    .values(payload=mission.model_dump_json(), updated_at=mission.updated_at)
+                    .values(payload=mission_payload(mission), updated_at=mission.updated_at)
                 )
                 if getattr(changed, "rowcount", 0) == 1:
                     return mission, record, True
