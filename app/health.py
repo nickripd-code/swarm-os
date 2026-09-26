@@ -241,6 +241,9 @@ async def workspace_health_status() -> dict:
         "status": health.status,
         "detail": health.detail,
         "root": health.root,
+        "destroy": health.destroy,
+        "gc": health.gc,
+        "ttl_seconds": health.ttl_seconds,
         "docker": False,
         "fallback": False,
     }

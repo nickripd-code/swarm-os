@@ -10,6 +10,7 @@ import json
 import os
 import tempfile
 from abc import ABC, abstractmethod
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID, uuid4
@@ -47,6 +48,19 @@ class WorkspaceHealth(BaseModel):
     backend: str = "filesystem"
     root: str | None = None
     detail: str | None = None
+    destroy: bool = False
+    gc: Literal["configured", "unconfigured"] = "unconfigured"
+    ttl_seconds: int | None = None
+
+
+class WorkspaceGcResult(BaseModel):
+    """Result of an explicit GC pass. `configured` false means nothing was deleted."""
+
+    configured: bool
+    ttl_seconds: int | None = None
+    destroyed: list[UUID] = Field(default_factory=list)
+    kept: int = 0
+    refused: int = 0
 
 
 class WorkspaceProvider(ABC):
@@ -78,6 +92,15 @@ class WorkspaceProvider(ABC):
     async def read_file(self, workspace_id: UUID, relative: str) -> str:
         raise NotImplementedError
 
+    @abstractmethod
+    async def destroy(self, workspace_id: UUID) -> None:
+        """Remove one sandbox. Must not touch paths outside the provider root."""
+        raise NotImplementedError
+
+    async def gc(self, *, ttl_seconds: int | None = None, now: datetime | None = None) -> WorkspaceGcResult:
+        """TTL sweep. The base implementation never deletes."""
+        return WorkspaceGcResult(configured=False)
+
     async def health(self) -> WorkspaceHealth:
         return WorkspaceHealth(
             provider=self.provider_id,
@@ -91,6 +114,36 @@ def default_workspace_root() -> Path:
     if env:
         return Path(env).expanduser()
     return Path(tempfile.gettempdir()) / DEFAULT_ROOT_NAME
+
+
+def configured_workspace_ttl_seconds() -> int | None:
+    """Positive TTL in seconds, or None when GC is off.
+
+    Unset, blank, non-integer, and non-positive values leave GC unconfigured.
+    Health reporting must not treat those as a license to delete.
+    """
+    raw = os.getenv("SWARM_WORKSPACE_TTL_SECONDS", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def _parse_created_at(value: str | None) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def normalize_relpath(value: Any, *, allow_dot: bool = False) -> str:
@@ -246,23 +299,178 @@ class LocalFilesystemWorkspaceProvider(WorkspaceProvider):
         except OSError as exc:
             raise WorkspaceError("Workspace file could not be read", FailureClass.TOOL_FAILURE) from exc
 
+    def _sandbox_dir(self, workspace_id: UUID) -> Path:
+        """Direct child of the root named by the workspace id. Does not follow symlinks."""
+        root = self._ensure_root()
+        name = str(workspace_id)
+        if name in {".", ".."} or Path(name).name != name:
+            raise WorkspaceError("Workspace path escaped the sandbox root", FailureClass.POLICY_REFUSAL)
+        return root / name
+
+    def _scandir(self, directory: Path) -> list[os.DirEntry[str]]:
+        try:
+            with os.scandir(directory) as scan:
+                return list(scan)
+        except OSError as exc:
+            raise WorkspaceError("Workspace could not be removed", FailureClass.TOOL_FAILURE) from exc
+
+    def _assert_tree_contained(self, directory: Path, boundary: Path) -> None:
+        """Refuse symlink escapes before any deletion. Does not mutate.
+
+        Uses scandir so a symlink to a directory is visible. os.walk hides those
+        when followlinks is false.
+        """
+        if directory.is_symlink() or not directory.is_dir() or not _contained(directory, boundary):
+            raise WorkspaceError("Workspace path escaped the sandbox root", FailureClass.POLICY_REFUSAL)
+        for entry in self._scandir(directory):
+            path = Path(entry.path)
+            try:
+                is_link = entry.is_symlink()
+                is_dir = entry.is_dir(follow_symlinks=False)
+                is_file = entry.is_file(follow_symlinks=False)
+            except OSError as exc:
+                raise WorkspaceError("Workspace could not be removed", FailureClass.TOOL_FAILURE) from exc
+            if is_link:
+                raise WorkspaceError("Path traversal is not allowed", FailureClass.POLICY_REFUSAL)
+            if not _contained(path.resolve(), boundary):
+                raise WorkspaceError("Workspace path escaped the sandbox root", FailureClass.POLICY_REFUSAL)
+            if is_dir:
+                self._assert_tree_contained(path.resolve(), boundary)
+            elif not is_file:
+                raise WorkspaceError("Workspace path escaped the sandbox root", FailureClass.POLICY_REFUSAL)
+
+    def _purge_tree(self, directory: Path, boundary: Path) -> None:
+        """Delete a real directory that was already proven to sit inside `boundary`."""
+        if directory.is_symlink() or not _contained(directory, boundary):
+            raise WorkspaceError("Workspace path escaped the sandbox root", FailureClass.POLICY_REFUSAL)
+        for entry in self._scandir(directory):
+            path = Path(entry.path)
+            try:
+                is_link = entry.is_symlink()
+                is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError as exc:
+                raise WorkspaceError("Workspace could not be removed", FailureClass.TOOL_FAILURE) from exc
+            if is_link or not _contained(path.resolve(), boundary):
+                raise WorkspaceError("Path traversal is not allowed", FailureClass.POLICY_REFUSAL)
+            if is_dir:
+                self._purge_tree(path.resolve(), boundary)
+                continue
+            try:
+                path.unlink()
+            except OSError as exc:
+                raise WorkspaceError("Workspace could not be removed", FailureClass.TOOL_FAILURE) from exc
+        try:
+            directory.rmdir()
+        except OSError as exc:
+            raise WorkspaceError("Workspace could not be removed", FailureClass.TOOL_FAILURE) from exc
+
+    async def destroy(self, workspace_id: UUID) -> None:
+        """Remove only `root/<workspace_id>`. Ignores the path stored in metadata."""
+        root = self._ensure_root()
+        directory = self._sandbox_dir(workspace_id)
+        if directory.is_symlink():
+            raise WorkspaceError("Workspace path escaped the sandbox root", FailureClass.POLICY_REFUSAL)
+        if not directory.exists() or not directory.is_dir():
+            raise WorkspaceError("Workspace not found", FailureClass.TOOL_MISSING)
+        resolved = directory.resolve()
+        if resolved == root or not _contained(resolved, root):
+            raise WorkspaceError("Workspace path escaped the sandbox root", FailureClass.POLICY_REFUSAL)
+        meta = directory / META_NAME
+        if meta.is_symlink():
+            raise WorkspaceError("Path traversal is not allowed", FailureClass.POLICY_REFUSAL)
+        if not meta.is_file() or not _contained(meta.resolve(), resolved):
+            raise WorkspaceError("Workspace not found", FailureClass.TOOL_MISSING)
+        self._assert_tree_contained(resolved, resolved)
+        self._purge_tree(resolved, resolved)
+
+    async def gc(self, *, ttl_seconds: int | None = None, now: datetime | None = None) -> WorkspaceGcResult:
+        """Delete expired sandboxes only when a positive TTL is configured.
+
+        Unset or invalid `SWARM_WORKSPACE_TTL_SECONDS` (and a non-positive explicit
+        TTL) returns immediately without listing or deleting. Unknown age is kept.
+        Symlinks are refused and never followed.
+        """
+        if ttl_seconds is None:
+            ttl = configured_workspace_ttl_seconds()
+        elif isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
+            ttl = None
+        else:
+            ttl = ttl_seconds
+        if ttl is None:
+            return WorkspaceGcResult(configured=False)
+        moment = now if now is not None else utcnow()
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        cutoff = moment - timedelta(seconds=ttl)
+        destroyed: list[UUID] = []
+        kept = 0
+        refused = 0
+        root = self._ensure_root()
+        try:
+            children = list(root.iterdir())
+        except OSError as exc:
+            raise WorkspaceError("Workspace root is unavailable", FailureClass.PROVIDER_OUTAGE) from exc
+        for child in children:
+            if child.is_symlink():
+                refused += 1
+                continue
+            if not child.is_dir():
+                continue
+            try:
+                workspace_id = UUID(child.name)
+            except ValueError:
+                continue
+            if child.name != str(workspace_id):
+                refused += 1
+                continue
+            try:
+                handle = self._read_handle(workspace_id)
+            except WorkspaceError:
+                refused += 1
+                continue
+            created = _parse_created_at(handle.created_at)
+            if created is None or created > cutoff:
+                kept += 1
+                continue
+            try:
+                await self.destroy(workspace_id)
+            except WorkspaceError:
+                refused += 1
+                continue
+            destroyed.append(workspace_id)
+        return WorkspaceGcResult(
+            configured=True,
+            ttl_seconds=ttl,
+            destroyed=destroyed,
+            kept=kept,
+            refused=refused,
+        )
+
     async def health(self) -> WorkspaceHealth:
         try:
             root = self._ensure_root()
         except WorkspaceError as exc:
+            ttl = configured_workspace_ttl_seconds()
             return WorkspaceHealth(
                 provider=self.provider_id,
                 status="unavailable",
                 backend="filesystem",
                 detail=str(exc),
+                destroy=True,
+                gc="configured" if ttl is not None else "unconfigured",
+                ttl_seconds=ttl,
             )
         writable = os.access(root, os.W_OK)
+        ttl = configured_workspace_ttl_seconds()
         return WorkspaceHealth(
             provider=self.provider_id,
             status="healthy" if writable else "unavailable",
             backend="filesystem",
             root=str(root),
             detail="Local filesystem sandbox" if writable else "Workspace root is not writable",
+            destroy=True,
+            gc="configured" if ttl is not None else "unconfigured",
+            ttl_seconds=ttl,
         )
 
 
