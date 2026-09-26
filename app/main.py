@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .models import AnswerRequest, Mission, MissionCreate, PaymentIntent
+from .objective import ObjectiveError, normalize_success_criteria, objective_view
 from .runtime import PolicyError, SwarmRuntime
 from .store import Store
 from .health import (
@@ -92,9 +93,16 @@ async def health():
             "active_missions": len(runtime.runs)}
 
 
+def _objective_http(exc: ObjectiveError) -> HTTPException:
+    return HTTPException(409, {"error": str(exc), "failure_class": str(exc.failure_class)})
+
+
 @app.get("/api/missions")
 async def list_missions():
-    return store.list_missions()[:100]
+    try:
+        return store.list_missions()[:100]
+    except ObjectiveError as exc:
+        raise _objective_http(exc) from exc
 
 
 @app.post("/api/stop-all")
@@ -107,16 +115,27 @@ async def stop_all():
 async def create_mission(request: MissionCreate):
     if not runtime.controller.configured():
         raise HTTPException(503, "No model provider is configured. Set OPENAI_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY, ANTHROPIC_API_KEY, MISTRAL_API_KEY, GEMINI_API_KEY, COHERE_API_KEY, DEEPSEEK_API_KEY, TOGETHER_API_KEY, GROQ_API_KEY, FIREWORKS_API_KEY, AZURE_OPENAI_API_KEY with AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_DEPLOYMENT, PERPLEXITY_API_KEY, BEDROCK_API_KEY, HUGGINGFACE_API_KEY, CEREBRAS_API_KEY, SAMBANOVA_API_KEY, VERTEX_API_KEY with VERTEX_PROJECT, or OLLAMA_MODEL / OLLAMA_BASE_URL on the server before launching.")
+    try:
+        criteria = normalize_success_criteria(request.success_criteria)
+    except ObjectiveError as exc:
+        raise _objective_http(exc) from exc
     mission = Mission(goal=request.goal, budget=request.budget, live_payments=request.live_payments,
-                      privacy=request.privacy, limits=request.limits)
-    store.save_mission(mission)
+                      privacy=request.privacy, limits=request.limits, success_criteria=criteria)
+    try:
+        store.save_mission(mission)
+    except ObjectiveError as exc:
+        raise _objective_http(exc) from exc
     await runtime.start(mission)
+    mission.objective = objective_view(mission, store.load_tasks(mission.id))
     return mission
 
 
 @app.get("/api/missions/{mission_id}", response_model=Mission)
 async def get_mission(mission_id: UUID):
-    mission = store.get_mission(mission_id)
+    try:
+        mission = store.get_mission(mission_id)
+    except ObjectiveError as exc:
+        raise _objective_http(exc) from exc
     if not mission: raise HTTPException(404, "Mission not found")
     return mission
 

@@ -20,7 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
 SCHEMA_TABLE = "schema_migrations"
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 
 class MigrationError(RuntimeError):
@@ -168,11 +168,17 @@ def _upgrade_004_memory_notes(conn: Connection) -> None:
     conn.execute(text("CREATE INDEX IF NOT EXISTS ix_memory_notes_agent_id ON memory_notes (agent_id)"))
 
 
+def _upgrade_005_mission_objective(conn: Connection) -> None:
+    add_column_if_missing(conn, "missions", "objective_id", "VARCHAR(36)")
+    add_column_if_missing(conn, "missions", "success_criteria", "TEXT")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial_schema", _upgrade_001_initial),
     Migration(2, "worker_leases_and_idempotency_keys", _upgrade_002_worker_leases),
     Migration(3, "work_items_queue", _upgrade_003_work_items),
     Migration(4, "memory_notes", _upgrade_004_memory_notes),
+    Migration(5, "mission_objective", _upgrade_005_mission_objective),
 )
 
 

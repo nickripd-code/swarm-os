@@ -21,6 +21,7 @@ from .models import (
     AgentSpec, AgentStatus, FailureClass, Mission, MissionEvent,
     MissionStatus, PaymentIntent, PendingQuestion, Task, TaskStatus, utcnow,
 )
+from .objective import ObjectiveError, objective_view
 from .policy import PolicyError, PolicyGate, PolicyRequest, interpret_approval
 from .resources import ResourceScheduler, listed_prices_from_meta, usage_from_meta
 from .store import AnswerStateError, Store
@@ -1142,6 +1143,7 @@ class SwarmRuntime:
 
     async def _verify_finish(self, mission: Mission, root: AgentSpec, claim: dict[str, Any]):
         """Controller finish is a claim. Complete only after a real verifier accepts it."""
+        self._objective_for(mission)
         await self.emit(mission.id, EventType.VERIFICATION_STARTED, {
             "summary": str(claim.get("summary") or "")[:500],
             "outputs": len(claim.get("outputs") or []),
@@ -1213,9 +1215,19 @@ class SwarmRuntime:
             raise PolicyError(str(exc), exc.failure_class) from exc
         return [note.public_dict() for note in notes]
 
+    def _objective_for(self, mission: Mission) -> dict[str, Any]:
+        """Read the durable objective. Corrupt or oversize criteria fail closed."""
+        try:
+            return objective_view(mission, self.tasks.get(mission.id, []))
+        except ObjectiveError as exc:
+            raise PolicyError(str(exc), exc.failure_class) from exc
+
     def _state(self, mission: Mission, agent_id: UUID | None = None) -> dict[str, Any]:
         used = self.tool_calls_used(mission.id)
+        objective = self._objective_for(mission)
         return {"goal": mission.goal, "status": mission.status,
+                "success_criteria": list(objective["success_criteria"]),
+                "objective": objective,
                 "agents": [a.model_dump(mode="json") for a in self.agents[mission.id]],
                 "tasks": [t.model_dump(mode="json") for t in self.tasks[mission.id]],
                 "limits": mission.limits.model_dump(mode="json"),
