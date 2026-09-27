@@ -3,6 +3,8 @@
 Estimates USD cost from usage already emitted on provider responses / llm.completed.
 Unknown listed prices fall back to conservative env defaults; if those are also
 absent the estimate is unknown (never invented as $0). Enforcement is fail-closed.
+
+Pre-launch estimates use the same prices and never start a mission or charge spend.
 """
 from __future__ import annotations
 
@@ -23,6 +25,10 @@ DEFAULT_INPUT_PRICE_PER_MILLION = 15.0
 DEFAULT_OUTPUT_PRICE_PER_MILLION = 60.0
 DEFAULT_COST_MARKUP = 1.25
 DEFAULT_WARNING_FRACTION = 0.8
+# Planned volume caps for the read-only pre-launch estimate. Not a mission limit.
+MAX_PRELAUNCH_TOKENS = 10_000_000
+MAX_PRELAUNCH_STEPS = 1_000
+ESTIMATE_UNAVAILABLE = "estimate unavailable"
 
 UnknownPricePolicy = Literal["fail", "skip"]
 
@@ -319,3 +325,188 @@ class ResourceScheduler:
         }
         payload.update(extra)
         return payload
+
+    def estimate_prelaunch(
+        self,
+        *,
+        model: Any = None,
+        max_tokens: Any = None,
+        steps: Any = None,
+        listed_input: float | None = None,
+        listed_output: float | None = None,
+    ) -> "PrelaunchCostEstimate":
+        """Read-only launch range. Does not create a mission or record spend.
+
+        ``max_tokens`` is a planned ceiling per step. ``steps`` multiplies that
+        ceiling. A step count alone does not imply a token volume. Dollar bounds
+        exist only when prices resolve; otherwise the label is estimate unavailable.
+        """
+        resolved_model = _resolve_model_id(model)
+        planned_max = _optional_plan_int("max_tokens", max_tokens, 1, MAX_PRELAUNCH_TOKENS)
+        planned_steps = _optional_plan_int("steps", steps, 1, MAX_PRELAUNCH_STEPS)
+        tokens = None if planned_max is None else planned_max * (planned_steps or 1)
+        prices = self.resolve_prices(listed_input, listed_output)
+        base = {
+            "model": resolved_model,
+            "tokens": tokens,
+            "max_tokens": planned_max,
+            "steps": planned_steps,
+            "unknown_price": self.settings.unknown_price,
+        }
+        if tokens is None:
+            reason = (
+                "step count without a token ceiling cannot price a launch"
+                if planned_steps is not None
+                else "planned token volume is unknown"
+            )
+            return PrelaunchCostEstimate(
+                **base,
+                estimated_cost_low=None,
+                estimated_cost_high=None,
+                known=False,
+                source="unknown",
+                reason=reason,
+                label=ESTIMATE_UNAVAILABLE,
+            )
+        if prices is None:
+            return PrelaunchCostEstimate(
+                **base,
+                estimated_cost_low=None,
+                estimated_cost_high=None,
+                known=False,
+                source="unknown",
+                reason="missing price metadata",
+                label=ESTIMATE_UNAVAILABLE,
+            )
+        cheap = min(prices.input_per_million, prices.output_per_million)
+        dear = max(prices.input_per_million, prices.output_per_million)
+        low = estimate_token_cost(
+            ModelUsage(input_tokens=tokens),
+            TokenPrices(cheap, cheap, source=prices.source),
+            self.settings.markup,
+        )
+        high = estimate_token_cost(
+            ModelUsage(output_tokens=tokens),
+            TokenPrices(dear, dear, source=prices.source),
+            self.settings.markup,
+        )
+        assert low.estimated_cost is not None and high.estimated_cost is not None
+        low_cost = min(low.estimated_cost, high.estimated_cost)
+        high_cost = max(low.estimated_cost, high.estimated_cost)
+        if prices.source == "default":
+            reason = (
+                "Estimated range using conservative default token prices, "
+                "not a provider invoice. Input/output split is unknown."
+            )
+        else:
+            reason = (
+                "Estimated range using listed token prices. Input/output split is unknown."
+            )
+        return PrelaunchCostEstimate(
+            **base,
+            estimated_cost_low=low_cost,
+            estimated_cost_high=high_cost,
+            known=True,
+            source=prices.source,
+            reason=reason,
+            label=_range_label(low_cost, high_cost),
+        )
+
+
+class PrelaunchEstimateError(ValueError):
+    """Invalid pre-launch estimate input. No mission is started."""
+
+
+@dataclass(frozen=True)
+class PrelaunchCostEstimate:
+    model: str
+    tokens: int | None
+    max_tokens: int | None
+    steps: int | None
+    estimated_cost_low: float | None
+    estimated_cost_high: float | None
+    known: bool
+    source: str
+    reason: str | None
+    label: str
+    unknown_price: UnknownPricePolicy
+    currency: str = "USD"
+    estimate: bool = True
+    mission_started: bool = False
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "tokens": self.tokens,
+            "max_tokens": self.max_tokens,
+            "steps": self.steps,
+            "estimated_cost_low": self.estimated_cost_low,
+            "estimated_cost_high": self.estimated_cost_high,
+            "currency": self.currency,
+            "known": self.known,
+            "source": self.source,
+            "reason": self.reason,
+            "label": self.label,
+            "unknown_price": self.unknown_price,
+            "estimate": self.estimate,
+            "mission_started": self.mission_started,
+        }
+
+
+def _resolve_model_id(model: Any) -> str:
+    if model is None:
+        raw = os.getenv("SWARM_MODEL")
+        if raw is None:
+            from .llm import DEFAULT_MODEL
+            return DEFAULT_MODEL
+        stripped = raw.strip()
+        if not stripped:
+            raise PrelaunchEstimateError("SWARM_MODEL is empty")
+        return _validate_model_id(stripped)
+    if not isinstance(model, str):
+        raise PrelaunchEstimateError("model id is invalid")
+    return _validate_model_id(model.strip())
+
+
+def _validate_model_id(model: str) -> str:
+    if not model or len(model) > 200 or any(ord(ch) < 32 for ch in model):
+        raise PrelaunchEstimateError("model id is invalid")
+    return model
+
+
+def _optional_plan_int(name: str, value: Any, low: int, high: int) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise PrelaunchEstimateError(f"{name} must be an integer")
+    if value < low or value > high:
+        raise PrelaunchEstimateError(f"{name} is out of range")
+    return value
+
+
+def _range_label(low: float, high: float) -> str:
+    if low == high:
+        return f"Estimated cost: {_format_usd(low)}"
+    return f"Estimated cost: {_format_usd(low)} – {_format_usd(high)}"
+
+
+def _format_usd(value: float) -> str:
+    text = f"{round_cost(value):.8f}".rstrip("0").rstrip(".")
+    return f"${text}"
+
+
+_ESTIMATE_FIELDS = frozenset({"model", "max_tokens", "steps"})
+
+
+def prelaunch_estimate_from_body(body: Any, scheduler: ResourceScheduler | None = None) -> PrelaunchCostEstimate:
+    """Parse a JSON object and estimate. Rejects unexpected fields. Never starts a mission."""
+    if not isinstance(body, dict):
+        raise PrelaunchEstimateError("invalid estimate request")
+    extra = set(body) - _ESTIMATE_FIELDS
+    if extra:
+        raise PrelaunchEstimateError("invalid estimate request")
+    return (scheduler or ResourceScheduler()).estimate_prelaunch(
+        model=body.get("model"),
+        max_tokens=body.get("max_tokens"),
+        steps=body.get("steps"),
+    )

@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -221,3 +221,19 @@ async def stream(websocket: WebSocket, mission_id: UUID):
         pass
     finally:
         clients.get(mission_id, set()).discard(websocket)
+
+
+@app.post("/api/cost/estimate")
+async def estimate_prelaunch_cost(request: Request):
+    """Read-only pre-launch token/USD range. Does not create or start a mission."""
+    from .resources import PrelaunchEstimateError, prelaunch_estimate_from_body
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "invalid estimate request") from None
+    try:
+        estimate = prelaunch_estimate_from_body(payload)
+    except PrelaunchEstimateError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return estimate.as_payload()
