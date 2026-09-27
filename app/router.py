@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections import deque
+import re
+from collections import OrderedDict, deque
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -34,8 +35,18 @@ SCORE_HISTORY = 8.0
 SCORE_PRICE_PER_MILLION = 0.001
 SCORE_ESTIMATED_COST = 1.0
 SCORE_RELATIVE_COST = 2.0
+SCORE_CONTEXT_AFFINITY = 1.0
 TIEBREAK_INDEX = 0.01
 HISTORY_WINDOW = 8
+AFFINITY_CONTEXT_LIMIT = 64
+
+_ID_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_PROVIDER_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_MODEL_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/+@-]{0,200}$")
+_CONTEXT_KEY = re.compile(
+    r"^mission:[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}"
+    r"(?:/agent:[A-Za-z0-9][A-Za-z0-9_.:-]{0,127})?$"
+)
 
 
 class CapabilityRequest(BaseModel):
@@ -131,6 +142,142 @@ class ProviderHistory:
         if n == 0:
             return "no recent outcomes"
         return f"recent success {self.successes}/{n}"
+
+
+def _id_token(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    token = value.strip()
+    if not _ID_TOKEN.fullmatch(token):
+        return None
+    return token
+
+
+def valid_context_key(value: object) -> str | None:
+    """Accept only mission or mission/agent keys. Anything else is no context."""
+    if not isinstance(value, str) or not _CONTEXT_KEY.fullmatch(value):
+        return None
+    return value
+
+
+def affinity_context_key(mission_id: object, agent_id: object = None) -> str | None:
+    """Build a context key. A corrupt agent id does not fall back to mission-only."""
+    mission = _id_token(mission_id if isinstance(mission_id, str) else (
+        None if mission_id is None else str(mission_id)
+    ))
+    if mission is None:
+        return None
+    if agent_id is None or agent_id == "":
+        return f"mission:{mission}"
+    agent = _id_token(agent_id if isinstance(agent_id, str) else str(agent_id))
+    if agent is None:
+        return None
+    return f"mission:{mission}/agent:{agent}"
+
+
+def _mission_tokens(values: list[object]) -> set[str] | None:
+    tokens: set[str] = set()
+    for value in values:
+        if value is None:
+            continue
+        token = _id_token(value if isinstance(value, str) else str(value))
+        if token is None:
+            return None
+        tokens.add(token)
+    return tokens
+
+
+def affinity_context_from_state(state: dict[str, Any] | None,
+                                agent: dict[str, Any] | None = None) -> str | None:
+    """Mission key, plus agent id when a worker call supplies one. Missing stays empty."""
+    if state is not None and not isinstance(state, dict):
+        return None
+    if agent is not None and not isinstance(agent, dict):
+        return None
+    state = state or {}
+    explicit: list[object] = []
+    for value in (state.get("id"), state.get("mission_id")):
+        if value is not None:
+            explicit.append(value)
+    if agent is not None and agent.get("mission_id") is not None:
+        explicit.append(agent.get("mission_id"))
+    if not explicit:
+        agents = state.get("agents")
+        if isinstance(agents, list):
+            for item in agents:
+                if isinstance(item, dict) and item.get("mission_id") is not None:
+                    explicit.append(item.get("mission_id"))
+    missions = _mission_tokens(explicit)
+    if not missions or len(missions) != 1:
+        return None
+    mission = next(iter(missions))
+    if agent is None:
+        return affinity_context_key(mission)
+    if agent.get("id") is None:
+        return None
+    return affinity_context_key(mission, str(agent.get("id")))
+
+
+def parse_stored_affinity(raw: object) -> tuple[str, str] | None:
+    """Return provider/model or None. Corrupt records are not affinity."""
+    provider: object
+    model: object
+    if isinstance(raw, (tuple, list)):
+        if len(raw) != 2:
+            return None
+        provider, model = raw
+    elif isinstance(raw, dict):
+        if set(raw) != {"provider_id", "model"}:
+            return None
+        provider = raw.get("provider_id")
+        model = raw.get("model")
+    else:
+        return None
+    if not isinstance(provider, str) or not isinstance(model, str):
+        return None
+    if not _PROVIDER_TOKEN.fullmatch(provider) or not _MODEL_TOKEN.fullmatch(model):
+        return None
+    return provider, model
+
+
+class ContextAffinity:
+    """Last successful provider/model for a context key. Empty means no boost."""
+
+    def __init__(self, limit: int = AFFINITY_CONTEXT_LIMIT):
+        self._limit = limit
+        self._entries: OrderedDict[str, object] = OrderedDict()
+
+    def record(self, context_key: object, provider_id: object, model: object) -> None:
+        key = valid_context_key(context_key)
+        parsed = parse_stored_affinity((provider_id, model))
+        if key is None or parsed is None:
+            return
+        self._entries.pop(key, None)
+        self._entries[key] = parsed
+        while len(self._entries) > self._limit:
+            self._entries.popitem(last=False)
+
+    def hint_for(self, context_key: object) -> tuple[str, str] | None:
+        key = valid_context_key(context_key)
+        if key is None or key not in self._entries:
+            return None
+        parsed = parse_stored_affinity(self._entries.get(key))
+        if parsed is None:
+            self._entries.pop(key, None)
+            return None
+        self._entries.move_to_end(key)
+        return parsed
+
+
+def affinity_reason(descriptor: ModelDescriptor, affinity: object) -> str | None:
+    """Reason text only when this descriptor is the stored hint. Corrupt affinity is silence."""
+    parsed = parse_stored_affinity(affinity)
+    if parsed is None:
+        return None
+    provider_id, model = parsed
+    if descriptor.provider != provider_id or descriptor.model != model:
+        return None
+    return f"cached context affinity {provider_id}/{model}"
 
 
 def selection_rationale(candidate: RouteCandidate) -> str:
@@ -242,7 +389,8 @@ def _apply_relative_cost(ranked: list[RouteCandidate],
 def score_model(descriptor: ModelDescriptor, request: CapabilityRequest, *,
                 health: str = "healthy", index: int = 0,
                 estimate: CostEstimate | None = None,
-                history: ProviderHistory | None = None) -> tuple[float, list[str]] | None:
+                history: ProviderHistory | None = None,
+                affinity: object = None) -> tuple[float, list[str]] | None:
     """Return (score, reasons) or None when the model is ineligible."""
     estimate = estimate or CostEstimate(
         provider=descriptor.provider, model=descriptor.model, known=False,
@@ -286,6 +434,11 @@ def score_model(descriptor: ModelDescriptor, request: CapabilityRequest, *,
     score += history.score_delta()
     reasons.append(history.reason())
 
+    cached = affinity_reason(descriptor, affinity)
+    if cached is not None:
+        score += SCORE_CONTEXT_AFFINITY
+        reasons.append(cached)
+
     if descriptor.price_output_per_million is not None:
         score -= descriptor.price_output_per_million * SCORE_PRICE_PER_MILLION
         reasons.append(f"listed output price {descriptor.price_output_per_million:g}/M")
@@ -313,6 +466,7 @@ class ModelRouter:
         self.providers = list(providers)
         self.last_decision: RouteDecision | None = None
         self._history: dict[str, ProviderHistory] = {}
+        self.affinity = ContextAffinity()
         self._last_catalog: list[tuple[ModelProvider, ModelDescriptor, str]] = []
         self._last_rejections: list[RouteRejection] = []
 
@@ -406,11 +560,14 @@ class ModelRouter:
         self,
         request: CapabilityRequest,
         model_request: ModelRequest | None = None,
+        *,
+        context_key: str | None = None,
     ) -> RouteDecision:
         if not self.configured():
             raise ProviderError("No model provider is configured", FailureClass.AUTHORIZATION_REQUIRED)
         ranked: list[RouteCandidate] = []
         costs: list[tuple[float | None, str]] = []
+        affinity = self.affinity.hint_for(context_key)
         for index, (provider, descriptor, health) in enumerate(await self.catalog()):
             probe = model_request or ModelRequest(model=descriptor.model, instructions="route", input="")
             if probe.model != descriptor.model:
@@ -427,6 +584,7 @@ class ModelRouter:
             scored = score_model(
                 descriptor, request, health=health, index=index, estimate=estimate,
                 history=self.history_for(provider.provider_id),
+                affinity=affinity,
             )
             if scored is None:
                 continue
@@ -465,9 +623,10 @@ class ModelRouter:
             return health.status
         return None
 
-    async def complete(self, capability: CapabilityRequest, request: ModelRequest) -> ModelResponse:
+    async def complete(self, capability: CapabilityRequest, request: ModelRequest, *,
+                       context_key: str | None = None) -> ModelResponse:
         """Pick by capability, then walk the fallback chain on PROVIDER_OUTAGE only."""
-        decision = await self.select(capability, request)
+        decision = await self.select(capability, request, context_key=context_key)
         primary = decision.selected
         last_error: ProviderError | None = None
         failover_reason: str | None = None
@@ -492,6 +651,7 @@ class ModelRouter:
                 failover_reason = str(exc.failure_class)
                 continue
             self.record_outcome(candidate.provider_id, True)
+            self.affinity.record(context_key, candidate.provider_id, candidate.model)
             if candidate.provider_id != primary.provider_id or candidate.model != primary.model:
                 return response.model_copy(update={
                     "failover_from": primary.provider_id,
@@ -507,7 +667,8 @@ class ModelRouter:
             FailureClass.PROVIDER_OUTAGE,
         )
 
-    async def complete_on(self, candidate: RouteCandidate, request: ModelRequest) -> ModelResponse:
+    async def complete_on(self, candidate: RouteCandidate, request: ModelRequest, *,
+                          context_key: str | None = None) -> ModelResponse:
         """Call one ranked provider. Planners stay independent; no silent failover here."""
         provider = self._provider(candidate.provider_id)
         if provider is None:
@@ -530,4 +691,5 @@ class ModelRouter:
             self.record_outcome(candidate.provider_id, False)
             raise
         self.record_outcome(candidate.provider_id, True)
+        self.affinity.record(context_key, candidate.provider_id, candidate.model)
         return response
