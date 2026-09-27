@@ -7,8 +7,8 @@ from app.providers import (
     ModelProvider, ModelRequest, ModelResponse, ModelUsage, ProviderError, ProviderHealth,
 )
 from app.router import (
-    CapabilityRequest, ModelRouter, NoRouteError, ProviderHistory,
-    capability_request_for, score_model,
+    SCORE_CONTEXT_AFFINITY, CapabilityRequest, ModelRouter, NoRouteError, ProviderHistory,
+    affinity_context_from_state, affinity_context_key, capability_request_for, score_model,
 )
 from app.runtime import SwarmRuntime
 from app.store import Store
@@ -745,4 +745,194 @@ async def test_complete_on_records_failure_without_failover():
     decision = await router.select(CapabilityRequest(reasoning="high", coding="high"))
     assert decision.selected.provider_id == "openrouter"
     assert router.history_for("openai").failures == 1
+
+
+MISSION = "11111111-1111-4111-8111-111111111111"
+OTHER_MISSION = "22222222-2222-4222-8222-222222222222"
+AGENT = "33333333-3333-4333-8333-333333333333"
+
+
+def _equal_router():
+    return ModelRouter([
+        openai_like(),
+        openrouter_like(capabilities=EQUAL_CAPS),
+    ])
+
+
+def _affinity_reasons(decision) -> list[str]:
+    return [
+        reason for candidate in decision.chain for reason in candidate.reasons
+        if "cached context affinity" in reason
+    ]
+
+
+@pytest.mark.asyncio
+async def test_context_affinity_boosts_only_the_recent_candidate():
+    router = _equal_router()
+    request = CapabilityRequest(reasoning="high", coding="high")
+    key = affinity_context_key(MISSION)
+    plain = await router.select(request)
+    assert plain.selected.provider_id == "openai"
+    assert _affinity_reasons(plain) == []
+    router.affinity.record(key, "openrouter", "openai/gpt-4o")
+    boosted = await router.select(request, context_key=key)
+    assert boosted.selected.provider_id == "openrouter"
+    assert boosted.selected.reasons[-1] == "cached context affinity openrouter/openai/gpt-4o"
+    assert "cached context affinity openrouter/openai/gpt-4o" in boosted.rationale
+    untouched = await router.select(request)
+    assert untouched.selected.provider_id == "openai"
+    assert _affinity_reasons(untouched) == []
+    other = await router.select(request, context_key=affinity_context_key(OTHER_MISSION))
+    assert other.selected.provider_id == "openai"
+    assert _affinity_reasons(other) == []
+    openai_score = next(item.score for item in boosted.chain if item.provider_id == "openai")
+    openrouter_score = boosted.selected.score
+    assert openrouter_score > openai_score
+
+
+@pytest.mark.asyncio
+async def test_empty_affinity_adds_no_boost():
+    request = CapabilityRequest(reasoning="high", coding="high")
+    key = affinity_context_key(MISSION)
+    bare = await _equal_router().select(request)
+    keyed = await _equal_router().select(request, context_key=key)
+    assert keyed.selected.provider_id == bare.selected.provider_id == "openai"
+    assert keyed.selected.score == pytest.approx(bare.selected.score)
+    assert _affinity_reasons(keyed) == []
+    assert affinity_context_key(None) is None
+    assert affinity_context_from_state({"goal": "no mission"}) is None
+
+
+@pytest.mark.asyncio
+async def test_completed_call_records_affinity_without_using_provider_history():
+    router = _equal_router()
+    request = CapabilityRequest(reasoning="high", coding="high")
+    key = affinity_context_key(MISSION, AGENT)
+    await router.complete(request, REQUEST, context_key=key)
+    assert router.affinity.hint_for(key) == ("openai", "gpt-6-astra")
+    assert router.affinity.hint_for(affinity_context_key(MISSION)) is None
+    router._history.clear()
+    boosted = await router.select(request, context_key=key)
+    plain = await router.select(request)
+    assert boosted.selected.provider_id == plain.selected.provider_id == "openai"
+    assert "cached context affinity openai/gpt-6-astra" in boosted.selected.reasons
+    assert boosted.selected.score == pytest.approx(plain.selected.score + SCORE_CONTEXT_AFFINITY)
+    assert _affinity_reasons(plain) == []
+
+
+@pytest.mark.asyncio
+async def test_corrupt_affinity_is_ignored_and_not_claimed():
+    router = _equal_router()
+    request = CapabilityRequest(reasoning="high", coding="high")
+    key = affinity_context_key(MISSION)
+    assert key is not None
+    router.affinity._entries[key] = {"provider_id": "openrouter", "boost": 100}
+    decision = await router.select(request, context_key=key)
+    assert decision.selected.provider_id == "openai"
+    assert _affinity_reasons(decision) == []
+    assert key not in router.affinity._entries
+    router.affinity._entries[key] = ("openrouter",)
+    again = await router.select(request, context_key=key)
+    assert again.selected.provider_id == "openai"
+    assert _affinity_reasons(again) == []
+    router.affinity.record(key, "openrouter", "openai/gpt-4o")
+    router.affinity.record("not-a-context", "openai", "gpt-6-astra")
+    router.affinity.record(key, "", "gpt-6-astra")
+    assert router.affinity.hint_for(key) == ("openrouter", "openai/gpt-4o")
+    assert affinity_context_key(MISSION, "bad id") is None
+    assert affinity_context_from_state({
+        "id": MISSION,
+        "mission_id": OTHER_MISSION,
+    }) is None
+
+
+def test_affinity_does_not_override_a_hard_reject():
+    request = CapabilityRequest(reasoning="high")
+    weak = ModelDescriptor(
+        provider="openrouter", model="openai/gpt-4o",
+        capabilities=ModelCapabilities(reasoning="low", structured_outputs=True),
+    )
+    assert score_model(weak, request, affinity=("openrouter", "openai/gpt-4o")) is None
+    assert score_model(weak, request, affinity={"provider_id": "openrouter"}) is None
+
+
+@pytest.mark.asyncio
+async def test_affinity_does_not_select_an_ineligible_provider():
+    cloud = openai_like()
+    local = FakeModelProvider(
+        "ollama", "llama", local=True, capabilities=EQUAL_CAPS,
+    )
+    router = ModelRouter([cloud, local])
+    key = affinity_context_key(MISSION)
+    router.affinity.record(key, "openai", "gpt-6-astra")
+    decision = await router.select(
+        CapabilityRequest(reasoning="high", coding="high", privacy="local_only"),
+        context_key=key,
+    )
+    assert decision.selected.provider_id == "ollama"
+    assert _affinity_reasons(decision) == []
+
+
+@pytest.mark.asyncio
+async def test_failover_still_walks_the_chain_and_records_the_success():
+    openai = openai_like(error=ProviderError("Could not reach OpenAI", FailureClass.PROVIDER_OUTAGE))
+    openrouter = openrouter_like(output={"answer": "from openrouter"}, capabilities=EQUAL_CAPS)
+    router = ModelRouter([openai, openrouter])
+    key = affinity_context_key(MISSION)
+    router.affinity._entries[key] = "corrupt"
+    response = await router.complete(
+        CapabilityRequest(reasoning="high", coding="high"), REQUEST, context_key=key,
+    )
+    assert openai.calls == 1
+    assert openrouter.calls == 1
+    assert response.provider == "openrouter"
+    assert response.failover_from == "openai"
+    assert router.affinity.hint_for(key) == ("openrouter", "openai/gpt-4o")
+    assert router.history_for("openai").failures == 1
+    assert router.history_for("openrouter").successes == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_complete_does_not_invent_affinity():
+    openai = openai_like(error=ProviderError("invalid structured", FailureClass.INVALID_OUTPUT))
+    router = ModelRouter([openai, openrouter_like(capabilities=EQUAL_CAPS)])
+    key = affinity_context_key(MISSION)
+    with pytest.raises(ProviderError):
+        await router.complete(CapabilityRequest(reasoning="high", coding="high"), REQUEST, context_key=key)
+    assert router.affinity.hint_for(key) is None
+    assert _affinity_reasons(await router.select(
+        CapabilityRequest(reasoning="high", coding="high"), context_key=key,
+    )) == []
+
+
+@pytest.mark.asyncio
+async def test_controller_route_reports_affinity_only_after_a_real_call():
+    openai = openai_like(output={"action": "finish", "summary": "ok"})
+    controller = OpenAIProvider(
+        model_provider=openai,
+        router=ModelRouter([openai, openrouter_like(capabilities=EQUAL_CAPS)]),
+    )
+    state = {
+        "goal": "route me",
+        "agents": [{
+            "id": AGENT,
+            "mission_id": MISSION,
+            "role": "mission_controller",
+        }],
+    }
+    first = await controller.decide(state)
+    assert "cached context affinity" not in first["_meta"]["route"]["rationale"]
+    second = await controller.decide(state)
+    assert "cached context affinity openai/gpt-6-astra" in second["_meta"]["route"]["reasons"]
+    assert "cached context affinity openai/gpt-6-astra" in second["_meta"]["route"]["rationale"]
+    agent = {
+        "id": "44444444-4444-4444-8444-444444444444",
+        "mission_id": MISSION,
+        "role": "writer",
+        "capabilities": ["write"],
+    }
+    work = await controller.work(state, agent)
+    assert "cached context affinity" not in work["_meta"]["route"]["rationale"]
+    blank = await controller.decide({"goal": "route me"})
+    assert "cached context affinity" not in blank["_meta"]["route"]["rationale"]
 
