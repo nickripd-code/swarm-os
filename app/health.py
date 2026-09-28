@@ -230,6 +230,20 @@ async def selfmod_health_status() -> dict:
     }
 
 
+async def exa_health_status() -> dict:
+    from .exa import ExaToolProvider
+    provider = ExaToolProvider()
+    health = await provider.health()
+    return {
+        "configured": provider.configured(),
+        "provider": "exa",
+        "status": health.status,
+        "detail": health.detail,
+        "tools": health.tools,
+        "fallback": False,
+    }
+
+
 async def workspace_health_status() -> dict:
     from .workspace import build_workspace_provider
     provider = build_workspace_provider()

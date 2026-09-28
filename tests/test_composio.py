@@ -213,6 +213,7 @@ def test_build_tool_provider_registers_composio_without_exposing_secret(monkeypa
     monkeypatch.delenv("MCP_SERVER_URL", raising=False)
     monkeypatch.delenv("SWARM_BROWSER", raising=False)
     monkeypatch.delenv("SWARM_SELFMOD", raising=False)
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
     monkeypatch.setenv("COMPOSIO_API_KEY", "configured-secret")
     provider = build_tool_provider()
     assert isinstance(provider, CompositeToolProvider) is False
