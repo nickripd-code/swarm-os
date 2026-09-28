@@ -25,6 +25,7 @@ def _no_selfmod_env(monkeypatch):
     monkeypatch.delenv("MCP_SERVER_URL", raising=False)
     monkeypatch.delenv("MCP_API_KEY", raising=False)
     monkeypatch.delenv("SWARM_BROWSER", raising=False)
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
 
 
 def _proposal_args(path="notes.txt", content="hello sandbox", reason="improve notes"):

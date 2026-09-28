@@ -28,7 +28,7 @@ DANGEROUS_TOOLS = frozenset({
 DANGEROUS_PREFIXES = (
     "shell.", "bash.", "fs.", "file.", "browser.", "http.", "net.",
     "pay.", "wallet.", "secret.", "deploy.", "ssh.", "selfmod.", "self_modify.",
-    "composio.",
+    "composio.", "exa.",
 )
 CLOUD_EXFIL_TOOLS = frozenset({
     "browser", "playwright", "computer_use", "network", "http", "fetch",
@@ -126,7 +126,7 @@ def tool_exfiltrates(name: str) -> bool:
     if lowered in CLOUD_EXFIL_TOOLS:
         return True
     return any(lowered.startswith(prefix) for prefix in (
-        "browser.", "http.", "net.", "pay.", "wallet.", "composio.",
+        "browser.", "http.", "net.", "pay.", "wallet.", "composio.", "exa.",
     ))
 
 
@@ -157,6 +157,10 @@ def tool_is_opted_in_selfmod(name: str) -> bool:
 
 def tool_is_opted_in_composio(name: str) -> bool:
     return name.strip().lower().startswith("composio.") and bool(os.getenv("COMPOSIO_API_KEY", "").strip())
+
+
+def tool_is_opted_in_exa(name: str) -> bool:
+    return name.strip().lower().startswith("exa.") and bool(os.getenv("EXA_API_KEY", "").strip())
 
 
 class PolicyGate:
@@ -250,6 +254,7 @@ class PolicyGate:
             and not tool_is_opted_in_browser(name)
             and not tool_is_opted_in_selfmod(name)
             and not tool_is_opted_in_composio(name)
+            and not tool_is_opted_in_exa(name)
         ):
             raise PolicyError(f"Tool '{name}' is denied by default", FailureClass.POLICY_REFUSAL)
 

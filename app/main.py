@@ -16,7 +16,8 @@ from .store import Store
 from .health import (
     anthropic_status, azure_status, bedrock_status, browser_health_status, cerebras_status,
     cohere_status, deepseek_status, fireworks_status, gemini_status, groq_status,
-    huggingface_status, llamacpp_health_status, mistral_status, ollama_health_status,
+    exa_health_status, huggingface_status, llamacpp_health_status, mistral_status,
+    ollama_health_status,
     openai_status, openrouter_status, perplexity_status, sambanova_status,
     selfmod_health_status, together_status, vertex_status, vllm_health_status,
     workspace_health_status, xai_status,
@@ -83,6 +84,7 @@ async def health():
             "tools": tools_status(runtime.tools),
             "browser": await browser_health_status(),
             "selfmod": await selfmod_health_status(),
+            "exa": await exa_health_status(),
             "workspace": await workspace_health_status(),
             "process_workers": {
                 "enabled": process_pool is not None,

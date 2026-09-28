@@ -61,6 +61,7 @@ def _no_browser_env(monkeypatch):
     monkeypatch.delenv("SWARM_LOCAL_TOOLS", raising=False)
     monkeypatch.delenv("MCP_SERVER_URL", raising=False)
     monkeypatch.delenv("MCP_API_KEY", raising=False)
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
 
 
 def test_browser_opt_in_is_off_by_default(monkeypatch):

@@ -447,9 +447,10 @@ def build_tool_provider(
     composio: ToolProvider | None | object = _UNSET,
     browser: ToolProvider | None | object = _UNSET,
     selfmod: ToolProvider | None | object = _UNSET,
+    exa: ToolProvider | None | object = _UNSET,
     transport=None,
 ) -> ToolProvider | None:
-    """Compose opted-in local, MCP, Composio, browser, and selfmod tools."""
+    """Compose opted-in local, MCP, Composio, browser, selfmod, and Exa tools."""
     providers: list[ToolProvider] = []
     local = local if local is not None else LocalToolProvider()
     if local.list_tools():
@@ -472,6 +473,11 @@ def build_tool_provider(
         selfmod = SelfModToolProvider()
     if selfmod is not None and getattr(selfmod, "configured", lambda: True)():
         providers.append(selfmod)
+    if exa is _UNSET:
+        from .exa import ExaToolProvider
+        exa = ExaToolProvider(transport=transport)
+    if exa is not None and getattr(exa, "configured", lambda: True)():
+        providers.append(exa)
     if not providers:
         return None
     if len(providers) == 1:
