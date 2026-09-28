@@ -7,7 +7,7 @@ from app.providers import (
     ModelProvider, ModelRequest, ModelResponse, ModelUsage, ProviderError, ProviderHealth,
 )
 from app.router import (
-    CapabilityRequest, ModelRouter, NoRouteError, ProviderHistory,
+    CapabilityRequest, ModelRouter, NoRouteError, ProviderHistory, ProviderLatency,
     capability_request_for, score_model,
 )
 from app.runtime import SwarmRuntime
@@ -745,4 +745,167 @@ async def test_complete_on_records_failure_without_failover():
     decision = await router.select(CapabilityRequest(reasoning="high", coding="high"))
     assert decision.selected.provider_id == "openrouter"
     assert router.history_for("openai").failures == 1
+
+
+def test_invalid_latency_samples_are_ignored():
+    latency = ProviderLatency()
+    latency.record(float("nan"))
+    latency.record(float("inf"))
+    latency.record(-0.01)
+    assert latency.samples == 0
+    assert latency.mean_seconds() is None
+    latency.record(0.0)
+    assert latency.samples == 1
+    assert latency.mean_seconds() == 0.0
+
+
+def test_latency_window_keeps_only_recent_successful_samples():
+    latency = ProviderLatency(window=8)
+    for _ in range(8):
+        latency.record(1.0)
+    latency.record(0.1)
+    assert latency.samples == 8
+    assert latency.mean_seconds() == pytest.approx((7 * 1.0 + 0.1) / 8)
+
+
+@pytest.mark.asyncio
+async def test_empty_latency_history_does_not_boost_or_mention_latency():
+    router = ModelRouter([openai_like(), openrouter_like(capabilities=EQUAL_CAPS)])
+    decision = await router.select(CapabilityRequest(reasoning="high", coding="high"))
+    assert decision.selected.provider_id == "openai"
+    combined = [reason for item in decision.chain for reason in item.reasons]
+    assert not any("latency" in reason for reason in combined)
+    assert router.history_for("openai").samples == 0
+    assert router.latency_for("openai").samples == 0
+    assert router.latency_for("openrouter").samples == 0
+
+
+@pytest.mark.asyncio
+async def test_lower_recent_latency_wins_a_close_score():
+    router = ModelRouter([openai_like(), openrouter_like(capabilities=EQUAL_CAPS)])
+    router.record_success_latency("openai", 1.5)
+    router.record_success_latency("openrouter", 0.05)
+    assert router.history_for("openai").samples == 0
+    assert router.history_for("openrouter").samples == 0
+    decision = await router.select(CapabilityRequest(reasoning="high", coding="high"))
+    assert decision.selected.provider_id == "openrouter"
+    assert "lower recent latency 0.050s" in decision.selected.reasons
+    assert "latency" in decision.rationale
+    slower = next(item for item in decision.fallbacks if item.provider_id == "openai")
+    assert any(reason.startswith("recent latency 1.500s") for reason in slower.reasons)
+
+
+@pytest.mark.asyncio
+async def test_unknown_latency_is_not_treated_as_fast_or_as_a_boost():
+    # The first provider would win a pure tie. Its latency is unknown.
+    # The second has a real fast sample. That must not invent a preference.
+    router = ModelRouter([openai_like(), openrouter_like(capabilities=EQUAL_CAPS)])
+    router.record_success_latency("openrouter", 0.05)
+    decision = await router.select(CapabilityRequest(reasoning="high", coding="high"))
+    assert decision.selected.provider_id == "openai"
+    combined = [reason for item in decision.chain for reason in item.reasons]
+    assert not any("latency" in reason for reason in combined)
+
+    # Unknown must also not leapfrog a slower provider that is otherwise ahead.
+    ahead = ModelRouter([
+        openrouter_like(capabilities=EQUAL_CAPS),
+        openai_like(),
+    ])
+    ahead.record_success_latency("openrouter", 5.0)
+    decision = await ahead.select(CapabilityRequest(reasoning="high", coding="high"))
+    assert decision.selected.provider_id == "openrouter"
+    combined = [reason for item in decision.chain for reason in item.reasons]
+    assert not any("latency" in reason for reason in combined)
+
+
+@pytest.mark.asyncio
+async def test_latency_does_not_override_a_capability_gap():
+    strong = openai_like()
+    weak = openrouter_like(capabilities=ModelCapabilities(
+        reasoning="medium", coding="high", tool_use=True, structured_outputs=True, vision=False,
+    ))
+    router = ModelRouter([strong, weak])
+    router.record_success_latency("openai", 5.0)
+    router.record_success_latency("openrouter", 0.01)
+    decision = await router.select(CapabilityRequest(reasoning="high", coding="high"))
+    assert decision.selected.provider_id == "openai"
+    combined = [reason for item in decision.chain for reason in item.reasons]
+    assert not any("latency" in reason for reason in combined)
+
+
+@pytest.mark.asyncio
+async def test_latency_does_not_reject_the_only_provider():
+    router = ModelRouter([openai_like()])
+    router.record_success_latency("openai", 30.0)
+    decision = await router.select(CapabilityRequest(reasoning="high"))
+    assert decision.selected.provider_id == "openai"
+    assert decision.fallbacks == []
+    assert not any("latency" in reason for reason in decision.selected.reasons)
+
+
+@pytest.mark.asyncio
+async def test_negligible_latency_spread_does_not_move_the_score():
+    router = ModelRouter([openai_like(), openrouter_like(capabilities=EQUAL_CAPS)])
+    router.record_success_latency("openai", 0.100)
+    router.record_success_latency("openrouter", 0.1004)
+    decision = await router.select(CapabilityRequest(reasoning="high", coding="high"))
+    assert decision.selected.provider_id == "openai"
+    combined = [reason for item in decision.chain for reason in item.reasons]
+    assert not any("latency" in reason for reason in combined)
+
+
+@pytest.mark.asyncio
+async def test_complete_records_latency_only_for_successful_completion():
+    openai = openai_like(error=ProviderError("Could not reach OpenAI", FailureClass.PROVIDER_OUTAGE))
+    openrouter = openrouter_like(output={"answer": "from openrouter"}, capabilities=EQUAL_CAPS)
+    router = ModelRouter([openai, openrouter])
+    response = await router.complete(CapabilityRequest(reasoning="high", coding="high"), REQUEST)
+    assert response.provider == "openrouter"
+    assert openai.calls == 1
+    assert openrouter.calls == 1
+    assert router.latency_for("openai").samples == 0
+    assert router.latency_for("openrouter").samples == 1
+    assert router.latency_for("openrouter").mean_seconds() >= 0
+    assert router.history_for("openai").failures == 1
+    assert router.history_for("openrouter").successes == 1
+
+
+@pytest.mark.asyncio
+async def test_latency_does_not_change_non_outage_failover():
+    openai = openai_like(error=ProviderError("slow down", FailureClass.RATE_LIMIT))
+    openrouter = openrouter_like(capabilities=EQUAL_CAPS)
+    router = ModelRouter([openai, openrouter])
+    router.record_success_latency("openrouter", 0.01)
+    with pytest.raises(ProviderError) as error:
+        await router.complete(CapabilityRequest(reasoning="high", coding="high"), REQUEST)
+    assert error.value.failure_class == FailureClass.RATE_LIMIT
+    assert openai.calls == 1
+    assert openrouter.calls == 0
+    assert router.latency_for("openai").samples == 0
+    assert router.latency_for("openrouter").samples == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_on_records_latency_without_inventing_failover():
+    openai = openai_like()
+    openrouter = openrouter_like(capabilities=EQUAL_CAPS)
+    router = ModelRouter([openai, openrouter])
+    candidate = (await router.select(CapabilityRequest(reasoning="high", coding="high"))).selected
+    assert candidate.provider_id == "openai"
+    response = await router.complete_on(candidate, REQUEST)
+    assert response.provider == "openai"
+    assert openrouter.calls == 0
+    assert router.latency_for("openai").samples == 1
+    assert router.latency_for("openrouter").samples == 0
+    assert router.history_for("openai").successes == 1
+
+    failing = openai_like(error=ProviderError("invalid structured", FailureClass.INVALID_OUTPUT))
+    other = openrouter_like(capabilities=EQUAL_CAPS)
+    fail_router = ModelRouter([failing, other])
+    chosen = (await fail_router.select(CapabilityRequest(reasoning="high", coding="high"))).selected
+    with pytest.raises(ProviderError):
+        await fail_router.complete_on(chosen, REQUEST)
+    assert other.calls == 0
+    assert fail_router.latency_for("openai").samples == 0
+    assert fail_router.history_for("openai").failures == 1
 

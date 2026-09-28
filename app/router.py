@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import time
 from collections import deque
 from typing import Any, Literal
 
@@ -34,8 +36,16 @@ SCORE_HISTORY = 8.0
 SCORE_PRICE_PER_MILLION = 0.001
 SCORE_ESTIMATED_COST = 1.0
 SCORE_RELATIVE_COST = 2.0
+# Soft cap for the latency preference. Kept below one reasoning level so it
+# can break near-ties without overriding a real capability gap.
+SCORE_LATENCY = 0.5
 TIEBREAK_INDEX = 0.01
 HISTORY_WINDOW = 8
+LATENCY_WINDOW = 8
+# Candidates farther than this behind the leader are left alone.
+LATENCY_CLOSE_BAND = 0.75
+# Ignore sub-millisecond spread so timer noise does not move a score.
+LATENCY_MIN_SPAN_SECONDS = 0.001
 
 
 class CapabilityRequest(BaseModel):
@@ -131,6 +141,31 @@ class ProviderHistory:
         if n == 0:
             return "no recent outcomes"
         return f"recent success {self.successes}/{n}"
+
+
+class ProviderLatency:
+    """Recent successful complete() latencies in seconds.
+
+    Empty is unknown, not fast. Samples are not success/failure outcomes.
+    """
+
+    def __init__(self, window: int = LATENCY_WINDOW):
+        self._samples: deque[float] = deque(maxlen=max(1, window))
+
+    def record(self, seconds: float) -> None:
+        value = float(seconds)
+        if not math.isfinite(value) or value < 0:
+            return
+        self._samples.append(value)
+
+    @property
+    def samples(self) -> int:
+        return len(self._samples)
+
+    def mean_seconds(self) -> float | None:
+        if not self._samples:
+            return None
+        return sum(self._samples) / len(self._samples)
 
 
 def selection_rationale(candidate: RouteCandidate) -> str:
@@ -239,6 +274,55 @@ def _apply_relative_cost(ranked: list[RouteCandidate],
             ranked[index].reasons.append(f"relative cost {relative:.2f}")
 
 
+def _apply_latency_preference(ranked: list[RouteCandidate],
+                              latencies: list[float | None]) -> None:
+    """Prefer lower recent successful latency when scores are already close.
+
+    Unknown latency is excluded: it is not treated as fast and it does not
+    boost that candidate. This never rejects a candidate or changes failover.
+    A reason is added only when a score changes, plus on the new leader when
+    that change is what moved selection.
+    """
+    if len(ranked) < 2 or len(latencies) != len(ranked):
+        return
+    best = max(candidate.score for candidate in ranked)
+    close: list[tuple[int, float]] = []
+    for index, latency in enumerate(latencies):
+        if latency is None:
+            continue
+        if ranked[index].score < best - LATENCY_CLOSE_BAND:
+            continue
+        close.append((index, latency))
+    if len(close) < 2:
+        return
+    fastest = min(latency for _, latency in close)
+    span = max(latency for _, latency in close) - fastest
+    if span < LATENCY_MIN_SPAN_SECONDS:
+        return
+    before = sorted(range(len(ranked)), key=lambda index: ranked[index].score, reverse=True)
+    for index, latency in close:
+        if latency <= fastest:
+            continue
+        relative = (latency - fastest) / span
+        penalty = SCORE_LATENCY * relative
+        if penalty <= 0:
+            continue
+        ranked[index].score -= penalty
+        ranked[index].reasons.append(
+            f"recent latency {latency:.3f}s (soft preference {relative:.2f})"
+        )
+    after = sorted(range(len(ranked)), key=lambda index: ranked[index].score, reverse=True)
+    if not after or before[0] == after[0]:
+        return
+    leader = after[0]
+    leader_latency = latencies[leader]
+    if leader_latency is None:
+        return
+    if any("latency" in reason for reason in ranked[leader].reasons):
+        return
+    ranked[leader].reasons.append(f"lower recent latency {leader_latency:.3f}s")
+
+
 def score_model(descriptor: ModelDescriptor, request: CapabilityRequest, *,
                 health: str = "healthy", index: int = 0,
                 estimate: CostEstimate | None = None,
@@ -313,6 +397,7 @@ class ModelRouter:
         self.providers = list(providers)
         self.last_decision: RouteDecision | None = None
         self._history: dict[str, ProviderHistory] = {}
+        self._latency: dict[str, ProviderLatency] = {}
         self._last_catalog: list[tuple[ModelProvider, ModelDescriptor, str]] = []
         self._last_rejections: list[RouteRejection] = []
 
@@ -329,6 +414,13 @@ class ModelRouter:
     def record_outcome(self, provider_id: str, success: bool) -> None:
         """Remember a real complete() result. Does not invent success or skip the chain."""
         self.history_for(provider_id).record(success)
+
+    def latency_for(self, provider_id: str) -> ProviderLatency:
+        return self._latency.setdefault(provider_id, ProviderLatency())
+
+    def record_success_latency(self, provider_id: str, seconds: float) -> None:
+        """Remember a real successful complete() latency. Does not record success."""
+        self.latency_for(provider_id).record(seconds)
 
     def _provider(self, provider_id: str) -> ModelProvider | None:
         for provider in self.providers:
@@ -411,6 +503,7 @@ class ModelRouter:
             raise ProviderError("No model provider is configured", FailureClass.AUTHORIZATION_REQUIRED)
         ranked: list[RouteCandidate] = []
         costs: list[tuple[float | None, str]] = []
+        latencies: list[float | None] = []
         for index, (provider, descriptor, health) in enumerate(await self.catalog()):
             probe = model_request or ModelRequest(model=descriptor.model, instructions="route", input="")
             if probe.model != descriptor.model:
@@ -436,7 +529,9 @@ class ModelRouter:
                 score=score, reasons=reasons,
             ))
             costs.append(_cost_signal(descriptor, estimate))
+            latencies.append(self.latency_for(provider.provider_id).mean_seconds())
         _apply_relative_cost(ranked, costs)
+        _apply_latency_preference(ranked, latencies)
         ranked.sort(key=lambda candidate: candidate.score, reverse=True)
         if not ranked:
             discovery_failed = any(
@@ -483,7 +578,9 @@ class ModelRouter:
                 targeted = request if request.model == candidate.model else request.model_copy(
                     update={"model": candidate.model},
                 )
+                started = time.perf_counter()
                 response = await provider.complete(targeted)
+                elapsed = time.perf_counter() - started
             except ProviderError as exc:
                 self.record_outcome(candidate.provider_id, False)
                 if exc.failure_class not in FAILOVER_FAILURE_CLASSES:
@@ -492,6 +589,7 @@ class ModelRouter:
                 failover_reason = str(exc.failure_class)
                 continue
             self.record_outcome(candidate.provider_id, True)
+            self.record_success_latency(candidate.provider_id, elapsed)
             if candidate.provider_id != primary.provider_id or candidate.model != primary.model:
                 return response.model_copy(update={
                     "failover_from": primary.provider_id,
@@ -525,9 +623,12 @@ class ModelRouter:
             update={"model": candidate.model},
         )
         try:
+            started = time.perf_counter()
             response = await provider.complete(targeted)
+            elapsed = time.perf_counter() - started
         except ProviderError:
             self.record_outcome(candidate.provider_id, False)
             raise
         self.record_outcome(candidate.provider_id, True)
+        self.record_success_latency(candidate.provider_id, elapsed)
         return response
