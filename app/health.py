@@ -230,6 +230,24 @@ async def selfmod_health_status() -> dict:
     }
 
 
+async def payments_health_status() -> dict:
+    """Configured vs unconfigured. Does not call Stripe or create a charge."""
+    from .payments import build_live_payment_provider, build_payment_provider, live_wallet_configured
+    live_on = live_wallet_configured()
+    provider = build_live_payment_provider() if live_on else build_payment_provider()
+    health = await provider.health()
+    return {
+        "provider": health.provider if live_on else "live-unconfigured",
+        "mode": health.mode if live_on else "live",
+        "status": health.status if live_on else "unconfigured",
+        "configured": bool(live_on and health.configured),
+        "spend_enabled": bool(live_on and health.spend_enabled),
+        "default_provider": "simulated",
+        "detail": health.detail if live_on else "Stripe live payments are not configured",
+        "fallback": False,
+    }
+
+
 async def workspace_health_status() -> dict:
     from .workspace import build_workspace_provider
     provider = build_workspace_provider()

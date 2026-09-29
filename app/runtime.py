@@ -33,6 +33,10 @@ from .tools import ToolCall, ToolError, ToolProvider, build_tool_provider, publi
 from .evidence import public_evidence_runs
 from .verifier import public_verification, verification_accepted
 from .payments import PaymentError, PaymentProvider, resolve_payment_provider
+from .stripe_payments import (
+    assert_destination_allowed, exceeds_objective_cap, idempotency_key_ok,
+    live_payment_question, matching_live_approval, stripe_live_opt_in,
+)
 from .workspace import WorkspaceError, WorkspaceProvider, build_workspace_provider
 from .workers import WorkerPoolError
 
@@ -799,8 +803,11 @@ class SwarmRuntime:
         elif live_job:
             resume = "active_runtime"
         elif mission.status == MissionStatus.WAITING:
-            requested = await self._request_resume(mission, reason="Human answer accepted")
-            resume = "requested" if requested else "deferred_unconfigured"
+            if self._payment_approval_should_not_autostart(mission, record):
+                resume = "payment_approval"
+            else:
+                requested = await self._request_resume(mission, reason="Human answer accepted")
+                resume = "requested" if requested else "deferred_unconfigured"
         else:
             resume = "paused"
         return {**payload, "resume": resume}
@@ -1589,6 +1596,114 @@ class SwarmRuntime:
             await asyncio.gather(*jobs, return_exceptions=True)
         return ids
 
+    async def _authorize_live_payment(self, mission: Mission, recipient: str, amount: float, key: str):
+        """Park a one-shot approval before any live charge. Deny does not charge."""
+        if mission.privacy == "local_only":
+            raise PolicyError("local_only policy forbids live payments", FailureClass.POLICY_REFUSAL)
+        saved = self.store.get_mission(mission.id)
+        self._sync_answers(mission, saved)
+        pay_request = PolicyRequest(action="live_payment", mission=mission)
+        self.policy.authorize(pay_request)
+        needed = self.policy.approval_required(pay_request)
+        if needed is None:
+            raise PolicyError("Live payment requires human approval", FailureClass.AUTHORIZATION_REQUIRED)
+        if stripe_live_opt_in():
+            try:
+                idempotency_key_ok(key)
+                assert_destination_allowed(recipient)
+            except PaymentError as exc:
+                raise PolicyError(str(exc), exc.failure_class) from exc
+            if exceeds_objective_cap(amount, mission.spent):
+                raise PolicyError(
+                    "Payment exceeds mission budget or payment cap",
+                    FailureClass.RESOURCE_EXHAUSTED,
+                )
+        record = matching_live_approval(mission, key)
+        if record is None:
+            await self._park_live_payment(mission, recipient, amount, key, needed.reason)
+            raise PolicyError(needed.reason, FailureClass.AUTHORIZATION_REQUIRED)
+        try:
+            interpret_approval(record.answer)
+        except PolicyError:
+            self._restore_after_payment_gate(mission)
+            self.store.save_mission(mission)
+            raise
+        return record
+
+    def _payment_approval_should_not_autostart(self, mission: Mission, record) -> bool:
+        """A payment approval is not a request to launch the controller."""
+        if record.kind != "approval" or record.approval_action != "live_payment":
+            return False
+        job = self.runs.get(mission.id)
+        if job is not None and not job.done():
+            return False
+        return not any(
+            event.event_type == EventType.MISSION_STARTED
+            for event in self.store.events(mission.id)
+        )
+
+    def _restore_after_payment_gate(self, mission: Mission) -> None:
+        """Drop the payment WAITING park once the approval is resolved and no loop owns it."""
+        job = self.runs.get(mission.id)
+        if job is not None and not job.done():
+            return
+        if mission.pending_question is not None or mission.status != MissionStatus.WAITING:
+            return
+        started = any(
+            event.event_type == EventType.MISSION_STARTED
+            for event in self.store.events(mission.id)
+        )
+        mission.status = MissionStatus.RUNNING if started else MissionStatus.PENDING
+        mission.updated_at = utcnow()
+
+    async def _park_live_payment(self, mission: Mission, recipient: str, amount: float,
+                                 key: str, reason: str) -> None:
+        question = live_payment_question(amount, recipient, key)
+        pending = mission.pending_question
+        if pending is not None:
+            if (
+                pending.kind == "approval"
+                and pending.approval_action == "live_payment"
+                and pending.question == question
+            ):
+                return
+            raise PolicyError("A question is already awaiting an answer", FailureClass.INVALID_OUTPUT)
+        pending = PendingQuestion(
+            question_id=str(uuid4()),
+            question=question,
+            reason=reason,
+            kind="approval",
+            approval_action="live_payment",
+        )
+        mission.pending_question = pending
+        mission.status = MissionStatus.WAITING
+        mission.updated_at = utcnow()
+        self.store.save_mission(mission)
+        payload = pending.model_dump(mode="json")
+        await self.emit(mission.id, EventType.MISSION_QUESTION, payload)
+        await self.emit(mission.id, EventType.MISSION_WAITING, {
+            "reason": reason,
+            "question_id": pending.question_id,
+            "question": pending.question,
+            "kind": "approval",
+            "approval_action": "live_payment",
+        })
+
+    async def _consume_payment_approval(self, mission: Mission, question_id: str) -> None:
+        """One approval covers the charge that named its idempotency key, then is spent."""
+        try:
+            saved, record, changed = self.store.mark_answer_consumed(mission.id, question_id)
+        except AnswerStateError as exc:
+            raise PolicyError(str(exc), FailureClass.AUTHORIZATION_REQUIRED) from exc
+        self._sync_answers(mission, saved)
+        if changed:
+            await self.emit(mission.id, EventType.USER_ANSWER_CONSUMED, {
+                "question_id": record.question_id,
+                "answered_at": record.answered_at.isoformat(),
+                "consumed_at": record.consumed_at.isoformat() if record.consumed_at else None,
+                "source": "live_payment",
+            })
+
     async def create_payment(self, mission: Mission, recipient: str, amount: float, reason: str,
                              *, idempotency_key: str | None = None) -> PaymentIntent:
         key = self._require_idempotency_key(idempotency_key)
@@ -1601,18 +1716,22 @@ class SwarmRuntime:
             raise PolicyError("Mission was stopped")
         if amount > mission.limits.max_payment_amount or mission.spent + amount > mission.budget:
             raise PolicyError("Payment exceeds mission budget or payment cap", FailureClass.RESOURCE_EXHAUSTED)
+        approval = None
         if mission.live_payments:
-            pay_request = PolicyRequest(action="live_payment", mission=mission)
-            self.policy.authorize(pay_request)
-            needed = self.policy.approval_required(pay_request)
-            if needed is not None and not self._approval_granted(mission, needed.action):
-                raise PolicyError(needed.reason, FailureClass.AUTHORIZATION_REQUIRED)
+            approval = await self._authorize_live_payment(mission, recipient, amount, key)
         intent = PaymentIntent(mission_id=mission.id, recipient=recipient, amount=amount, reason=reason,
                                idempotency_key=key)
+        if mission.live_payments and stripe_live_opt_in():
+            intent.asset = "usd"
+            intent.chain = "stripe"
         intent = await self.wallet.pay(intent, mission)
+        if approval is not None:
+            self._restore_after_payment_gate(mission)
         mission.spent += amount
         mission.updated_at = utcnow()
         self.store.save_mission(mission)
         self.idempotency.record(str(mission.id), key, "payment", {"intent": intent.model_dump(mode="json")})
         await self.emit(mission.id, EventType.PAYMENT_CREATED, intent.model_dump(mode="json"))
+        if approval is not None:
+            await self._consume_payment_approval(mission, approval.question_id)
         return intent

@@ -1,8 +1,9 @@
 """PaymentProvider seam behind WalletAdapter.
 
-Production stays simulated. Live settlement is a reserved interface and
-fails closed until an isolated wallet service exists outside this process.
-Never load, log, or return payment credentials.
+The default factory stays simulated. Live Stripe is selected only by the
+live factory when every Stripe opt-in variable is present; otherwise live
+missions stay unconfigured and fail closed. Never log or return payment
+credentials.
 """
 from __future__ import annotations
 
@@ -108,18 +109,25 @@ class UnconfiguredLivePaymentProvider(PaymentProvider):
 
 
 def live_wallet_configured() -> bool:
-    """Live spend is not enabled in this slice. Do not probe payment-secret env vars."""
-    return False
+    """True only when Stripe opt-in is complete. Never returns secret values."""
+    from .stripe_payments import stripe_live_opt_in
+    return stripe_live_opt_in()
 
 
 def build_payment_provider() -> PaymentProvider:
-    """Production factory. Always simulated. Never enables live spend."""
+    """Default production factory. Always simulated, even if Stripe flags are set."""
     return SimulatedPaymentProvider()
 
 
 def build_live_payment_provider() -> PaymentProvider:
-    """Reserved live factory. Always the unconfigured fail-closed adapter."""
-    return UnconfiguredLivePaymentProvider()
+    """Live factory. Stripe only when every opt-in flag is set; otherwise fail closed."""
+    from .stripe_payments import StripePaymentProvider, stripe_live_opt_in
+    if not stripe_live_opt_in():
+        return UnconfiguredLivePaymentProvider()
+    provider = StripePaymentProvider.from_env()
+    if not provider.configured():
+        return UnconfiguredLivePaymentProvider()
+    return provider
 
 
 def resolve_payment_provider(
@@ -127,9 +135,9 @@ def resolve_payment_provider(
     *,
     override: PaymentProvider | None = None,
 ) -> PaymentProvider:
-    """Choose a provider for this mission. Live spend is never selected here."""
+    """Simulated by default. Live missions use the live factory, never an injected spender."""
     if mission.live_payments:
-        return UnconfiguredLivePaymentProvider()
+        return build_live_payment_provider()
     if override is not None and override.mode == "simulated":
         return override
     return SimulatedPaymentProvider()
