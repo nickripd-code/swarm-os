@@ -555,12 +555,14 @@ class SwarmRuntime:
             except ToolError:
                 pass
         available = self.available_tools(mission)
+        tool_arguments = arguments if isinstance(arguments, dict) else {}
         try:
             self.policy.authorize(PolicyRequest(
                 action="tool_use",
                 mission=mission,
                 tool_calls_used=used,
                 tool=name,
+                tool_arguments=tool_arguments,
                 mode=getattr(self.controller, "mode", "openai"),
             ))
         except PolicyError as exc:
@@ -582,6 +584,14 @@ class SwarmRuntime:
                 "error": error, "used": used, "max": limit,
             }, actor_id)
             raise PolicyError(error, FailureClass.TOOL_MISSING)
+        await self._enforce_human_approval(mission, self._tool_actor(mission, actor_id), PolicyRequest(
+            action="tool_use",
+            mission=mission,
+            tool_calls_used=used,
+            tool=name,
+            tool_arguments=tool_arguments,
+            mode=getattr(self.controller, "mode", "openai"),
+        ))
         charged = self.consume_tool_call(mission)
         await self.emit(mission.id, EventType.TOOL_STARTED, {
             "tool": name, "used": charged, "max": limit,
@@ -686,10 +696,28 @@ class SwarmRuntime:
             if self._answer_waiters.get(mission.id) is event:
                 self._answer_waiters.pop(mission.id, None)
 
+    def _tool_actor(self, mission: Mission, actor_id: UUID | None) -> AgentSpec:
+        agents = self.agents.get(mission.id, [])
+        if actor_id is not None:
+            for agent in agents:
+                if agent.id == actor_id:
+                    return agent
+        for agent in agents:
+            if agent.parent_id is None:
+                return agent
+        if agents:
+            return agents[0]
+        return AgentSpec(
+            mission_id=mission.id,
+            role="mission_controller",
+            purpose="Approve or refuse an outbound tool call.",
+            capabilities=["coordinate"],
+        )
+
     async def _ask_human(self, mission: Mission, actor: AgentSpec, question: str,
                          reason: str | None = None, *,
                          kind: str = "question",
-                         approval_action: str | None = None) -> None:
+                         approval_action: str | None = None) -> str:
         """Emit a real question and park until the matching answer. Ignore model-supplied ids."""
         text = (question or "").strip()
         if not text:
@@ -706,6 +734,7 @@ class SwarmRuntime:
         )
         mission.pending_question = pending
         await self._park_for_human_answer(mission, actor, pending, asked_now=True)
+        return pending.question_id
 
     def _matching_approval(self, mission: Mission, action: str):
         for item in reversed(mission.answers):
@@ -725,6 +754,19 @@ class SwarmRuntime:
         """Park WAITING for a PolicyGate approval mark. Never auto-approves."""
         needed = self.policy.approval_required(request)
         if needed is None:
+            return
+        if needed.one_shot:
+            question_id = await self._ask_human(
+                mission, actor, needed.question, needed.reason,
+                kind="approval", approval_action=needed.action,
+            )
+            record = next((item for item in mission.answers if item.question_id == question_id), None)
+            if record is None:
+                raise PolicyError(
+                    "Cannot continue without a matching human answer",
+                    FailureClass.AUTHORIZATION_REQUIRED,
+                )
+            interpret_approval(record.answer)
             return
         if self._approval_granted(mission, needed.action):
             return

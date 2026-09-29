@@ -19,6 +19,8 @@ MAX_ARGUMENT_BYTES = 8192
 _SECRET_KEYS = frozenset({
     "api_key", "apikey", "authorization", "password", "secret", "token",
     "access_token", "refresh_token", "private_key", "link_token",
+    "account_sid", "auth_token", "accountsid", "authtoken",
+    "twilio_account_sid", "twilio_auth_token",
 })
 
 
@@ -445,11 +447,12 @@ def build_tool_provider(
     local: LocalToolProvider | None = None,
     mcp: McpToolProvider | None = None,
     composio: ToolProvider | None | object = _UNSET,
+    twilio: ToolProvider | None | object = _UNSET,
     browser: ToolProvider | None | object = _UNSET,
     selfmod: ToolProvider | None | object = _UNSET,
     transport=None,
 ) -> ToolProvider | None:
-    """Compose opted-in local, MCP, Composio, browser, and selfmod tools."""
+    """Compose opted-in local, MCP, Composio, Twilio SMS, browser, and selfmod tools."""
     providers: list[ToolProvider] = []
     local = local if local is not None else LocalToolProvider()
     if local.list_tools():
@@ -462,6 +465,11 @@ def build_tool_provider(
         composio = ComposioToolProvider(transport=transport)
     if composio is not None and getattr(composio, "configured", lambda: True)():
         providers.append(composio)
+    if twilio is _UNSET:
+        from .twilio import TwilioSmsToolProvider
+        twilio = TwilioSmsToolProvider(transport=transport)
+    if twilio is not None and getattr(twilio, "configured", lambda: True)():
+        providers.append(twilio)
     if browser is _UNSET:
         from .browser import BrowserToolProvider
         browser = BrowserToolProvider()

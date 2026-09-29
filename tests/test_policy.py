@@ -4,7 +4,7 @@ from app.llm import FallbackController, LLMProvider
 from app.models import FailureClass, Mission
 from app.policy import (
     PolicyError, PolicyGate, PolicyRequest, privacy_from_state, tool_is_dangerous,
-    tool_is_opted_in_composio,
+    tool_is_opted_in_composio, tool_is_opted_in_twilio, tool_is_unconfigured_sms,
 )
 from app.router import capability_request_for
 from app.runtime import SwarmRuntime
@@ -175,6 +175,83 @@ def test_composio_is_external_and_requires_explicit_configuration(monkeypatch):
     with pytest.raises(PolicyError) as exc:
         gate.authorize(_request(action="tool_use", mission=local, tool="composio.GMAIL_FETCH_EMAILS"))
     assert "local_only" in str(exc.value)
+
+
+def _clear_twilio(monkeypatch):
+    for key in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER", "TWILIO_SMS_ALLOWLIST"):
+        monkeypatch.delenv(key, raising=False)
+
+
+def _opt_in_twilio(monkeypatch, allowlist="+15551234567"):
+    monkeypatch.setenv("TWILIO_ACCOUNT_SID", "AC11111111111111111111111111111111")
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "twilio-auth-token-do-not-leak")
+    monkeypatch.setenv("TWILIO_FROM_NUMBER", "+15557654321")
+    monkeypatch.setenv("TWILIO_SMS_ALLOWLIST", allowlist)
+
+
+def test_twilio_sms_stays_unconfigured_until_every_env_is_set(monkeypatch):
+    gate = PolicyGate()
+    cloud = Mission(goal="cloud")
+    _clear_twilio(monkeypatch)
+    assert tool_is_dangerous("sms.send")
+    assert tool_is_unconfigured_sms("sms.send")
+    assert not tool_is_opted_in_twilio("sms.send")
+    gate.authorize(_request(action="tool_use", mission=cloud, tool="sms.send"))
+    assert gate.approval_required(_request(action="tool_use", mission=cloud, tool="sms.send")) is None
+    for key, value in (
+        ("TWILIO_ACCOUNT_SID", "AC11111111111111111111111111111111"),
+        ("TWILIO_AUTH_TOKEN", "twilio-auth-token-do-not-leak"),
+        ("TWILIO_FROM_NUMBER", "+15557654321"),
+    ):
+        monkeypatch.setenv(key, value)
+        assert not tool_is_opted_in_twilio("sms.send")
+        gate.authorize(_request(action="tool_use", mission=cloud, tool="sms.send"))
+
+
+def test_twilio_sms_requires_exact_allowlist_and_per_send_approval(monkeypatch):
+    gate = PolicyGate()
+    cloud = Mission(goal="cloud")
+    local = Mission(goal="private", privacy="local_only")
+    _opt_in_twilio(monkeypatch)
+    assert tool_is_opted_in_twilio("sms.send")
+    gate.authorize(_request(
+        action="tool_use", mission=cloud, tool="sms.send",
+        tool_arguments={"to": "+15551234567", "body": "hello"},
+    ))
+    needed = gate.approval_required(_request(action="tool_use", mission=cloud, tool="sms.send"))
+    assert needed is not None
+    assert needed.action == "sms.send"
+    assert needed.one_shot is True
+    again = gate.approval_required(_request(action="tool_use", mission=cloud, tool="sms.send"))
+    assert again is not None and again.one_shot is True
+    with pytest.raises(PolicyError) as missing:
+        gate.authorize(_request(
+            action="tool_use", mission=cloud, tool="sms.send",
+            tool_arguments={"to": "+15551234568", "body": "hello"},
+        ))
+    assert missing.value.failure_class == FailureClass.POLICY_REFUSAL
+    with pytest.raises(PolicyError) as formatted:
+        gate.authorize(_request(
+            action="tool_use", mission=cloud, tool="sms.send",
+            tool_arguments={"to": "+1 5551234567", "body": "hello"},
+        ))
+    assert formatted.value.failure_class == FailureClass.POLICY_REFUSAL
+    with pytest.raises(PolicyError) as many:
+        gate.authorize(_request(
+            action="tool_use", mission=cloud, tool="sms.send",
+            tool_arguments={"to": ["+15551234567", "+15550001111"], "body": "hello"},
+        ))
+    assert many.value.failure_class == FailureClass.POLICY_REFUSAL
+    with pytest.raises(PolicyError) as local_only:
+        gate.authorize(_request(
+            action="tool_use", mission=local, tool="sms.send",
+            tool_arguments={"to": "+15551234567", "body": "hello"},
+        ))
+    assert local_only.value.failure_class == FailureClass.POLICY_REFUSAL
+    assert "local_only" in str(local_only.value)
+    with pytest.raises(PolicyError) as voice:
+        gate.authorize(_request(action="tool_use", mission=cloud, tool="twilio.call"))
+    assert voice.value.failure_class == FailureClass.POLICY_REFUSAL
 
 
 def test_token_budget_is_independent_of_payment_spent():
