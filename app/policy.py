@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .models import FailureClass, Mission
+from .twilio import sms_send_refusal, twilio_sms_configured
 
 PolicyAction = Literal["spawn", "finish", "tool_use", "org_change", "live_payment"]
 PrivacyMode = Literal["cloud_allowed", "local_only"]
@@ -24,15 +25,17 @@ DANGEROUS_TOOLS = frozenset({
     "payment", "wallet", "stripe", "live_payment",
     "credential", "secrets",
     "self_modify", "deploy", "ssh",
+    "sms", "twilio",
 })
 DANGEROUS_PREFIXES = (
     "shell.", "bash.", "fs.", "file.", "browser.", "http.", "net.",
     "pay.", "wallet.", "secret.", "deploy.", "ssh.", "selfmod.", "self_modify.",
-    "composio.",
+    "composio.", "sms.", "twilio.",
 )
 CLOUD_EXFIL_TOOLS = frozenset({
     "browser", "playwright", "computer_use", "network", "http", "fetch",
     "web.search", "payment", "wallet", "stripe", "live_payment",
+    "sms", "twilio",
 })
 # Operator-opted Playwright tools. Still denied unless SWARM_BROWSER is set.
 OPTED_IN_BROWSER_TOOLS = frozenset({
@@ -58,10 +61,11 @@ class PolicyError(Exception):
 class ApprovalRequirement:
     """PolicyGate mark that the runtime must park WAITING until a matching approve/deny."""
 
-    action: PolicyAction
+    action: str
     question: str
     reason: str
     org_op: str | None = None
+    one_shot: bool = False
 
 
 @dataclass(frozen=True)
@@ -74,6 +78,7 @@ class PolicyRequest:
     in_flight_tasks: int = 0
     capabilities: tuple[str, ...] = ()
     tool: str | None = None
+    tool_arguments: dict | None = None
     summary: str | None = None
     mode: str = "openai"
     parent_ok: bool = True
@@ -127,6 +132,7 @@ def tool_exfiltrates(name: str) -> bool:
         return True
     return any(lowered.startswith(prefix) for prefix in (
         "browser.", "http.", "net.", "pay.", "wallet.", "composio.",
+        "sms.", "twilio.",
     ))
 
 
@@ -157,6 +163,18 @@ def tool_is_opted_in_selfmod(name: str) -> bool:
 
 def tool_is_opted_in_composio(name: str) -> bool:
     return name.strip().lower().startswith("composio.") and bool(os.getenv("COMPOSIO_API_KEY", "").strip())
+
+
+def tool_is_sms_send(name: str) -> bool:
+    return name.strip().lower() == "sms.send"
+
+
+def tool_is_opted_in_twilio(name: str) -> bool:
+    return tool_is_sms_send(name) and twilio_sms_configured()
+
+
+def tool_is_unconfigured_sms(name: str) -> bool:
+    return tool_is_sms_send(name) and not twilio_sms_configured()
 
 
 class PolicyGate:
@@ -205,6 +223,13 @@ class PolicyGate:
                 reason=f"Organization {op} requires human approval",
                 org_op=op,
             )
+        if request.action == "tool_use" and tool_is_opted_in_twilio(request.tool or ""):
+            return ApprovalRequirement(
+                action="sms.send",
+                question="Approve sending this SMS? Reply approve or deny.",
+                reason="Outbound SMS requires human approval",
+                one_shot=True,
+            )
         return None
 
     def check_tool_budget(self, mission: Mission, used: int) -> None:
@@ -245,13 +270,25 @@ class PolicyGate:
             raise PolicyError("Tool use omitted a tool name", FailureClass.POLICY_REFUSAL)
         if mission_privacy(request.mission) == "local_only" and tool_exfiltrates(name):
             raise PolicyError("local_only policy forbids cloud or network tools", FailureClass.POLICY_REFUSAL)
+        if tool_is_unconfigured_sms(name):
+            return
         if (
             tool_is_dangerous(name)
             and not tool_is_opted_in_browser(name)
             and not tool_is_opted_in_selfmod(name)
             and not tool_is_opted_in_composio(name)
+            and not tool_is_opted_in_twilio(name)
         ):
             raise PolicyError(f"Tool '{name}' is denied by default", FailureClass.POLICY_REFUSAL)
+        if tool_is_opted_in_twilio(name):
+            blocked = sms_send_refusal(
+                request.tool_arguments,
+                allowlist_raw=os.getenv("TWILIO_SMS_ALLOWLIST", ""),
+                from_number=os.getenv("TWILIO_FROM_NUMBER", ""),
+            )
+            if blocked is not None:
+                failure_class, message = blocked
+                raise PolicyError(message, failure_class)
 
     def _authorize_org_change(self, request: PolicyRequest) -> None:
         op = (request.org_op or "").strip()

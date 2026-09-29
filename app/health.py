@@ -200,6 +200,21 @@ async def llamacpp_health_status() -> dict:
     return {**llamacpp_status(), "status": health.status, "detail": health.detail}
 
 
+async def twilio_health_status() -> dict:
+    from .twilio import TwilioSmsToolProvider
+    provider = TwilioSmsToolProvider()
+    health = await provider.health()
+    return {
+        "configured": provider.configured(),
+        "provider": "twilio",
+        "status": health.status,
+        "detail": health.detail,
+        "tools": health.tools,
+        "voice": False,
+        "fallback": False,
+    }
+
+
 async def browser_health_status() -> dict:
     from .browser import BrowserToolProvider
     provider = BrowserToolProvider()
