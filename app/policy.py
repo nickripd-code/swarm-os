@@ -62,6 +62,7 @@ class ApprovalRequirement:
     question: str
     reason: str
     org_op: str | None = None
+    scope: str | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +160,90 @@ def tool_is_opted_in_composio(name: str) -> bool:
     return name.strip().lower().startswith("composio.") and bool(os.getenv("COMPOSIO_API_KEY", "").strip())
 
 
+_COMPOSIO_META_SLUGS = frozenset({"search_tools", "authorize"})
+_COMPOSIO_READ_VERBS = frozenset({
+    "GET", "LIST", "FETCH", "SEARCH", "FIND", "READ", "DOWNLOAD",
+    "RETRIEVE", "CHECK", "COUNT", "VIEW", "DESCRIBE", "LOOKUP", "QUERY",
+})
+_COMPOSIO_WRITE_VERBS = frozenset({
+    "CREATE", "UPDATE", "DELETE", "REMOVE", "ADD", "SEND", "POST",
+    "PATCH", "PUT", "MERGE", "CLOSE", "REOPEN", "ARCHIVE", "UNARCHIVE",
+    "INVITE", "ASSIGN", "SUBMIT", "PUBLISH", "UPLOAD", "WRITE", "EDIT",
+    "MODIFY", "SET", "ENABLE", "DISABLE", "REVOKE", "APPROVE", "REJECT",
+    "STAR", "UNSTAR", "FORK", "COMMENT", "REPLY", "LOCK", "UNLOCK",
+    "PIN", "UNPIN", "TRANSFER", "RENAME", "MOVE", "COPY", "DUPLICATE",
+    "TRIGGER", "EXECUTE", "RUN", "DEPLOY", "CANCEL", "ABORT", "INSERT",
+    "UPSERT", "DESTROY", "DROP", "PURGE", "OPEN", "RESOLVE",
+})
+_COMPOSIO_TOOLKIT_RE = re.compile(r"^[a-z0-9_-]{1,80}$")
+_COMPOSIO_SLUG_RE = re.compile(r"^[A-Z0-9_-]{1,200}$")
+
+
+def parse_composio_write_allowlist(raw: str | None = None) -> frozenset[tuple[str, str]]:
+    """Parse `toolkit:ACTION` grants. Malformed entries grant nothing."""
+    if raw is None:
+        raw = os.getenv("COMPOSIO_WRITE_ALLOWLIST", "")
+    grants: set[tuple[str, str]] = set()
+    for item in (raw or "").split(","):
+        piece = item.strip()
+        if not piece or ":" not in piece:
+            continue
+        toolkit, action = piece.split(":", 1)
+        toolkit = toolkit.strip().lower()
+        action = action.strip().upper()
+        if _COMPOSIO_TOOLKIT_RE.fullmatch(toolkit) and _COMPOSIO_SLUG_RE.fullmatch(action):
+            grants.add((toolkit, action))
+    return frozenset(grants)
+
+
+def composio_public_slug(name: str) -> str | None:
+    text = (name or "").strip()
+    prefix = "composio."
+    if not text.lower().startswith(prefix):
+        return None
+    slug = text[len(prefix):]
+    if not slug or slug.lower() in _COMPOSIO_META_SLUGS:
+        return None
+    return slug
+
+
+def composio_slug_is_mutating(slug: str, *, toolkit: str = "") -> bool:
+    """GitHub writes and known mutating verbs. A readOnlyHint claim cannot override this."""
+    parts = (slug or "").upper().split("_")
+    if len(parts) < 2:
+        return False
+    verb = parts[1]
+    if verb in _COMPOSIO_WRITE_VERBS:
+        return True
+    toolkit_name = (toolkit or parts[0]).strip().lower()
+    if toolkit_name == "github" and verb not in _COMPOSIO_READ_VERBS:
+        return True
+    return False
+
+
+def composio_write_allowlisted(name: str, *, toolkit: str | None = None, raw: str | None = None) -> bool:
+    slug = composio_public_slug(name)
+    if slug is None:
+        if (name or "").strip().lower().startswith("composio."):
+            return False
+        slug = (name or "").strip()
+    if not slug:
+        return False
+    action = slug.upper()
+    grants = parse_composio_write_allowlist(raw)
+    if toolkit is not None:
+        return (toolkit.strip().lower(), action) in grants
+    prefix = action.split("_", 1)[0].lower()
+    return (prefix, action) in grants
+
+
+def composio_unlisted_write(name: str) -> bool:
+    slug = composio_public_slug(name)
+    if slug is None or not composio_slug_is_mutating(slug):
+        return False
+    return not composio_write_allowlisted(name)
+
+
 class PolicyGate:
     """Authorization outside the LLM. Unknown or dangerous acts fail closed."""
 
@@ -205,6 +290,15 @@ class PolicyGate:
                 reason=f"Organization {op} requires human approval",
                 org_op=op,
             )
+        if request.action == "tool_use":
+            tool_name = (request.tool or "").strip()
+            if tool_is_opted_in_composio(tool_name) and composio_write_allowlisted(tool_name):
+                return ApprovalRequirement(
+                    action="tool_use",
+                    question=f"Approve mutating Composio action '{tool_name}'? Reply approve or deny.",
+                    reason="Allowlisted Composio write requires human approval",
+                    scope=f"composio_write:{tool_name.lower()}",
+                )
         return None
 
     def check_tool_budget(self, mission: Mission, used: int) -> None:
@@ -252,6 +346,11 @@ class PolicyGate:
             and not tool_is_opted_in_composio(name)
         ):
             raise PolicyError(f"Tool '{name}' is denied by default", FailureClass.POLICY_REFUSAL)
+        if composio_unlisted_write(name):
+            raise PolicyError(
+                f"Composio write '{name}' is not allowlisted",
+                FailureClass.POLICY_REFUSAL,
+            )
 
     def _authorize_org_change(self, request: PolicyRequest) -> None:
         op = (request.org_op or "").strip()
