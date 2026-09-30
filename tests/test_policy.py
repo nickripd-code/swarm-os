@@ -170,11 +170,45 @@ def test_composio_is_external_and_requires_explicit_configuration(monkeypatch):
         gate.authorize(_request(action="tool_use", mission=cloud, tool="composio.GMAIL_FETCH_EMAILS"))
 
     monkeypatch.setenv("COMPOSIO_API_KEY", "configured")
+    monkeypatch.delenv("COMPOSIO_WRITE_ALLOWLIST", raising=False)
     assert tool_is_opted_in_composio("composio.GMAIL_FETCH_EMAILS")
     gate.authorize(_request(action="tool_use", mission=cloud, tool="composio.GMAIL_FETCH_EMAILS"))
+    assert gate.approval_required(
+        _request(action="tool_use", mission=cloud, tool="composio.GMAIL_FETCH_EMAILS")
+    ) is None
     with pytest.raises(PolicyError) as exc:
         gate.authorize(_request(action="tool_use", mission=local, tool="composio.GMAIL_FETCH_EMAILS"))
     assert "local_only" in str(exc.value)
+    with pytest.raises(PolicyError) as refused:
+        gate.authorize(_request(action="tool_use", mission=cloud, tool="composio.GITHUB_CREATE_ISSUE"))
+    assert refused.value.failure_class == FailureClass.POLICY_REFUSAL
+    assert "not allowlisted" in str(refused.value)
+
+
+def test_allowlisted_composio_write_requires_approval_and_stays_local_only_blocked(monkeypatch):
+    gate = PolicyGate()
+    cloud = Mission(goal="cloud")
+    local = Mission(goal="private", privacy="local_only")
+    monkeypatch.setenv("COMPOSIO_API_KEY", "configured")
+    monkeypatch.setenv("COMPOSIO_WRITE_ALLOWLIST", "github:GITHUB_CREATE_ISSUE, nope")
+    gate.authorize(_request(action="tool_use", mission=cloud, tool="composio.GITHUB_GET_REPOSITORY"))
+    assert gate.approval_required(
+        _request(action="tool_use", mission=cloud, tool="composio.GITHUB_GET_REPOSITORY")
+    ) is None
+    write = _request(action="tool_use", mission=cloud, tool="composio.GITHUB_CREATE_ISSUE")
+    gate.authorize(write)
+    needed = gate.approval_required(write)
+    assert needed is not None
+    assert needed.action == "tool_use"
+    assert needed.scope == "composio_write:composio.github_create_issue"
+    with pytest.raises(PolicyError) as exc:
+        gate.authorize(_request(action="tool_use", mission=local, tool="composio.GITHUB_CREATE_ISSUE"))
+    assert exc.value.failure_class == FailureClass.POLICY_REFUSAL
+    assert "local_only" in str(exc.value)
+    monkeypatch.setenv("COMPOSIO_WRITE_ALLOWLIST", "gmail:GITHUB_CREATE_ISSUE")
+    with pytest.raises(PolicyError) as mismatched:
+        gate.authorize(_request(action="tool_use", mission=cloud, tool="composio.GITHUB_CREATE_ISSUE"))
+    assert mismatched.value.failure_class == FailureClass.POLICY_REFUSAL
 
 
 def test_token_budget_is_independent_of_payment_spent():
